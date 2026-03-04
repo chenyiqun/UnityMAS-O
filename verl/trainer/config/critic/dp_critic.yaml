@@ -1,0 +1,129 @@
+# Format checks enforced on CI:
+# 1. Comments must appear above each field.
+# 2. There must be a blank line between each field.
+# 3. Inline comments (after a field on the same line) are not allowed.
+# 4. Indentation level is respected for nested fields.
+
+# defaults specify the default config from each component
+defaults:
+
+  # fsdp optimizer config
+  - ../optim@optim: fsdp
+
+  # fsdp engine config
+  - ../engine@model.fsdp_config: fsdp
+
+  # dp actor config, inheriting from trainer/config/critic/critic.yaml
+  - critic
+
+  # load the reference default config, then apply the fields in the current yaml
+  - _self_
+
+# Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+_target_: verl.workers.config.FSDPCriticConfig
+
+# distribution strategy. Options: fsdp (deprecating), fsdp2
+strategy: fsdp
+
+# model config for the critic
+model:
+
+  # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
+  _target_: verl.workers.config.FSDPCriticModelCfg
+
+  # Whether to use shared memory for loading the model
+  use_shm: False
+
+  # Enable gradient checkpointing to save memory
+  enable_gradient_checkpointing: True
+
+  # Offload activations to CPU to reduce GPU memory usage
+  enable_activation_offload: False
+
+  # Use remove padding optimization (saves compute)
+  use_remove_padding: False
+
+  # Set to positive value to enable LoRA (e.g., 32)
+  lora_rank: 0
+
+  # LoRA scaling factor
+  lora_alpha: 16
+
+  # LoRA target modules: "all-linear" or list of linear projection layers
+  target_modules: all-linear
+
+  # TiledMLP configuration for memory-efficient MLP computation.
+  tiled_mlp:
+
+    # whether to enable TiledMLP
+    enabled: False
+
+    # number of shards to split the input
+    num_shards: 4
+
+  # Value head configuration for critic.
+  value_head:
+
+    # Head type: linear | mlp | gated_mlp | moe
+    type: linear
+
+    # Number of value outputs per token (e.g., 10 rubric criteria)
+    num_outputs: 1
+
+    # Hidden dim for mlp / gated_mlp / moe expert MLP
+    hidden_dim: null
+
+    # Activation for mlp / gated_mlp / moe
+    activation: silu
+
+    # Dropout inside custom head
+    dropout: 0.0
+
+    # Bias for custom head linears
+    bias: true
+
+    # MoE-specific: number of experts
+    num_experts: 4
+
+    # MoE-specific: top-k experts per token
+    top_k: 2
+
+    # Key used as supervision target in critic.update_critic
+    # Set this to your rubric tensor key if you don't use `returns`.
+    target_key: returns
+
+    # If compute_values outputs multi-head values, they are stored under this key
+    old_value_key: values_multi
+
+    # Whether to include old_value_key tensor in compute_values output
+    return_multi_values: true
+
+    # Reduce multi-head values to scalar for PPO advantage:
+    # mean | weighted_mean | none
+    reduce_mode_for_advantage: mean
+
+    # Reduce multi-head losses in critic training:
+    # mean | weighted_mean
+    loss_reduce_mode: mean
+
+    # Used when reduce_mode_* is weighted_mean
+    head_weights: null
+
+    # Keep PPO-style value clipping on/off for critic loss
+    enable_value_clipping: true
+
+    # Log per-head vf loss metrics
+    log_per_head_metrics: false
+
+# Forward-only batch size during inference (global)
+forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
+
+# Forward-only batch size during inference (per GPU)
+forward_micro_batch_size_per_gpu: ${oc.select:.ppo_micro_batch_size_per_gpu,null}
+
+# Sequence parallelism size for Ulysses-style model parallelism
+# [DEPRECATED] use fsdp_config.ulysses_sequence_parallel_size instead
+ulysses_sequence_parallel_size: 1
+
+# Gradient clipping for critic updates
+grad_clip: 1.0
