@@ -250,5 +250,3 @@ class FSDPCriticModelCfg(BaseModelConfig):
     target_modules: str | list[str] = "all-linear"
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
-    # Value head config for critic. Supports multi-output and custom structures.
-    value_head: dict = field(default_factory=lambda: {"type": "linear", "num_outputs": 1})

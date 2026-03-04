@@ -20,7 +20,7 @@ import os
 import re
 import warnings
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import torch
@@ -618,241 +618,8 @@ def patch_valuehead_model(model) -> None:
     model._no_split_modules = getattr(model.pretrained_model, "_no_split_modules", [])
 
 
-def _get_activation_module(name: str) -> nn.Module:
-    name = name.lower()
-    if name in ("gelu",):
-        return nn.GELU()
-    if name in ("relu",):
-        return nn.ReLU()
-    if name in ("silu", "swish"):
-        return nn.SiLU()
-    if name in ("tanh",):
-        return nn.Tanh()
-    raise ValueError(f"Unsupported value head activation: {name}")
-
-
-class TokenValueGatedMLPHead(nn.Module):
-    """Token-wise gated MLP value head."""
-
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        hidden_dim: int,
-        activation: str = "silu",
-        dropout: float = 0.0,
-        bias: bool = True,
-    ):
-        super().__init__()
-        self.gate_proj = nn.Linear(input_dim, hidden_dim, bias=bias)
-        self.up_proj = nn.Linear(input_dim, hidden_dim, bias=bias)
-        self.down_proj = nn.Linear(hidden_dim, output_dim, bias=bias)
-        self.act = _get_activation_module(activation)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        gate = self.act(self.gate_proj(hidden_states))
-        up = self.up_proj(hidden_states)
-        fused = self.dropout(gate * up)
-        return self.down_proj(fused)
-
-
-class TokenValueMoEHead(nn.Module):
-    """Token-wise sparse MoE value head."""
-
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        num_experts: int = 4,
-        top_k: int = 2,
-        hidden_dim: Optional[int] = None,
-        activation: str = "silu",
-        dropout: float = 0.0,
-        bias: bool = True,
-    ):
-        super().__init__()
-        if num_experts < 1:
-            raise ValueError(f"num_experts must be >= 1, got {num_experts}")
-        if top_k < 1:
-            raise ValueError(f"top_k must be >= 1, got {top_k}")
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.num_experts = num_experts
-        self.top_k = min(top_k, num_experts)
-        hidden_dim = hidden_dim or input_dim
-
-        self.router = nn.Linear(input_dim, num_experts, bias=False)
-        act = _get_activation_module(activation)
-        self.experts = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(input_dim, hidden_dim, bias=bias),
-                    act.__class__(),
-                    nn.Dropout(dropout),
-                    nn.Linear(hidden_dim, output_dim, bias=bias),
-                )
-                for _ in range(num_experts)
-            ]
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        original_shape = hidden_states.shape[:-1]
-        tokens = hidden_states.reshape(-1, self.input_dim)
-
-        router_logits = self.router(tokens)
-        topk_logits, topk_indices = torch.topk(router_logits, k=self.top_k, dim=-1)
-        topk_weights = torch.softmax(topk_logits, dim=-1, dtype=torch.float32).to(tokens.dtype)
-
-        expert_outputs = torch.stack([expert(tokens) for expert in self.experts], dim=1)
-        selected_outputs = torch.gather(
-            expert_outputs,
-            dim=1,
-            index=topk_indices.unsqueeze(-1).expand(-1, -1, self.output_dim),
-        )
-        mixed = (selected_outputs * topk_weights.unsqueeze(-1)).sum(dim=1)
-        return mixed.view(*original_shape, self.output_dim)
-
-
-def _normalize_config_obj(config_obj):
-    try:
-        from omegaconf import OmegaConf
-
-        if OmegaConf.is_config(config_obj):
-            config_obj = OmegaConf.to_container(config_obj, resolve=True)
-    except Exception:
-        pass
-
-    if isinstance(config_obj, dict):
-        return {k: _normalize_config_obj(v) for k, v in config_obj.items()}
-    if isinstance(config_obj, (list, tuple)):
-        return [_normalize_config_obj(v) for v in config_obj]
-    return config_obj
-
-
-def _resolve_hidden_size_from_config(model_config: PretrainedConfig) -> int:
-    hidden_size = getattr(model_config, "hidden_size", None)
-    if hidden_size is None and hasattr(model_config, "text_config"):
-        hidden_size = getattr(model_config.text_config, "hidden_size", None)
-    if hidden_size is None:
-        raise ValueError("Unable to resolve hidden_size from model config for custom value head")
-    return int(hidden_size)
-
-
-def _find_token_cls_head_attr(model: nn.Module) -> str:
-    for attr in ("score", "classifier", "classification_head"):
-        module = getattr(model, attr, None)
-        if isinstance(module, nn.Module):
-            return attr
-    raise ValueError(
-        f"Cannot find token classification head attr on model type {type(model).__name__}. "
-        "Expected one of ['score', 'classifier', 'classification_head']."
-    )
-
-
-def _build_custom_value_head(
-    head_type: str,
-    input_dim: int,
-    output_dim: int,
-    head_cfg: dict[str, Any],
-    default_bias: bool,
-) -> nn.Module:
-    head_type = head_type.lower()
-    bias = bool(head_cfg.get("bias", default_bias))
-    if head_type == "linear":
-        return nn.Linear(input_dim, output_dim, bias=bias)
-
-    hidden_dim = int(head_cfg.get("hidden_dim", input_dim))
-    activation = head_cfg.get("activation", "silu")
-    dropout = float(head_cfg.get("dropout", 0.0))
-
-    if head_type == "mlp":
-        return nn.Sequential(
-            nn.Linear(input_dim, hidden_dim, bias=bias),
-            _get_activation_module(activation),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, output_dim, bias=bias),
-        )
-    if head_type in ("gated_mlp", "swiglu"):
-        return TokenValueGatedMLPHead(
-            input_dim=input_dim,
-            output_dim=output_dim,
-            hidden_dim=hidden_dim,
-            activation=activation,
-            dropout=dropout,
-            bias=bias,
-        )
-    if head_type == "moe":
-        return TokenValueMoEHead(
-            input_dim=input_dim,
-            output_dim=output_dim,
-            num_experts=int(head_cfg.get("num_experts", 4)),
-            top_k=int(head_cfg.get("top_k", 2)),
-            hidden_dim=hidden_dim,
-            activation=activation,
-            dropout=dropout,
-            bias=bias,
-        )
-    raise ValueError(f"Unsupported value head type: {head_type}")
-
-
-def _apply_custom_token_value_head(
-    model: nn.Module,
-    model_config: PretrainedConfig,
-    value_head_config: Optional[dict[str, Any]],
-) -> nn.Module:
-    value_head_config = _normalize_config_obj(value_head_config or {})
-    value_head_config = dict(value_head_config)
-    if not value_head_config:
-        return model
-
-    num_outputs = int(value_head_config.get("num_outputs", getattr(model_config, "num_labels", 1)))
-    head_type = value_head_config.get("type", "linear")
-
-    model_config.num_labels = num_outputs
-    if hasattr(model, "config"):
-        model.config.num_labels = num_outputs
-    if hasattr(model, "num_labels"):
-        model.num_labels = num_outputs
-
-    # No-op when keeping the stock 1-dim linear head.
-    if head_type == "linear" and num_outputs == 1 and not value_head_config.get("force_replace_head", False):
-        model.config.verl_value_head_config = value_head_config
-        return model
-
-    head_attr = _find_token_cls_head_attr(model)
-    old_head = getattr(model, head_attr)
-    hidden_size = _resolve_hidden_size_from_config(model_config)
-    default_bias = bool(getattr(old_head, "bias", None) is not None)
-    custom_head = _build_custom_value_head(
-        head_type=head_type,
-        input_dim=hidden_size,
-        output_dim=num_outputs,
-        head_cfg=value_head_config,
-        default_bias=default_bias,
-    )
-
-    reference_param = next(old_head.parameters(), None)
-    if reference_param is None:
-        reference_param = next(model.parameters())
-    custom_head.to(device=reference_param.device, dtype=reference_param.dtype)
-    setattr(model, head_attr, custom_head)
-
-    model.config.verl_value_head_config = value_head_config
-    return model
-
-
-def load_valuehead_model(
-    local_path,
-    torch_dtype,
-    model_config,
-    trust_remote_code,
-    value_head_config: Optional[dict[str, Any]] = None,
-):
+def load_valuehead_model(local_path, torch_dtype, model_config, trust_remote_code):
     from transformers import AutoModelForCausalLM, AutoModelForTokenClassification, AutoModelForVision2Seq
-
-    if value_head_config is None:
-        value_head_config = getattr(model_config, "verl_value_head_config", None)
 
     try:
         model = AutoModelForTokenClassification.from_pretrained(
@@ -862,11 +629,6 @@ def load_valuehead_model(
             attn_implementation="flash_attention_2",
             trust_remote_code=trust_remote_code,
         )
-        model = _apply_custom_token_value_head(
-            model=model,
-            model_config=model_config,
-            value_head_config=value_head_config,
-        )
         return model
     except BaseException as e:
         if not is_trl_available():
@@ -875,16 +637,6 @@ def load_valuehead_model(
             ) from e
 
     assert is_trl_available()
-
-    value_head_config = _normalize_config_obj(value_head_config or {})
-    value_head_config = dict(value_head_config)
-    num_outputs = int(value_head_config.get("num_outputs", 1))
-    head_type = value_head_config.get("type", "linear")
-    if num_outputs != 1 or head_type.lower() != "linear":
-        raise RuntimeError(
-            f"model({local_path}) does not support AutoModelForTokenClassification path, "
-            "and fallback TRL value head currently only supports single linear head."
-        )
 
     from trl import AutoModelForCausalLMWithValueHead
 

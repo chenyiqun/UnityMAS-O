@@ -1288,8 +1288,6 @@ class CriticWorker(Worker, DistProfilerExtension):
 
         torch_dtype = self.config.model.fsdp_config.get("model_dtype", "fp32")
         torch_dtype = PrecisionType.to_dtype(torch_dtype)
-        value_head_config = self.config.model.get("value_head", {})
-        num_value_outputs = int(value_head_config.get("num_outputs", 1))
 
         from transformers import AutoConfig
 
@@ -1306,7 +1304,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         if self.ulysses_sequence_parallel_size > 1 and hasattr(critic_model_config, "vision_config"):
             critic_model_config.vision_config._attn_implementation = "eager"
 
-        critic_model_config.num_labels = num_value_outputs
+        critic_model_config.num_labels = 1
         # patch for kimi-vl
         if getattr(critic_model_config, "model_type", None) == "kimi_vl":
             critic_model_config.text_config.topk_method = "greedy"
@@ -1335,7 +1333,6 @@ class CriticWorker(Worker, DistProfilerExtension):
                 torch_dtype,
                 critic_model_config,
                 config.model.get("trust_remote_code", False),
-                value_head_config=value_head_config,
             )
 
             use_remove_padding = config.model.get("use_remove_padding", False)
@@ -1551,10 +1548,7 @@ class CriticWorker(Worker, DistProfilerExtension):
         with self.ulysses_sharding_manager:
             data = data.to("cpu")  # data will to device with each micro batch on critic.compute_values
             values = self.critic.compute_values(data=data)
-            if isinstance(values, dict):
-                output = DataProto.from_dict(tensors=values)
-            else:
-                output = DataProto.from_dict(tensors={"values": values})
+            output = DataProto.from_dict(tensors={"values": values})
 
         output = output.to("cpu")
         if self._is_offload_param:

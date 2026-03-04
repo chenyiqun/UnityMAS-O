@@ -61,60 +61,6 @@ model:
     # number of shards to split the input
     num_shards: 4
 
-  # Value head configuration for critic.
-  value_head:
-
-    # Head type: linear | mlp | gated_mlp | moe
-    type: linear
-
-    # Number of value outputs per token (e.g., 10 rubric criteria)
-    num_outputs: 1
-
-    # Hidden dim for mlp / gated_mlp / moe expert MLP
-    hidden_dim: null
-
-    # Activation for mlp / gated_mlp / moe
-    activation: silu
-
-    # Dropout inside custom head
-    dropout: 0.0
-
-    # Bias for custom head linears
-    bias: true
-
-    # MoE-specific: number of experts
-    num_experts: 4
-
-    # MoE-specific: top-k experts per token
-    top_k: 2
-
-    # Key used as supervision target in critic.update_critic
-    # Set this to your rubric tensor key if you don't use `returns`.
-    target_key: returns
-
-    # If compute_values outputs multi-head values, they are stored under this key
-    old_value_key: values_multi
-
-    # Whether to include old_value_key tensor in compute_values output
-    return_multi_values: true
-
-    # Reduce multi-head values to scalar for PPO advantage:
-    # mean | weighted_mean | none
-    reduce_mode_for_advantage: mean
-
-    # Reduce multi-head losses in critic training:
-    # mean | weighted_mean
-    loss_reduce_mode: mean
-
-    # Used when reduce_mode_* is weighted_mean
-    head_weights: null
-
-    # Keep PPO-style value clipping on/off for critic loss
-    enable_value_clipping: true
-
-    # Log per-head vf loss metrics
-    log_per_head_metrics: false
-
 # Forward-only batch size during inference (global)
 forward_micro_batch_size: ${oc.select:.ppo_micro_batch_size,null}
 
