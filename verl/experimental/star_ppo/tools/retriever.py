@@ -1,6 +1,9 @@
 import json
+import random
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any
+from urllib import error, request
 
 
 class RetrieverToolInterface(ABC):
@@ -12,16 +15,76 @@ class RetrieverToolInterface(ABC):
 
 
 class HttpRetrieverTool(RetrieverToolInterface):
-    """Placeholder retriever for external service integration."""
+    """HTTP retrieval adapter for query(question, N) style APIs."""
 
-    def __init__(self, endpoint: str):
-        self.endpoint = endpoint
+    def __init__(self, api_urls: list[str], timeout_seconds: float = 5.0):
+        if not api_urls:
+            raise ValueError("api_urls list cannot be empty")
+        self.api_urls = [str(x) for x in api_urls if str(x).strip()]
+        if not self.api_urls:
+            raise ValueError("api_urls must contain at least one valid URL")
+        self.timeout_seconds = float(timeout_seconds)
+
+    @staticmethod
+    def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> Any:
+        req = request.Request(
+            url=url,
+            method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        with request.urlopen(req, timeout=timeout_seconds) as resp:
+            body = resp.read().decode("utf-8")
+        return json.loads(body)
+
+    @staticmethod
+    def _extract_top_k_docs(resp_obj: Any) -> list[dict[str, Any]]:
+        # Expected format:
+        # [{"top_k_docs": [...]}, ...]
+        if isinstance(resp_obj, list) and len(resp_obj) > 0 and isinstance(resp_obj[0], dict):
+            docs = resp_obj[0].get("top_k_docs", None)
+            if isinstance(docs, list):
+                out = []
+                for item in docs:
+                    if isinstance(item, dict):
+                        out.append(item)
+                    else:
+                        out.append({"text": str(item)})
+                return out
+        raise ValueError("Unexpected API response format: expecting list[{'top_k_docs': list}]")
+
+    def query(self, question: str, N: int, max_attempts: int = 5) -> list[dict[str, Any]]:
+        payload = {"questions": [str(question)], "N": int(N)}
+        attempts = 0
+        tried_urls: set[str] = set()
+
+        while attempts < max_attempts:
+            available_urls = [url for url in self.api_urls if url not in tried_urls]
+            if not available_urls:
+                available_urls = self.api_urls
+
+            api_url = random.choice(available_urls)
+            tried_urls.add(api_url)
+            try:
+                data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
+                return self._extract_top_k_docs(data)
+            except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
+                attempts += 1
+
+        raise RuntimeError(f"Request failed after {max_attempts} attempts")
 
     def retrieve(self, query: str, top_k: int) -> list[str]:
-        raise NotImplementedError(
-            f"HTTP retriever interface is ready but not implemented. endpoint={self.endpoint}. "
-            "Please implement POST /retrieve with payload {'query': str, 'top_k': int}."
-        )
+        docs = self.query(question=query, N=top_k)
+        out: list[str] = []
+        for doc in docs:
+            if not isinstance(doc, dict):
+                out.append(str(doc))
+                continue
+            text = doc.get("text", None)
+            if text is None:
+                text = doc.get("document", doc.get("content", json.dumps(doc, ensure_ascii=False)))
+            out.append(str(text))
+        return out
 
 
 class SimpleKeywordRetrieverTool(RetrieverToolInterface):
@@ -88,9 +151,13 @@ def _load_docs_from_path(path: str) -> list[str]:
 def build_retriever_tool(retriever_cfg) -> RetrieverToolInterface:
     retriever_type = str(retriever_cfg.get("type", "simple_keyword"))
 
-    if retriever_type == "http":
-        endpoint = str(retriever_cfg.get("endpoint", "http://127.0.0.1:8000/retrieve"))
-        return HttpRetrieverTool(endpoint=endpoint)
+    if retriever_type in {"http", "query_api_pool", "retrieval_api_pool"}:
+        api_urls = list(retriever_cfg.get("api_urls", []))
+        endpoint = retriever_cfg.get("endpoint", None)
+        if endpoint is not None and len(api_urls) == 0:
+            api_urls = [str(endpoint)]
+        timeout_seconds = float(retriever_cfg.get("timeout_seconds", 5.0))
+        return HttpRetrieverTool(api_urls=api_urls, timeout_seconds=timeout_seconds)
 
     docs = []
     for item in retriever_cfg.get("documents", []):
@@ -100,3 +167,7 @@ def build_retriever_tool(retriever_cfg) -> RetrieverToolInterface:
         docs.extend(_load_docs_from_path(str(corpus_path)))
     docs = [x for x in docs if x]
     return SimpleKeywordRetrieverTool(documents=docs)
+
+
+# Alias to align with externally referenced class name.
+RetrievalTool = HttpRetrieverTool

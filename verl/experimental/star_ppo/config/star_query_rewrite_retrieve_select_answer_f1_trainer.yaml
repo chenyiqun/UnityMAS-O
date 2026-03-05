@@ -1,0 +1,150 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - star_ppo_trainer
+  - _self_
+
+trainer:
+  experiment_name: star_qr_retrieve_select_answer_f1
+  llm_engines:
+    - model_id: rewrite_agent_7b
+      nnodes: 1
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: null
+    - model_id: selector_agent_7b
+      nnodes: 1
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: null
+    - model_id: answer_agent_14b
+      nnodes: 2
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: null
+  routing:
+    policy: epoch_dynamic
+    refresh_every_epoch: true
+
+data:
+  # Replace with your own parquet files.
+  train_files: /path/to/train.parquet
+  val_files: /path/to/val.parquet
+
+star:
+  workflow:
+    name: graph_query_rewrite_retrieve_select_answer
+    max_inflight_queries: 32
+    max_parallel_rollouts_per_model: 32
+    runner:
+      path: verl.experimental.star_ppo.workflows.graph_workflow
+      name: GraphWorkflowRunner
+    # HotpotQA-like parquet rows:
+    # - extra_info.question
+    # - extra_info.answer
+    # - reward_model.ground_truth
+    question_candidates: ["question", "query", "problem", "extra_info.question"]
+    ground_truth_candidates: ["answer", "ground_truth", "extra_info.answer", "reward_model.ground_truth", "reward_model"]
+    tools:
+      retriever:
+        # Built-in adapter with query(question, N, max_attempts).
+        type: query_api_pool
+        api_urls: ["http://127.0.0.1:8000/retrieve"]
+        timeout_seconds: 5
+    graph:
+      start_nodes: ["rewrite"]
+      end_nodes: ["answer"]
+      max_steps: 8
+      stop_on_end: true
+      outcome_reward:
+        type: f1
+        source: answer.final_answer
+        weight: 1.0
+      nodes:
+        rewrite:
+          type: llm
+          model_id: rewrite_agent_7b
+          agent_id: rewrite_agent
+          output_key: rewritten_query
+          parser:
+            type: tag
+            open_tag: "<rewrite_query>"
+            close_tag: "</rewrite_query>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are the query rewrite agent.
+            Rewrite the question into a concise retrieval query.
+            Output format MUST be:
+            <rewrite_query>your rewritten query</rewrite_query>
+            Question: {question}
+          next:
+            - to: retrieve
+
+        retrieve:
+          type: tool
+          tool: retriever
+          input_template: "{rewrite.rewritten_query}"
+          top_k: 8
+          max_attempts: 5
+          output_key: retrieved_docs
+          next:
+            - to: select_docs
+
+        select_docs:
+          type: llm
+          model_id: selector_agent_7b
+          agent_id: select_docs_agent
+          output_key: selected_docs
+          parser:
+            type: tag
+            open_tag: "<selected_docs>"
+            close_tag: "</selected_docs>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are the document selection agent.
+            Select the most relevant evidence for answering the question.
+            Output format MUST be:
+            <selected_docs>concise selected evidence</selected_docs>
+            Question: {question}
+            Rewritten Query: {rewrite.rewritten_query}
+            Retrieved Documents:
+            {retrieve.retrieved_docs}
+          next:
+            - to: answer
+
+        answer:
+          type: llm
+          model_id: answer_agent_14b
+          agent_id: answer_agent
+          output_key: final_answer
+          parser:
+            type: tag
+            open_tag: "<final_answer>"
+            close_tag: "</final_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are the final answer agent.
+            Generate the final answer from selected evidence.
+            Output format MUST be:
+            <final_answer>final short answer</final_answer>
+            Question: {question}
+            Selected Evidence:
+            {select_docs.selected_docs}
+          next: []

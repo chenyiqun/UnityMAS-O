@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections import defaultdict
+import string
+from collections import Counter, defaultdict
 from typing import Any
 
 import numpy as np
@@ -49,11 +50,21 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.max_steps = int(self.graph_cfg.get("max_steps", 16))
         self.stop_on_end = bool(self.graph_cfg.get("stop_on_end", True))
         self.max_inflight_queries = int(self.workflow_cfg.get("max_inflight_queries", 32))
-        self.question_candidates = list(self.workflow_cfg.get("question_candidates", ["question", "query", "problem"]))
+        self.question_candidates = list(
+            self.workflow_cfg.get("question_candidates", ["question", "query", "problem", "extra_info.question"])
+        )
         self.gt_candidates = list(
             self.workflow_cfg.get(
                 "ground_truth_candidates",
-                ["ground_truth", "answer", "target", "golden_answers", "reward_model"],
+                [
+                    "ground_truth",
+                    "answer",
+                    "target",
+                    "golden_answers",
+                    "extra_info.answer",
+                    "reward_model.ground_truth",
+                    "reward_model",
+                ],
             )
         )
         self.outcome_cfg = self.graph_cfg.get("outcome_reward", {"type": "em", "source": "", "weight": 1.0})
@@ -64,7 +75,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         tools = {}
         for alias, tool_cfg in dict(self.workflow_cfg.get("tools", {})).items():
             # Built-in retriever adapters.
-            if str(tool_cfg.get("type", "")) in {"simple_keyword", "http"}:
+            if str(tool_cfg.get("type", "")) in {"simple_keyword", "http", "query_api_pool", "retrieval_api_pool"}:
                 tools[alias] = build_retriever_tool(tool_cfg)
                 continue
 
@@ -133,7 +144,17 @@ class GraphWorkflowRunner(WorkflowRunner):
         if v is None:
             return ""
         if isinstance(v, list | tuple):
-            return "\n".join([str(x) for x in v])
+            return "\n".join([GraphWorkflowRunner._as_template_value(x) for x in v])
+        if isinstance(v, dict):
+            if "text" in v:
+                return str(v["text"])
+            if "document" in v:
+                return str(v["document"])
+            if "content" in v:
+                return str(v["content"])
+            if "title" in v and "snippet" in v:
+                return f"{v['title']}: {v['snippet']}"
+            return str(v)
         return str(v)
 
     def _lookup_path(self, context: dict[str, Any], dotted: str, default: Any = "") -> Any:
@@ -156,6 +177,79 @@ class GraphWorkflowRunner(WorkflowRunner):
 
         s = re.sub(r"\{([a-zA-Z0-9_.]+)\}", repl, s)
         return s.replace("\0L", "{").replace("\0R", "}")
+
+    @staticmethod
+    def _dict_lookup(value: Any, dotted: str) -> Any:
+        cur = value
+        for key in str(dotted).split("."):
+            if isinstance(cur, dict) and key in cur:
+                cur = cur[key]
+            else:
+                return None
+        return cur
+
+    def _extract_from_batch(self, query_batch: DataProto, key_or_path: str) -> Any:
+        key_or_path = str(key_or_path)
+        if key_or_path in query_batch.non_tensor_batch:
+            vec = query_batch.non_tensor_batch[key_or_path]
+            return vec[0] if len(vec) > 0 else None
+
+        parts = key_or_path.split(".")
+        if len(parts) <= 1:
+            return None
+        root = parts[0]
+        if root not in query_batch.non_tensor_batch:
+            return None
+        root_vec = query_batch.non_tensor_batch[root]
+        if len(root_vec) == 0:
+            return None
+        return self._dict_lookup(root_vec[0], ".".join(parts[1:]))
+
+    @staticmethod
+    def _to_str_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            v = value.strip()
+            return [v] if v else []
+        if isinstance(value, dict):
+            for key in ("ground_truth", "answer", "target", "golden_answers"):
+                if key in value:
+                    return GraphWorkflowRunner._to_str_list(value[key])
+            return [str(value)]
+        if isinstance(value, np.ndarray):
+            return [str(x).strip() for x in value.tolist() if str(x).strip()]
+        if isinstance(value, list | tuple):
+            return [str(x).strip() for x in value if str(x).strip()]
+        v = str(value).strip()
+        return [v] if v else []
+
+    @staticmethod
+    def _extract_question_from_messages(messages: Any) -> str:
+        if not isinstance(messages, list):
+            return ""
+        for msg in reversed(messages):
+            if not isinstance(msg, dict):
+                continue
+            if str(msg.get("role", "")).lower() != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content.strip()
+            if isinstance(content, list):
+                texts = []
+                for x in content:
+                    if isinstance(x, dict):
+                        if x.get("type") == "text":
+                            texts.append(str(x.get("text", "")))
+                        elif "text" in x:
+                            texts.append(str(x.get("text", "")))
+                    else:
+                        texts.append(str(x))
+                merged = "".join(texts).strip()
+                if merged:
+                    return merged
+        return ""
 
     def _eval_when(self, when_expr: str | None, context: dict[str, Any]) -> bool:
         if when_expr is None or str(when_expr).strip() == "":
@@ -190,16 +284,50 @@ class GraphWorkflowRunner(WorkflowRunner):
                 value = str(obj.get(str(parser.get("key", output_key)), "")).strip()
                 return value, 1.0 if value else 0.0
             return raw_text.strip(), 0.0
+        if parser_type in {"tag", "tag_between"}:
+            tag = str(parser.get("tag", "")).strip()
+            open_tag = str(parser.get("open_tag", f"<{tag}>" if tag else "")).strip()
+            close_tag = str(parser.get("close_tag", f"</{tag}>" if tag else "")).strip()
+            valid_reward = float(parser.get("valid_reward", 0.0))
+            invalid_reward = float(parser.get("invalid_reward", -1.0))
+            if not open_tag or not close_tag:
+                return raw_text.strip(), invalid_reward
+            start_idx = raw_text.find(open_tag)
+            if start_idx < 0:
+                return raw_text.strip(), invalid_reward
+            start_idx += len(open_tag)
+            end_idx = raw_text.find(close_tag, start_idx)
+            if end_idx < 0:
+                return raw_text.strip(), invalid_reward
+            value = raw_text[start_idx:end_idx].strip()
+            if not value:
+                return raw_text.strip(), invalid_reward
+            return value, valid_reward
         value = raw_text.strip()
         return value, 1.0 if value else 0.0
 
     def _extract_question(self, query_batch: DataProto) -> str:
-        vec = self.trainer._extract_string_vector(query_batch, self.question_candidates, default="")
-        return str(vec[0]) if len(vec) > 0 else ""
+        for key in self.question_candidates:
+            value = self._extract_from_batch(query_batch, key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        prompt = self._extract_from_batch(query_batch, "prompt")
+        parsed = self._extract_question_from_messages(prompt)
+        if parsed:
+            return parsed
+        raw_prompt = self._extract_from_batch(query_batch, "raw_prompt")
+        parsed = self._extract_question_from_messages(raw_prompt)
+        if parsed:
+            return parsed
+        return ""
 
     def _extract_gt_list(self, query_batch: DataProto) -> list[str]:
-        gts = self.trainer._extract_ground_truth_lists(query_batch, self.gt_candidates)
-        return gts[0] if len(gts) > 0 else []
+        for key in self.gt_candidates:
+            value = self._extract_from_batch(query_batch, key)
+            gts = self._to_str_list(value)
+            if gts:
+                return gts
+        return []
 
     async def _execute_node(self, node_id: str, query_batch: DataProto, context: dict[str, Any]) -> dict[str, Any]:
         node_cfg = self.nodes[node_id]
@@ -238,13 +366,16 @@ class GraphWorkflowRunner(WorkflowRunner):
                 raise ValueError(f"tool node {node_id} references missing tool alias={tool_name}")
             tool = self.tools[tool_name]
             input_text = self._render_template(str(node_cfg.get("input_template", "{question}")), context)
-            if hasattr(tool, "retrieve"):
-                top_k = int(node_cfg.get("top_k", 3))
+            top_k = int(node_cfg.get("top_k", 3))
+            if hasattr(tool, "query"):
+                max_attempts = int(node_cfg.get("max_attempts", 5))
+                output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
+            elif hasattr(tool, "retrieve"):
                 output = await asyncio.to_thread(tool.retrieve, input_text, top_k)
             elif callable(tool):
                 output = await asyncio.to_thread(tool, input_text)
             else:
-                raise TypeError(f"tool {tool_name} is not callable and has no retrieve()")
+                raise TypeError(f"tool {tool_name} is not callable and has no query()/retrieve()")
             output_key = str(node_cfg.get("output_key", "output"))
             context["nodes"][node_id] = {
                 "input": input_text,
@@ -261,14 +392,41 @@ class GraphWorkflowRunner(WorkflowRunner):
         raise ValueError(f"Unsupported node type for {node_id}: {node_type}")
 
     def _compute_outcome_reward(self, context: dict[str, Any]) -> float:
-        outcome_type = str(self.outcome_cfg.get("type", "em"))
-        if outcome_type != "em":
-            return 0.0
+        outcome_type = str(self.outcome_cfg.get("type", "em")).lower()
         source = str(self.outcome_cfg.get("source", ""))
         weight = float(self.outcome_cfg.get("weight", 1.0))
         pred = str(self._lookup_path(context, source, default=""))
         gt = context.get("ground_truth", [])
-        return weight * float(em_check(pred, gt)) if len(gt) > 0 else 0.0
+        if len(gt) <= 0:
+            return 0.0
+        if outcome_type == "em":
+            return weight * float(em_check(pred, gt))
+        if outcome_type == "f1":
+            return weight * float(max(self._f1_score(pred, str(ans)) for ans in gt))
+        return 0.0
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        s = str(text or "").lower()
+        s = "".join(ch for ch in s if ch not in string.punctuation)
+        s = re.sub(r"\b(a|an|the)\b", " ", s)
+        return " ".join(s.split())
+
+    @classmethod
+    def _f1_score(cls, pred: str, gt: str) -> float:
+        pred_tokens = cls._normalize_text(pred).split()
+        gt_tokens = cls._normalize_text(gt).split()
+        if not pred_tokens and not gt_tokens:
+            return 1.0
+        if not pred_tokens or not gt_tokens:
+            return 0.0
+        common = Counter(pred_tokens) & Counter(gt_tokens)
+        overlap = sum(common.values())
+        if overlap <= 0:
+            return 0.0
+        precision = overlap / float(len(pred_tokens))
+        recall = overlap / float(len(gt_tokens))
+        return 2.0 * precision * recall / (precision + recall)
 
     async def _run_one_query(self, query_batch: DataProto, query_sem: asyncio.Semaphore) -> dict[str, Any]:
         async with query_sem:
