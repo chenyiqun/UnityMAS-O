@@ -799,6 +799,51 @@ class StarRayTrainer:
             self._sync_rollout_weights(model_id, ctx)
         return self.global_steps
 
+    def _drain_rollout_ready_queues(self):
+        # Validation also uses thin->commit flow, so drain ready queue to avoid
+        # mixing validation trajectories into subsequent training updates.
+        for _, ctx in self.model_contexts.items():
+            _ = ctx.rollout_wg.build_ready_train_batch(max_items=0)
+
+    async def _run_validation(self, epoch: int, global_step: int) -> dict[str, float]:
+        max_batches = int(self.config.trainer.get("val_max_batches", -1))
+        batch_count = 0
+        reward_sum = 0.0
+        reward_count = 0
+        workflow_acc: dict[str, list[float]] = defaultdict(list)
+
+        for batch_idx, batch_dict in enumerate(self.val_dataloader):
+            if max_batches > 0 and batch_idx >= max_batches:
+                break
+            batch_count += 1
+            batch = DataProto.from_single_dict(batch_dict)
+            self._ensure_routing_fields(batch)
+            rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+
+            for key, val in workflow_metrics.items():
+                if isinstance(val, int | float):
+                    workflow_acc[key].append(float(val))
+
+            if len(rewards) > 0:
+                reward_vec = rewards.batch["reward"].detach().cpu().float().reshape(-1).numpy()
+                reward_sum += float(np.sum(reward_vec))
+                reward_count += int(reward_vec.shape[0])
+                # Commit to local buffers so worker-side trajectory states are consistent.
+                self._commit_rewards(rewards)
+                self._drain_rollout_ready_queues()
+
+        metrics: dict[str, float] = {
+            "validation/global_step": float(global_step),
+            "validation/epoch": float(epoch),
+            "validation/batches": float(batch_count),
+            "validation/samples": float(reward_count),
+            "validation/reward_mean": float(reward_sum / max(1, reward_count)),
+        }
+        for key, values in workflow_acc.items():
+            if values:
+                metrics[f"validation/{key}"] = float(np.mean(values))
+        return metrics
+
     async def fit(self):
         logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -810,6 +855,16 @@ class StarRayTrainer:
         global_step = self._load_checkpoint()
         self._global_step = global_step
         start_epoch = global_step // max(1, len(self.train_dataloader))
+        val_before_train = bool(self.config.trainer.get("val_before_train", False))
+        test_freq = int(self.config.trainer.get("test_freq", -1))
+
+        if val_before_train:
+            val_metrics = await self._run_validation(epoch=start_epoch, global_step=global_step)
+            logger.log(data=val_metrics, step=global_step)
+            print(f"[star] pre-train validation={val_metrics}")
+
+        if bool(self.config.trainer.get("val_only", False)):
+            return
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -837,6 +892,11 @@ class StarRayTrainer:
                     print(f"[star] step={global_step} commit={step_metrics}")
 
                 is_last_step = global_step >= self.total_training_steps
+                if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
+                    val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
+                    logger.log(data=val_metrics, step=global_step)
+                    print(f"[star] step={global_step} validation={val_metrics}")
+
                 if self.config.trainer.save_freq > 0 and (
                     is_last_step or global_step % self.config.trainer.save_freq == 0
                 ):

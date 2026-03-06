@@ -8,6 +8,13 @@ defaults:
 
 trainer:
   experiment_name: star_qr_retrieve_select_answer_f1
+  # Validation control:
+  # 1) run one validation pass before training starts
+  val_before_train: true
+  # 2) run validation every N training steps
+  test_freq: 50
+  # 3) save checkpoint every N training steps
+  save_freq: 50
   llm_engines:
     - model_id: rewrite_agent_7b
       nnodes: 1

@@ -14,6 +14,9 @@ REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:?REWRITE_MODEL_PATH is required}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:?SELECT_MODEL_PATH is required}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:?ANSWER_MODEL_PATH is required}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+TEST_FREQ="${TEST_FREQ:-50}"
+SAVE_FREQ="${SAVE_FREQ:-50}"
 
 ray stop -f >/dev/null 2>&1 || true
 
@@ -59,4 +62,7 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   trainer.llm_engines[1].model_path="${SELECT_MODEL_PATH}" \
   trainer.llm_engines[2].model_path="${ANSWER_MODEL_PATH}" \
   star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}" \
+  trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
+  trainer.test_freq="${TEST_FREQ}" \
+  trainer.save_freq="${SAVE_FREQ}" \
   trainer.logger='["console","wandb"]'

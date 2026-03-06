@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One-command entry for PyTorchJob:
+# - Fresh node: auto setup env + run
+# - Reused node: skip setup and run directly
+#
+# You can run the same script every time.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-verl}"
+FORCE_ENV_SETUP="${FORCE_ENV_SETUP:-false}"
+
+# Your defaults (can still be overridden by env vars from job config).
+TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/verl/data/gsm8k/train.parquet}"
+VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/verl/data/gsm8k/test.parquet}"
+REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
+SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
+ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-14B-Instruct}"
+
+# Replace with your real retriever endpoint pool if needed.
+RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
+
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+TEST_FREQ="${TEST_FREQ:-50}"
+SAVE_FREQ="${SAVE_FREQ:-50}"
+
+need_setup="false"
+if [[ "${FORCE_ENV_SETUP}" == "true" ]]; then
+  need_setup="true"
+elif [[ ! -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]; then
+  need_setup="true"
+else
+  # shellcheck disable=SC1090
+  source "${CONDA_ROOT}/etc/profile.d/conda.sh"
+  if ! conda env list | awk '{print $1}' | grep -Fxq "${CONDA_ENV_NAME}"; then
+    need_setup="true"
+  fi
+fi
+
+if [[ "${need_setup}" == "true" ]]; then
+  echo "[oneclick] env not ready (or FORCE_ENV_SETUP=true), will run setup."
+  export DO_ENV_SETUP=true
+else
+  echo "[oneclick] detected existing env '${CONDA_ENV_NAME}', skip setup."
+  export DO_ENV_SETUP=false
+fi
+
+export CONDA_ROOT CONDA_ENV_NAME
+export TRAIN_PARQUET VAL_PARQUET
+export REWRITE_MODEL_PATH SELECT_MODEL_PATH ANSWER_MODEL_PATH
+export RETRIEVAL_API_URLS_JSON
+export VAL_BEFORE_TRAIN TEST_FREQ SAVE_FREQ
+
+bash "${SCRIPT_DIR}/run_star_pytorchjob_bootstrap.sh"

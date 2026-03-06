@@ -46,6 +46,9 @@ REWRITE_MODEL_PATH=/path/to/rewrite_7b \
 SELECT_MODEL_PATH=/path/to/select_7b \
 ANSWER_MODEL_PATH=/path/to/answer_14b \
 RETRIEVAL_API_URLS_JSON='["http://api1/retrieve","http://api2/retrieve"]' \
+VAL_BEFORE_TRAIN=true \
+TEST_FREQ=50 \
+SAVE_FREQ=50 \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_head_train.sh
 ```
 
@@ -61,3 +64,78 @@ SELECT_MODEL_PATH=/path/to/select_7b \
 ANSWER_MODEL_PATH=/path/to/answer_14b \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_head_test.sh
 ```
+
+## Run with PyTorchJob
+
+If your cluster does not support RayJob CRD, use PyTorchJob to start pods and run the same
+entry script on every pod:
+
+- rank 0 pod starts Ray head and launches training
+- other pods join Ray as workers and block
+
+Script:
+
+- `examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_entry.sh`
+
+Required env (typically provided by PyTorchJob):
+
+- `RANK`
+- `WORLD_SIZE`
+- `MASTER_ADDR`
+- `MASTER_PORT`
+
+Additional env you should set:
+
+- `TRAIN_PARQUET`
+- `VAL_PARQUET`
+- `REWRITE_MODEL_PATH`
+- `SELECT_MODEL_PATH`
+- `ANSWER_MODEL_PATH`
+- `RETRIEVAL_API_URLS_JSON`
+- `VAL_BEFORE_TRAIN`
+- `TEST_FREQ`
+- `SAVE_FREQ`
+
+### One-line command template for PyTorchJob
+
+Use the same command on all pods (rank is auto-routed by `RANK`).
+Default behavior is **run only** (no environment reinstall):
+
+```bash
+bash -lc 'cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl && bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh'
+```
+
+If you need to install environment on fresh nodes, run once with:
+
+```bash
+bash -lc 'cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl && DO_ENV_SETUP=true bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh'
+```
+
+The bootstrap script handles:
+
+- optional environment setup (`DO_ENV_SETUP=true` -> `setup_verl_env.sh`)
+- conda activation (existing env)
+- rank-based head/worker launch (`run_star_pytorchjob_entry.sh`)
+
+Files:
+
+- `examples/star_ppo/query_rewrite_retrieve_select_answer_f1/setup_verl_env.sh`
+- `examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh`
+- `examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_entry.sh`
+
+### Recommended single script (auto detect setup vs run)
+
+Use this same command every time:
+
+```bash
+bash -lc 'cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl && bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh'
+```
+
+Behavior:
+
+- fresh nodes: auto install env then run
+- existing nodes: skip install and run directly
+
+Script:
+
+- `examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh`
