@@ -39,6 +39,8 @@ trainer:
     refresh_every_epoch: true
 
 actor_rollout_ref:
+  # Star detached actor/rollout workers require hybrid_engine to be disabled.
+  hybrid_engine: false
   actor:
     # Required when dynamic batch sizing is disabled.
     # You can override via env: ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU.
