@@ -242,23 +242,30 @@ class StarRayTrainer:
 
         actor_rollout_workers = ctx.actor_wg.workers + ctx.rollout_wg.workers
         n_workers = len(actor_rollout_workers)
-        if self.device_name == "npu":
-            master_address = ray.get(ctx.actor_wg.workers[0]._get_node_ip.remote()).strip("[]")
-            master_port = ray.get(ctx.actor_wg.workers[0]._get_free_port.remote())
-            ctx.actor_wg.create_weight_sync_group(master_address, master_port, 0, n_workers)
-            ray.get(
-                ctx.rollout_wg.create_weight_sync_group(
-                    master_address, master_port, len(ctx.actor_wg.workers), n_workers
+        # Always initialize stateless weight sync group first.
+        # This avoids hard dependence on Ray collective NCCL availability.
+        master_address = ray.get(ctx.actor_wg.workers[0]._get_node_ip.remote()).strip("[]")
+        master_port = ray.get(ctx.actor_wg.workers[0]._get_free_port.remote())
+        ctx.actor_wg.create_weight_sync_group(master_address, master_port, 0, n_workers)
+        ray.get(
+            ctx.rollout_wg.create_weight_sync_group(
+                master_address, master_port, len(ctx.actor_wg.workers), n_workers
+            )
+        )
+
+        # Best-effort Ray collective group for environments where NCCL plugin is available.
+        # If unavailable, stateless group above is sufficient for sync_rollout_weights.
+        if self.device_name != "npu":
+            try:
+                collective.create_collective_group(
+                    actor_rollout_workers,
+                    n_workers,
+                    list(range(0, n_workers)),
+                    backend=get_nccl_backend(),
+                    group_name=group_name,
                 )
-            )
-        else:
-            collective.create_collective_group(
-                actor_rollout_workers,
-                n_workers,
-                list(range(0, n_workers)),
-                backend=get_nccl_backend(),
-                group_name=group_name,
-            )
+            except Exception as e:
+                print(f"[star] Ray collective unavailable, fallback to stateless weight sync group: {e}")
 
     @staticmethod
     def _sync_rollout_weights(model_id: str, ctx: ModelWorkerContext):
