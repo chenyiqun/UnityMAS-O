@@ -21,19 +21,19 @@ trainer:
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: null
+      model_path: ${oc.env:REWRITE_MODEL_PATH,null}
     - model_id: selector_agent_7b
       nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: null
+      model_path: ${oc.env:SELECT_MODEL_PATH,null}
     - model_id: answer_agent_14b
       nnodes: 2
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: null
+      model_path: ${oc.env:ANSWER_MODEL_PATH,null}
   routing:
     policy: epoch_dynamic
     refresh_every_epoch: true

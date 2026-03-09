@@ -58,9 +58,6 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   trainer.nnodes="${WORLD_SIZE}" \
   trainer.n_gpus_per_node="${GPUS_PER_NODE}" \
   actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
-  trainer.llm_engines[0].model_path="${REWRITE_MODEL_PATH}" \
-  trainer.llm_engines[1].model_path="${SELECT_MODEL_PATH}" \
-  trainer.llm_engines[2].model_path="${ANSWER_MODEL_PATH}" \
   star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}" \
   trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
   trainer.test_freq="${TEST_FREQ}" \

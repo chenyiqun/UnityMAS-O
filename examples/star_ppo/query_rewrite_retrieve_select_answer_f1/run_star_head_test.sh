@@ -61,7 +61,4 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   trainer.test_freq=-1 \
   trainer.logger='["console"]' \
   actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
-  trainer.llm_engines[0].model_path="${REWRITE_MODEL_PATH}" \
-  trainer.llm_engines[1].model_path="${SELECT_MODEL_PATH}" \
-  trainer.llm_engines[2].model_path="${ANSWER_MODEL_PATH}" \
   star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}"
