@@ -43,6 +43,11 @@ data:
   train_files: /path/to/train.parquet
   val_files: /path/to/val.parquet
 
+ray_kwargs:
+  ray_init:
+    # This workflow launches Ray head/workers outside main_ppo, so connect to existing cluster.
+    address: auto
+
 star:
   workflow:
     name: graph_query_rewrite_retrieve_select_answer

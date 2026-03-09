@@ -96,7 +96,6 @@ PY
   echo "[star-pytorchjob] launching training on rank0"
   python3 -m verl.experimental.star_ppo.main_ppo \
     --config-name star_query_rewrite_retrieve_select_answer_f1_trainer \
-    ray_kwargs.ray_init.address=auto \
     data.train_files="${TRAIN_PARQUET}" \
     data.val_files="${VAL_PARQUET}" \
     trainer.nnodes="${WORLD_SIZE}" \
