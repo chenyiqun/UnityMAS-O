@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import ipaddress
+import os
 import socket
 from datetime import timedelta
 
@@ -132,6 +133,15 @@ def vllm_stateless_init_process_group(master_address, master_port, rank, world_s
     else:
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-    pg = StatelessProcessGroup.create(host=master_address, port=master_port, rank=rank, world_size=world_size)
+    # Allow tuning timeout in unstable cluster networks.
+    # Example: STAR_WEIGHT_SYNC_TIMEOUT_SEC=900
+    store_timeout = int(os.environ.get("STAR_WEIGHT_SYNC_TIMEOUT_SEC", "300"))
+    pg = StatelessProcessGroup.create(
+        host=master_address,
+        port=master_port,
+        rank=rank,
+        world_size=world_size,
+        store_timeout=store_timeout,
+    )
     pynccl = PyNcclCommunicator(pg, device=device)
     return pynccl

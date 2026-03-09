@@ -242,16 +242,24 @@ class StarRayTrainer:
 
         actor_rollout_workers = ctx.actor_wg.workers + ctx.rollout_wg.workers
         n_workers = len(actor_rollout_workers)
+
+        def _to_ref_list(x):
+            if x is None:
+                return []
+            if isinstance(x, list | tuple):
+                return list(x)
+            return [x]
+
         # Always initialize stateless weight sync group first.
         # This avoids hard dependence on Ray collective NCCL availability.
         master_address = ray.get(ctx.actor_wg.workers[0]._get_node_ip.remote()).strip("[]")
-        master_port = ray.get(ctx.actor_wg.workers[0]._get_free_port.remote())
-        ctx.actor_wg.create_weight_sync_group(master_address, master_port, 0, n_workers)
-        ray.get(
-            ctx.rollout_wg.create_weight_sync_group(
-                master_address, master_port, len(ctx.actor_wg.workers), n_workers
-            )
+        fixed_port = int(os.environ.get("STAR_WEIGHT_SYNC_MASTER_PORT", "0"))
+        master_port = fixed_port if fixed_port > 0 else ray.get(ctx.actor_wg.workers[0]._get_free_port.remote())
+        actor_refs = ctx.actor_wg.create_weight_sync_group(master_address, master_port, 0, n_workers)
+        rollout_refs = ctx.rollout_wg.create_weight_sync_group(
+            master_address, master_port, len(ctx.actor_wg.workers), n_workers
         )
+        ray.get(_to_ref_list(actor_refs) + _to_ref_list(rollout_refs))
 
         # Best-effort Ray collective group for environments where NCCL plugin is available.
         # If unavailable, stateless group above is sufficient for sync_rollout_weights.
