@@ -8,11 +8,12 @@ set -euo pipefail
 
 RANK="${RANK:-0}"
 WORLD_SIZE="${WORLD_SIZE:-4}"
-MASTER_ADDR="${MASTER_ADDR:?MASTER_ADDR is required}"
+MASTER_ADDR="${MASTER_ADDR:-${HEAD_IP:-}}"
 MASTER_PORT="${MASTER_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
 CPUS_PER_NODE="${CPUS_PER_NODE:-64}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+MASTER_ADDR_FILE="${MASTER_ADDR_FILE:-}"
 
 TRAIN_PARQUET="${TRAIN_PARQUET:-/path/to/train.parquet}"
 VAL_PARQUET="${VAL_PARQUET:-/path/to/val.parquet}"
@@ -26,6 +27,41 @@ TEST_FREQ="${TEST_FREQ:-50}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
 
 ray stop -f >/dev/null 2>&1 || true
+
+if [[ -z "${MASTER_ADDR}" ]]; then
+  if [[ "${RANK}" == "0" ]]; then
+    MASTER_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    if [[ -z "${MASTER_ADDR}" ]]; then
+      MASTER_ADDR="$(hostname -i 2>/dev/null | awk '{print $1}')"
+    fi
+    if [[ -z "${MASTER_ADDR}" ]]; then
+      echo "[star-pytorchjob] failed to auto-detect master IP on rank0"
+      exit 1
+    fi
+    if [[ -n "${MASTER_ADDR_FILE}" ]]; then
+      echo "${MASTER_ADDR}" > "${MASTER_ADDR_FILE}"
+      echo "[star-pytorchjob] wrote MASTER_ADDR=${MASTER_ADDR} to ${MASTER_ADDR_FILE}"
+    fi
+  else
+    if [[ -z "${MASTER_ADDR_FILE}" ]]; then
+      echo "[star-pytorchjob] MASTER_ADDR is empty and MASTER_ADDR_FILE is not set on rank${RANK}"
+      exit 1
+    fi
+    echo "[star-pytorchjob] rank${RANK} waiting for ${MASTER_ADDR_FILE}"
+    for _ in $(seq 1 180); do
+      if [[ -s "${MASTER_ADDR_FILE}" ]]; then
+        MASTER_ADDR="$(cat "${MASTER_ADDR_FILE}")"
+        break
+      fi
+      sleep 2
+    done
+    if [[ -z "${MASTER_ADDR}" ]]; then
+      echo "[star-pytorchjob] timeout waiting MASTER_ADDR_FILE=${MASTER_ADDR_FILE}"
+      exit 1
+    fi
+  fi
+fi
+export MASTER_ADDR
 
 if [[ "${RANK}" == "0" ]]; then
   echo "[star-pytorchjob] rank0 starts Ray head at ${MASTER_ADDR}:${MASTER_PORT}"

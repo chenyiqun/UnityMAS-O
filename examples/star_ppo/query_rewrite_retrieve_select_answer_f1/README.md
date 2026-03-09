@@ -81,7 +81,7 @@ Required env (typically provided by PyTorchJob):
 
 - `RANK`
 - `WORLD_SIZE`
-- `MASTER_ADDR`
+- `MASTER_ADDR` (optional if you set `HEAD_IP`, or use shared `MASTER_ADDR_FILE`)
 - `MASTER_PORT`
 
 Additional env you should set:
@@ -139,3 +139,33 @@ Behavior:
 Script:
 
 - `examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh`
+
+### Easy IP configuration
+
+You can choose one of these methods:
+
+1) Set head IP once (recommended):
+
+```bash
+HEAD_IP=10.146.231.133 \
+bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh
+```
+
+2) Use standard PyTorchJob env directly:
+
+```bash
+MASTER_ADDR=10.146.231.133 MASTER_PORT=6379 \
+bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh
+```
+
+3) Auto-sync IP through shared file (no manual worker IP setup):
+
+```bash
+MASTER_ADDR_FILE=/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/.star_master_addr \
+bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh
+```
+
+Notes:
+
+- rank0 auto-detects its local IP and writes to `MASTER_ADDR_FILE`
+- workers wait for that file and read `MASTER_ADDR`

@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-verl}"
 FORCE_ENV_SETUP="${FORCE_ENV_SETUP:-false}"
+HEAD_IP="${HEAD_IP:-}"
 
 # Your defaults (can still be overridden by env vars from job config).
 TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/verl/data/gsm8k/train.parquet}"
@@ -26,6 +27,13 @@ RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/ret
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
+
+# IP convenience:
+# 1) set HEAD_IP once, script maps it to MASTER_ADDR
+# 2) or keep MASTER_ADDR from PyTorchJob env
+# 3) if still empty, rank0 writes detected IP to MASTER_ADDR_FILE and workers read it
+MASTER_ADDR="${MASTER_ADDR:-${HEAD_IP}}"
+MASTER_ADDR_FILE="${MASTER_ADDR_FILE:-$(pwd)/.star_master_addr}"
 
 need_setup="false"
 if [[ "${FORCE_ENV_SETUP}" == "true" ]]; then
@@ -53,5 +61,6 @@ export TRAIN_PARQUET VAL_PARQUET
 export REWRITE_MODEL_PATH SELECT_MODEL_PATH ANSWER_MODEL_PATH
 export RETRIEVAL_API_URLS_JSON
 export VAL_BEFORE_TRAIN TEST_FREQ SAVE_FREQ
+export MASTER_ADDR MASTER_ADDR_FILE
 
 bash "${SCRIPT_DIR}/run_star_pytorchjob_bootstrap.sh"
