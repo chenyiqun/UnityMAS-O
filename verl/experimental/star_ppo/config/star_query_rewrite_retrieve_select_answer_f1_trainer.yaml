@@ -43,6 +43,14 @@ actor_rollout_ref:
     # Required when dynamic batch sizing is disabled.
     # You can override via env: ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU.
     ppo_micro_batch_size_per_gpu: ${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,1}
+  ref:
+    # Required when ref policy is enabled and dynamic batch sizing is disabled.
+    # You can override via env: REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU.
+    log_prob_micro_batch_size_per_gpu: ${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}
+  rollout:
+    # Required when dynamic batch sizing is disabled.
+    # You can override via env: ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU.
+    log_prob_micro_batch_size_per_gpu: ${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}
 
 critic:
   # Keep critic micro-batch explicit to avoid config assertion failures.
