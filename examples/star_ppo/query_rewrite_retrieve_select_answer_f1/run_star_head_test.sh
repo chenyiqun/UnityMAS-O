@@ -14,6 +14,7 @@ REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:?REWRITE_MODEL_PATH is required}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:?SELECT_MODEL_PATH is required}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:?ANSWER_MODEL_PATH is required}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 
 ray stop -f >/dev/null 2>&1 || true
 
@@ -60,4 +61,5 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   trainer.test_freq=-1 \
   trainer.logger='["console"]' \
   actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
+  actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
   star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}"

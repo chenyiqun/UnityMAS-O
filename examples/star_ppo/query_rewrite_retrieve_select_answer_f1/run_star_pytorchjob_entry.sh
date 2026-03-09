@@ -21,6 +21,7 @@ REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-/path/to/rewrite_7b}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/path/to/select_7b}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/path/to/answer_14b}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
@@ -101,6 +102,7 @@ PY
     trainer.nnodes="${WORLD_SIZE}" \
     trainer.n_gpus_per_node="${GPUS_PER_NODE}" \
     actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
+    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
     star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}" \
     trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
     trainer.test_freq="${TEST_FREQ}" \

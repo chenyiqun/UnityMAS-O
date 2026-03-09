@@ -14,6 +14,7 @@ REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:?REWRITE_MODEL_PATH is required}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:?SELECT_MODEL_PATH is required}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:?ANSWER_MODEL_PATH is required}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
+ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
@@ -57,6 +58,7 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   trainer.nnodes="${WORLD_SIZE}" \
   trainer.n_gpus_per_node="${GPUS_PER_NODE}" \
   actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
+  actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
   star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}" \
   trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
   trainer.test_freq="${TEST_FREQ}" \

@@ -95,6 +95,7 @@ Additional env you should set:
 - `VAL_BEFORE_TRAIN`
 - `TEST_FREQ`
 - `SAVE_FREQ`
+- `ROLLOUT_NAME` (optional, default `vllm`; options: `hf`/`vllm`/`sglang`/`trtllm`)
 - `ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
 - `CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
 - `ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)

@@ -48,6 +48,9 @@ actor_rollout_ref:
     # You can override via env: REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU.
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
   rollout:
+    # Required by rollout config. Options: hf / vllm / sglang / trtllm.
+    # You can override via env: ROLLOUT_NAME.
+    name: ${oc.env:ROLLOUT_NAME,vllm}
     # Required when dynamic batch sizing is disabled.
     # You can override via env: ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU.
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
