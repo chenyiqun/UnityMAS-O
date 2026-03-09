@@ -31,7 +31,7 @@ star:
     max_inflight_queries: 32
     max_parallel_rollouts_per_model: 32
     runner:
-      path: verl.experimental.star_ppo.workflows.graph_workflow
+      path: pkg://verl.experimental.star_ppo.workflows.graph_workflow
       name: GraphWorkflowRunner
     question_candidates: ["question", "query", "problem"]
     ground_truth_candidates: ["ground_truth", "answer", "target", "golden_answers", "reward_model"]

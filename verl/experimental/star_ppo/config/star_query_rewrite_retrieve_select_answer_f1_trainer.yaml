@@ -78,7 +78,7 @@ star:
     max_inflight_queries: 32
     max_parallel_rollouts_per_model: 32
     runner:
-      path: verl.experimental.star_ppo.workflows.graph_workflow
+      path: pkg://verl.experimental.star_ppo.workflows.graph_workflow
       name: GraphWorkflowRunner
     # HotpotQA-like parquet rows:
     # - extra_info.question
