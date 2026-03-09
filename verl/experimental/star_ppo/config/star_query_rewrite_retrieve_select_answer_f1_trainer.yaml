@@ -38,6 +38,17 @@ trainer:
     policy: epoch_dynamic
     refresh_every_epoch: true
 
+actor_rollout_ref:
+  actor:
+    # Required when dynamic batch sizing is disabled.
+    # You can override via env: ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU.
+    ppo_micro_batch_size_per_gpu: ${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,1}
+
+critic:
+  # Keep critic micro-batch explicit to avoid config assertion failures.
+  # You can override via env: CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU.
+  ppo_micro_batch_size_per_gpu: ${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,1}
+
 data:
   # Replace with your own parquet files.
   train_files: /path/to/train.parquet

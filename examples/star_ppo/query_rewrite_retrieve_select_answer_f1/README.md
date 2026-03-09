@@ -95,6 +95,8 @@ Additional env you should set:
 - `VAL_BEFORE_TRAIN`
 - `TEST_FREQ`
 - `SAVE_FREQ`
+- `ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
+- `CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
 
 ### One-line command template for PyTorchJob
 
