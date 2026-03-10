@@ -28,6 +28,8 @@ WANDB_API_KEY="${WANDB_API_KEY:-5235f681e1a2a0ef6fe3a1f4686280daad738532}"
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-256}"
+VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-64}"
 
 ray stop -f >/dev/null 2>&1 || true
 
@@ -108,6 +110,9 @@ PY
     actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
     actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
     star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}" \
+    data.gen_batch_size="${GEN_BATCH_SIZE}" \
+    data.train_batch_size="${GEN_BATCH_SIZE}" \
+    data.val_batch_size="${VAL_BATCH_SIZE}" \
     trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
     trainer.test_freq="${TEST_FREQ}" \
     trainer.save_freq="${SAVE_FREQ}" \

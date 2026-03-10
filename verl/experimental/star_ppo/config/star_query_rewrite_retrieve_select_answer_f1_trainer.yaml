@@ -75,6 +75,10 @@ data:
   # Defaults to HotpotQA parquet paths; can still be overridden by env or CLI.
   train_files: ${oc.env:TRAIN_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}
   val_files: ${oc.env:VAL_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}
+  # Batch sizes (smaller defaults for multi-node stability); can be overridden by env.
+  train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
+  gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
+  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,64}}
 
 ray_kwargs:
   ray_init:

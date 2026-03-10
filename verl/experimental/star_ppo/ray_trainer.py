@@ -851,9 +851,10 @@ class StarRayTrainer:
         metrics[f"model/{model_id}/star/consumed"] = float(len(batch))
         return metrics
 
-    def _global_sync_and_update(self) -> dict[str, float]:
+    async def _global_sync_and_update(self) -> dict[str, float]:
         metrics = {}
         max_ready_items = int(self.config.star.train.get("max_ready_items", 0))
+        update_jobs: list[tuple[str, ModelWorkerContext, DataProto]] = []
 
         for model_id, ctx in self.model_contexts.items():
             ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
@@ -871,13 +872,25 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/star/consumed"] = 0.0
                 continue
 
-            ppo_metrics = self._run_model_ppo_update(
-                model_id=model_id,
-                ctx=ctx,
-                batch=ready_batch,
-                global_step=self._global_step,
+            update_jobs.append((model_id, ctx, ready_batch))
+
+        if update_jobs:
+            # Different models use disjoint worker groups/resource pools, so they can
+            # update in parallel instead of serial model-by-model execution.
+            ppo_results = await asyncio.gather(
+                *[
+                    asyncio.to_thread(
+                        self._run_model_ppo_update,
+                        model_id,
+                        ctx,
+                        ready_batch,
+                        self._global_step,
+                    )
+                    for model_id, ctx, ready_batch in update_jobs
+                ]
             )
-            metrics.update(ppo_metrics)
+            for ppo_metrics in ppo_results:
+                metrics.update(ppo_metrics)
 
         return metrics
 
@@ -1057,7 +1070,7 @@ class StarRayTrainer:
                     continue
 
                 commit_metrics = self._commit_rewards(rewards)
-                sync_metrics = self._global_sync_and_update()
+                sync_metrics = await self._global_sync_and_update()
 
                 step_metrics = {
                     "training/global_step": float(global_step),
