@@ -53,6 +53,10 @@ actor_rollout_ref:
     # Required by rollout config. Options: hf / vllm / sglang / trtllm.
     # You can override via env: ROLLOUT_NAME.
     name: ${oc.env:ROLLOUT_NAME,vllm}
+    checkpoint_engine:
+      # Must be larger than the largest single weight tensor during actor->rollout sync.
+      # You can override via env: ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB.
+      update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,4096}}
     # Required when dynamic batch sizing is disabled.
     # You can override via env: ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU.
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
