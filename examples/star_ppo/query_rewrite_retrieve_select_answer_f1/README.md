@@ -104,6 +104,7 @@ Additional env you should set:
 - `STAR_WEIGHT_SYNC_TIMEOUT_SEC` (optional, default `900`)
 - `STAR_WEIGHT_SYNC_RETRIES` (optional, default `3`)
 - `STAR_WEIGHT_SYNC_PORT_RETRY_STRIDE` (optional, default `10`)
+- `STAR_WEIGHT_SYNC_MODE` (optional, default `auto`; `auto`/`collective`/`stateless`)
 
 ### One-line command template for PyTorchJob
 

@@ -250,42 +250,22 @@ class StarRayTrainer:
                 return list(x)
             return [x]
 
-        # Always initialize stateless weight sync group first.
-        # This avoids hard dependence on Ray collective NCCL availability.
+        # Weight-sync mode:
+        # - auto (default): try Ray collective first, fallback to stateless.
+        # - collective: use Ray collective only.
+        # - stateless: use stateless process group only.
+        mode = str(os.environ.get("STAR_WEIGHT_SYNC_MODE", "auto")).strip().lower()
+        if mode not in {"auto", "collective", "stateless"}:
+            print(f"[star] invalid STAR_WEIGHT_SYNC_MODE={mode}, fallback to auto")
+            mode = "auto"
+
         master_address = ray.get(ctx.actor_wg.workers[0]._get_node_ip.remote()).strip("[]")
         fixed_port = int(os.environ.get("STAR_WEIGHT_SYNC_MASTER_PORT", "0"))
         model_idx = self.model_ids.index(model_id) if model_id in self.model_ids else 0
         max_retries = int(os.environ.get("STAR_WEIGHT_SYNC_RETRIES", "3"))
         retry_stride = int(os.environ.get("STAR_WEIGHT_SYNC_PORT_RETRY_STRIDE", "10"))
-        last_err = None
-        for attempt in range(max_retries):
-            if fixed_port > 0:
-                # Per-model stable port + retry stride to avoid collisions with stale groups.
-                master_port = fixed_port + model_idx + attempt * retry_stride
-            else:
-                master_port = ray.get(ctx.actor_wg.workers[0]._get_free_port.remote())
-            print(
-                f"[star] init weight sync group model={model_id} attempt={attempt + 1}/{max_retries} "
-                f"addr={master_address}:{master_port} workers={n_workers}"
-            )
-            actor_refs = ctx.actor_wg.create_weight_sync_group(master_address, master_port, 0, n_workers)
-            rollout_refs = ctx.rollout_wg.create_weight_sync_group(
-                master_address, master_port, len(ctx.actor_wg.workers), n_workers
-            )
-            try:
-                ray.get(_to_ref_list(actor_refs) + _to_ref_list(rollout_refs))
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                print(f"[star] weight sync group init failed model={model_id} attempt={attempt + 1}: {e}")
-                time.sleep(2)
-        if last_err is not None:
-            raise last_err
-
-        # Best-effort Ray collective group for environments where NCCL plugin is available.
-        # If unavailable, stateless group above is sufficient for sync_rollout_weights.
-        if self.device_name != "npu":
+        collective_ready = False
+        if self.device_name != "npu" and mode in {"auto", "collective"}:
             try:
                 collective.create_collective_group(
                     actor_rollout_workers,
@@ -294,8 +274,43 @@ class StarRayTrainer:
                     backend=get_nccl_backend(),
                     group_name=group_name,
                 )
+                collective_ready = True
+                print(f"[star] Ray collective group ready model={model_id} group={group_name}")
             except Exception as e:
-                print(f"[star] Ray collective unavailable, fallback to stateless weight sync group: {e}")
+                print(f"[star] Ray collective unavailable model={model_id}: {e}")
+                if mode == "collective":
+                    raise
+
+        need_stateless = (self.device_name == "npu") or (mode == "stateless") or (
+            mode == "auto" and not collective_ready
+        )
+        if need_stateless:
+            last_err = None
+            for attempt in range(max_retries):
+                if fixed_port > 0:
+                    # Per-model stable port + retry stride to avoid collisions with stale groups.
+                    master_port = fixed_port + model_idx + attempt * retry_stride
+                else:
+                    master_port = ray.get(ctx.actor_wg.workers[0]._get_free_port.remote())
+                print(
+                    f"[star] init stateless weight sync model={model_id} attempt={attempt + 1}/{max_retries} "
+                    f"addr={master_address}:{master_port} workers={n_workers}"
+                )
+                actor_refs = ctx.actor_wg.create_weight_sync_group(master_address, master_port, 0, n_workers)
+                rollout_refs = ctx.rollout_wg.create_weight_sync_group(
+                    master_address, master_port, len(ctx.actor_wg.workers), n_workers
+                )
+                try:
+                    ray.get(_to_ref_list(actor_refs) + _to_ref_list(rollout_refs))
+                    last_err = None
+                    print(f"[star] stateless weight sync ready model={model_id}")
+                    break
+                except Exception as e:
+                    last_err = e
+                    print(f"[star] stateless weight sync init failed model={model_id} attempt={attempt + 1}: {e}")
+                    time.sleep(2)
+            if last_err is not None:
+                raise last_err
 
     @staticmethod
     def _sync_rollout_weights(model_id: str, ctx: ModelWorkerContext):
