@@ -102,6 +102,8 @@ Additional env you should set:
 - `REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
 - `STAR_WEIGHT_SYNC_MASTER_PORT` (optional, default `29600`)
 - `STAR_WEIGHT_SYNC_TIMEOUT_SEC` (optional, default `900`)
+- `STAR_WEIGHT_SYNC_RETRIES` (optional, default `3`)
+- `STAR_WEIGHT_SYNC_PORT_RETRY_STRIDE` (optional, default `10`)
 
 ### One-line command template for PyTorchJob
 

@@ -56,12 +56,20 @@ class DetachSync(AsyncActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def create_weight_sync_group(self, master_address, master_port, rank_offset, world_size):
         rank = torch.distributed.get_rank() + rank_offset
+        print(
+            f"[weight_sync] creating stateless group role={getattr(self, '_role', 'unknown')} "
+            f"rank={rank}/{world_size} master={master_address}:{master_port}"
+        )
         self._weight_sync_group = vllm_stateless_init_process_group(
             master_address,
             master_port,
             rank,
             world_size,
             get_torch_device().current_device(),
+        )
+        print(
+            f"[weight_sync] created stateless group role={getattr(self, '_role', 'unknown')} "
+            f"rank={rank}/{world_size} master={master_address}:{master_port}"
         )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
