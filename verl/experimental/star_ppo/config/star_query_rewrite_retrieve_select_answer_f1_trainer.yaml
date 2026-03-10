@@ -99,7 +99,7 @@ star:
       retriever:
         # Built-in adapter with query(question, N, max_attempts).
         type: query_api_pool
-        api_urls: ["http://127.0.0.1:8000/retrieve"]
+        api_urls: ["http://10.158.147.72:8000/retrieve"]
         timeout_seconds: 5
     graph:
       start_nodes: ["rewrite"]

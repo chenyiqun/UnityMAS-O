@@ -22,7 +22,7 @@ SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_mod
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-14B-Instruct}"
 
 # Replace with your real retriever endpoint pool if needed.
-RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
+RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
 
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
