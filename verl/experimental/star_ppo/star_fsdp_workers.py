@@ -277,7 +277,11 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     def generate_sequences_thin(self, prompts: DataProto) -> DataProto:
         fat_output = self.generate_sequences(prompts)
-        full_batch = prompts.union(fat_output)
+        # Avoid DataProto.union() conflicts on object-typed fields (e.g. raw_prompt).
+        full_batch = fat_output
+        for key in ("query_id", "agent_id"):
+            if key not in full_batch.non_tensor_batch and key in prompts.non_tensor_batch:
+                full_batch.non_tensor_batch[key] = prompts.non_tensor_batch[key]
         return self._build_thin_from_batch(full_batch)
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))

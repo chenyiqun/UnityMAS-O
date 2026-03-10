@@ -23,6 +23,7 @@ ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/path/to/answer_14b}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
 ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 VLLM_USE_V1="${VLLM_USE_V1:-1}"
+WANDB_API_KEY="${WANDB_API_KEY:-5235f681e1a2a0ef6fe3a1f4686280daad738532}"
 
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
@@ -65,6 +66,7 @@ if [[ -z "${MASTER_ADDR}" ]]; then
 fi
 export MASTER_ADDR
 export VLLM_USE_V1
+export WANDB_API_KEY
 
 if [[ "${RANK}" == "0" ]]; then
   echo "[star-pytorchjob] rank0 starts Ray head at ${MASTER_ADDR}:${MASTER_PORT}"

@@ -414,8 +414,17 @@ class StarRayTrainer:
             self._rollout_semaphore_by_model[model_id] = asyncio.Semaphore(max(1, self._max_parallel_rollouts_per_model))
         gen_batch = self._get_gen_batch(batch)
         async with self._rollout_semaphore_by_model[model_id]:
+            rollout_dp_size = self._get_dp_size(ctx.rollout_wg, "rollout")
             if ctx.rollout_manager is None:
-                thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
+                bsz = len(gen_batch)
+                if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
+                    pad = rollout_dp_size - (bsz % rollout_dp_size)
+                    padded_indices = list(range(bsz)) + [bsz - 1] * pad
+                    padded_batch = gen_batch.select_idxs(padded_indices)
+                    thin_padded = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, padded_batch)
+                    thin = thin_padded.select_idxs(list(range(bsz)))
+                else:
+                    thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
             else:
                 fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
                 # Avoid DataProto.union() conflicts on object-typed non-tensor fields
@@ -425,7 +434,17 @@ class StarRayTrainer:
                 for key in ("query_id", "agent_id"):
                     if key not in full_batch.non_tensor_batch and key in gen_batch.non_tensor_batch:
                         full_batch.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
-                thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
+                bsz = len(full_batch)
+                if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
+                    # ND dispatch requires equal chunks. For tiny validation/workflow batches,
+                    # pad by repeating the last sample, then trim back after conversion.
+                    pad = rollout_dp_size - (bsz % rollout_dp_size)
+                    padded_indices = list(range(bsz)) + [bsz - 1] * pad
+                    padded_batch = full_batch.select_idxs(padded_indices)
+                    thin_padded = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, padded_batch)
+                    thin = thin_padded.select_idxs(list(range(bsz)))
+                else:
+                    thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
         return model_id, thin, batch
 
     @staticmethod
