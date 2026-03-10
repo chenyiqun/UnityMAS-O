@@ -1029,16 +1029,18 @@ class StarRayTrainer:
                     continue
 
                 commit_metrics = self._commit_rewards(rewards)
+                sync_metrics = self._global_sync_and_update()
 
                 step_metrics = {
                     "training/global_step": float(global_step),
                     "training/epoch": float(epoch),
                     **workflow_metrics,
                     **commit_metrics,
+                    **sync_metrics,
                 }
                 logger.log(data=step_metrics, step=global_step)
                 if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
-                    print(f"[star] step={global_step} commit={step_metrics}")
+                    print(f"[star] step={global_step} batch_update={step_metrics}")
 
                 is_last_step = global_step >= self.total_training_steps
                 if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
@@ -1050,11 +1052,6 @@ class StarRayTrainer:
                     is_last_step or global_step % self.config.trainer.save_freq == 0
                 ):
                     self._save_checkpoint(global_step)
-
-            sync_metrics = self._global_sync_and_update()
-            sync_metrics.update({"training/global_step": float(global_step), "training/epoch": float(epoch)})
-            logger.log(data=sync_metrics, step=global_step)
-            print(f"[star] epoch={epoch} sync_update={sync_metrics}")
 
             if global_step >= self.total_training_steps:
                 break
