@@ -13,6 +13,7 @@
 # limitations under the License.
 import argparse
 import asyncio
+import importlib
 import inspect
 import json
 import logging
@@ -404,7 +405,53 @@ class vLLMHttpServer:
         if "disable_log_stats" in fn_args:
             kwargs["disable_log_stats"] = engine_args.disable_log_stats
 
-        engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        try:
+            engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
+        except ValueError as e:
+            err_msg = str(e)
+            if "VLLM_USE_V1=False" not in err_msg:
+                raise
+
+            logger.warning(
+                "AsyncLLM.from_vllm_config failed with VLLM_USE_V1 mismatch; "
+                "falling back to explicit AsyncLLMEngine.from_vllm_config."
+            )
+
+            engine_client = None
+            async_engine_cls = None
+            for module_path in (
+                "vllm.v1.engine.async_llm",
+                "vllm.engine.async_llm_engine",
+            ):
+                try:
+                    mod = importlib.import_module(module_path)
+                    candidate = getattr(mod, "AsyncLLMEngine", None)
+                    if candidate is not None and hasattr(candidate, "from_vllm_config"):
+                        async_engine_cls = candidate
+                        break
+                except Exception:
+                    continue
+
+            if async_engine_cls is not None:
+                engine_fn_args = set(dict(inspect.signature(async_engine_cls.from_vllm_config).parameters).keys())
+                engine_kwargs = {}
+                if "usage_context" in engine_fn_args:
+                    engine_kwargs["usage_context"] = usage_context
+                if "enable_log_requests" in engine_fn_args:
+                    engine_kwargs["enable_log_requests"] = engine_args.enable_log_requests
+                if "disable_log_stats" in engine_fn_args:
+                    engine_kwargs["disable_log_stats"] = engine_args.disable_log_stats
+                engine_client = async_engine_cls.from_vllm_config(vllm_config=vllm_config, **engine_kwargs)
+            else:
+                # Last-resort retry by aligning env flag in-process.
+                os.environ["VLLM_USE_V1"] = "1"
+                try:
+                    vllm_envs = importlib.import_module("vllm.envs")
+                    if hasattr(vllm_envs, "VLLM_USE_V1"):
+                        setattr(vllm_envs, "VLLM_USE_V1", True)
+                except Exception:
+                    pass
+                engine_client = AsyncLLM.from_vllm_config(vllm_config=vllm_config, usage_context=usage_context, **kwargs)
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()

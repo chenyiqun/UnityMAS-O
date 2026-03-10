@@ -22,6 +22,7 @@ SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/path/to/select_7b}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/path/to/answer_14b}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://127.0.0.1:8000/retrieve\"]}"
 ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
+VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
@@ -63,6 +64,7 @@ if [[ -z "${MASTER_ADDR}" ]]; then
   fi
 fi
 export MASTER_ADDR
+export VLLM_USE_V1
 
 if [[ "${RANK}" == "0" ]]; then
   echo "[star-pytorchjob] rank0 starts Ray head at ${MASTER_ADDR}:${MASTER_PORT}"
