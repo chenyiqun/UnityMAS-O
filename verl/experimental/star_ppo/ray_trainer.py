@@ -196,6 +196,10 @@ class StarRayTrainer:
                 )
 
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
+            # Star stateless weight-sync may need actor/rollout RPCs to run concurrently
+            # on the same colocated WorkerDict process.
+            worker_max_concurrency = int(os.environ.get("STAR_WORKER_MAX_CONCURRENCY", "4"))
+            worker_dict_cls.update_options({"max_concurrency": worker_max_concurrency})
             wg_dict = self.ray_worker_group_cls(
                 resource_pool=resource_pool,
                 ray_cls_with_init=worker_dict_cls,
