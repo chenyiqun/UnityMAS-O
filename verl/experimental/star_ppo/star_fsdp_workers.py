@@ -64,6 +64,18 @@ def _get_local_pair_channel(group_name: str) -> _LocalPairChannel:
         return chan
 
 
+def _get_vllm_inference_model(rollout):
+    """Best-effort fetch of in-proc vLLM model; returns None for server-adapter rollout."""
+    inference_engine = getattr(rollout, "inference_engine", None)
+    if inference_engine is None:
+        return None
+    if hasattr(inference_engine, "llm_engine"):
+        return inference_engine.llm_engine.model_executor.driver_worker.worker.model_runner.model
+    if hasattr(inference_engine, "worker"):
+        return inference_engine.worker.model_runner.model
+    return None
+
+
 class StarDetachActorWorker(DetachActorWorker):
     """Actor worker alias for star PPO."""
 
@@ -90,12 +102,21 @@ class StarDetachActorWorker(DetachActorWorker):
         params = self._get_actor_params() if self._is_actor else None
 
         rollout_name = self.config.rollout.name
+        inference_model = None
+        use_vllm_server_adapter = False
         if self._is_rollout:
             if rollout_name == "vllm":
                 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
-                inference_model = self.rollout.inference_engine.worker.model_runner.model
-                patch_vllm_moe_model_weight_loader(inference_model)
+                inference_model = _get_vllm_inference_model(self.rollout)
+                if inference_model is not None:
+                    patch_vllm_moe_model_weight_loader(inference_model)
+                elif hasattr(self.rollout, "update_weights"):
+                    use_vllm_server_adapter = True
+                else:
+                    raise AttributeError(
+                        f"Unsupported vllm rollout object for weight sync: {type(self.rollout)}"
+                    )
             elif rollout_name == "sglang":
                 inference_model = self.rollout._engine
             else:
@@ -118,20 +139,43 @@ class StarDetachActorWorker(DetachActorWorker):
                 finally:
                     channel.put((_LOCAL_PAIR_END, None))
             else:
-                for expected_key, _, _ in self._weights_info:
-                    recv_key, tensor = channel.get()
-                    if recv_key != expected_key:
-                        raise RuntimeError(
-                            f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
-                        )
-                    if rollout_name == "vllm":
-                        inference_model.load_weights([(expected_key, tensor)])
-                    elif rollout_name == "sglang":
-                        if inference_model is not None:
-                            loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
-                end_key, _ = channel.get()
-                if end_key != _LOCAL_PAIR_END:
-                    raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+                def _iter_local_pair_weights():
+                    for expected_key, _, _ in self._weights_info:
+                        recv_key, tensor = channel.get()
+                        if recv_key != expected_key:
+                            raise RuntimeError(
+                                f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
+                            )
+                        yield expected_key, tensor
+                    end_key, _ = channel.get()
+                    if end_key != _LOCAL_PAIR_END:
+                        raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+
+                if rollout_name == "vllm" and use_vllm_server_adapter:
+                    loop.run_until_complete(self.rollout.update_weights(_iter_local_pair_weights()))
+                else:
+                    for expected_key, tensor in _iter_local_pair_weights():
+                        if rollout_name == "vllm":
+                            inference_model.load_weights([(expected_key, tensor)])
+                        elif rollout_name == "sglang":
+                            if inference_model is not None:
+                                loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
+            if self._is_actor and self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            get_torch_device().empty_cache()
+            return
+
+        if self._is_rollout and rollout_name == "vllm" and use_vllm_server_adapter:
+            def _iter_collective_weights():
+                for key, shape, dtype in self._weights_info:
+                    tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                    if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
+                        self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
+                    else:
+                        collective.broadcast(tensor, src_rank=0, group_name=group_name)
+                    yield key, tensor
+
+            loop.run_until_complete(self.rollout.update_weights(_iter_collective_weights()))
             if self._is_actor and self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
@@ -366,12 +410,21 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         params = self._get_actor_params() if self._is_actor else None
 
         rollout_name = self.config.rollout.name
+        inference_model = None
+        use_vllm_server_adapter = False
         if self._is_rollout:
             if rollout_name == "vllm":
                 from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
 
-                inference_model = self.rollout.inference_engine.worker.model_runner.model
-                patch_vllm_moe_model_weight_loader(inference_model)
+                inference_model = _get_vllm_inference_model(self.rollout)
+                if inference_model is not None:
+                    patch_vllm_moe_model_weight_loader(inference_model)
+                elif hasattr(self.rollout, "update_weights"):
+                    use_vllm_server_adapter = True
+                else:
+                    raise AttributeError(
+                        f"Unsupported vllm rollout object for weight sync: {type(self.rollout)}"
+                    )
             elif rollout_name == "sglang":
                 inference_model = self.rollout._engine
             else:
@@ -394,20 +447,43 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                 finally:
                     channel.put((_LOCAL_PAIR_END, None))
             else:
-                for expected_key, _, _ in self._weights_info:
-                    recv_key, tensor = channel.get()
-                    if recv_key != expected_key:
-                        raise RuntimeError(
-                            f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
-                        )
-                    if rollout_name == "vllm":
-                        inference_model.load_weights([(expected_key, tensor)])
-                    elif rollout_name == "sglang":
-                        if inference_model is not None:
-                            loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
-                end_key, _ = channel.get()
-                if end_key != _LOCAL_PAIR_END:
-                    raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+                def _iter_local_pair_weights():
+                    for expected_key, _, _ in self._weights_info:
+                        recv_key, tensor = channel.get()
+                        if recv_key != expected_key:
+                            raise RuntimeError(
+                                f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
+                            )
+                        yield expected_key, tensor
+                    end_key, _ = channel.get()
+                    if end_key != _LOCAL_PAIR_END:
+                        raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+
+                if rollout_name == "vllm" and use_vllm_server_adapter:
+                    loop.run_until_complete(self.rollout.update_weights(_iter_local_pair_weights()))
+                else:
+                    for expected_key, tensor in _iter_local_pair_weights():
+                        if rollout_name == "vllm":
+                            inference_model.load_weights([(expected_key, tensor)])
+                        elif rollout_name == "sglang":
+                            if inference_model is not None:
+                                loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
+            if self._is_actor and self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            get_torch_device().empty_cache()
+            return
+
+        if self._is_rollout and rollout_name == "vllm" and use_vllm_server_adapter:
+            def _iter_collective_weights():
+                for key, shape, dtype in self._weights_info:
+                    tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                    if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
+                        self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
+                    else:
+                        collective.broadcast(tensor, src_rank=0, group_name=group_name)
+                    yield key, tensor
+
+            loop.run_until_complete(self.rollout.update_weights(_iter_collective_weights()))
             if self._is_actor and self._is_offload_param:
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
