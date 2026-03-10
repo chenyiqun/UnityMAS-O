@@ -13,6 +13,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import math
 import os
 
 import ray
@@ -35,14 +36,24 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
             DataProto: Output batch.
         """
 
-        chunkes = prompts.chunk(len(self.agent_loop_workers))
-        # Use asyncio.gather with ray.get wrapped in asyncio.to_thread to avoid blocking
-        import asyncio
+        if len(self.agent_loop_workers) == 0:
+            raise RuntimeError("No agent loop workers available for async generation.")
 
+        # Validation/workflow may issue tiny batches (e.g. size=1).
+        # DataProto.chunk requires equal split when padding is disabled, so fallback to
+        # split() for non-divisible cases to avoid assertion failures.
+        target_workers = min(len(self.agent_loop_workers), max(1, len(prompts)))
+        if len(prompts) % target_workers == 0:
+            chunks = prompts.chunk(target_workers)
+        else:
+            split_size = math.ceil(len(prompts) / target_workers)
+            chunks = prompts.split(split_size)
+
+        workers = self.agent_loop_workers[: len(chunks)]
         outputs = await asyncio.gather(
             *[
                 asyncio.to_thread(ray.get, worker.generate_sequences.remote(chunk))
-                for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
+                for worker, chunk in zip(workers, chunks, strict=True)
             ]
         )
         output = DataProto.concat(outputs)

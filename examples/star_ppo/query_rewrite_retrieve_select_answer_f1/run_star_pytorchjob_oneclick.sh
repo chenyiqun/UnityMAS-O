@@ -15,8 +15,8 @@ FORCE_ENV_SETUP="${FORCE_ENV_SETUP:-false}"
 HEAD_IP="${HEAD_IP:-}"
 
 # Your defaults (can still be overridden by env vars from job config).
-TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/verl/data/gsm8k/train.parquet}"
-VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/verl/data/gsm8k/test.parquet}"
+TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}"
+VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}"
 REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-14B-Instruct}"

@@ -72,9 +72,9 @@ critic:
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,1}}
 
 data:
-  # Replace with your own parquet files.
-  train_files: /path/to/train.parquet
-  val_files: /path/to/val.parquet
+  # Defaults to HotpotQA parquet paths; can still be overridden by env or CLI.
+  train_files: ${oc.env:TRAIN_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}
+  val_files: ${oc.env:VAL_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}
 
 ray_kwargs:
   ray_init:

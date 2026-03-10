@@ -342,7 +342,8 @@ class GraphWorkflowRunner(WorkflowRunner):
                 agent_id,
             )
             _, thin, _ = await self.trainer._rollout_model_async(model_id, prompt_batch)
-            raw_text = str(thin.non_tensor_batch["action_text"][0])
+            action_text_vec = thin.non_tensor_batch.get("action_text", np.array([], dtype=object))
+            raw_text = str(action_text_vec[0]) if len(action_text_vec) > 0 else ""
             parsed_value, format_reward = self._parse_llm_output(raw_text, node_cfg)
             output_key = str(node_cfg.get("output_key", "output"))
             context["nodes"][node_id] = {
@@ -472,7 +473,13 @@ class GraphWorkflowRunner(WorkflowRunner):
                 format_weight = float(reward_cfg.get("format_weight", 0.0))
                 share_outcome = bool(reward_cfg.get("share_outcome", True))
                 total = format_weight * float(rec["format_reward"]) + (outcome_reward if share_outcome else 0.0)
-                reward_parts.append(self.trainer._build_commit_rewards_from_thin(rec["thin"], np.array([total], dtype=np.float32)))
+                thin_len = len(rec["thin"])
+                if thin_len > 0:
+                    reward_parts.append(
+                        self.trainer._build_commit_rewards_from_thin(
+                            rec["thin"], np.full((thin_len,), total, dtype=np.float32)
+                        )
+                    )
                 node_format[node_id] = float(rec["format_reward"])
 
             return {
