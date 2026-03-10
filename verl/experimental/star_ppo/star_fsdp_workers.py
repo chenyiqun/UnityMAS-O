@@ -1,3 +1,5 @@
+import os
+import threading
 import time
 import uuid
 
@@ -14,7 +16,7 @@ from verl.experimental.one_step_off_policy.fsdp_workers import (
 )
 from verl.experimental.star_ppo.trajectory_buffer import TrajectoryBuffer, TrajectoryEntry
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from verl.utils.device import get_device_name, get_torch_device
+from verl.utils.device import get_torch_device
 from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from verl.utils.ray_utils import get_event_loop
 
@@ -26,16 +28,57 @@ __all__ = [
 ]
 
 
+_LOCAL_PAIR_END = "__star_local_pair_end__"
+_LOCAL_PAIR_CHANNELS = {}
+_LOCAL_PAIR_CHANNELS_LOCK = threading.Lock()
+
+
+class _LocalPairChannel:
+    def __init__(self):
+        self._cond = threading.Condition()
+        self._slot = None
+
+    def put(self, item):
+        with self._cond:
+            while self._slot is not None:
+                self._cond.wait()
+            self._slot = item
+            self._cond.notify_all()
+
+    def get(self):
+        with self._cond:
+            while self._slot is None:
+                self._cond.wait()
+            item = self._slot
+            self._slot = None
+            self._cond.notify_all()
+            return item
+
+
+def _get_local_pair_channel(group_name: str) -> _LocalPairChannel:
+    with _LOCAL_PAIR_CHANNELS_LOCK:
+        chan = _LOCAL_PAIR_CHANNELS.get(group_name)
+        if chan is None:
+            chan = _LocalPairChannel()
+            _LOCAL_PAIR_CHANNELS[group_name] = chan
+        return chan
+
+
 class StarDetachActorWorker(DetachActorWorker):
     """Actor worker alias for star PPO."""
 
     def __init__(self, config, role: str):
         super().__init__(config=config, role=role)
         self._weight_sync_group_name = "actor_rollout"
+        self._weight_sync_mode = "collective"
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_weight_sync_group_name(self, group_name: str):
         self._weight_sync_group_name = str(group_name)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_weight_sync_mode(self, mode: str):
+        self._weight_sync_mode = str(mode).strip().lower()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self):
@@ -59,7 +102,41 @@ class StarDetachActorWorker(DetachActorWorker):
                 raise NotImplementedError(f"Unknown rollout name: {rollout_name}")
         loop = get_event_loop()
         group_name = getattr(self, "_weight_sync_group_name", "actor_rollout")
-        device_name = get_device_name()
+        sync_mode = str(getattr(self, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
+        if sync_mode == "local_pair":
+            channel = _get_local_pair_channel(group_name)
+            if self._is_actor:
+                try:
+                    for key, shape, dtype in self._weights_info:
+                        assert key in params
+                        origin_data = params[key]
+                        if hasattr(origin_data, "full_tensor"):
+                            origin_data = origin_data.full_tensor()
+                        tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                        tensor.copy_(origin_data)
+                        channel.put((key, tensor))
+                finally:
+                    channel.put((_LOCAL_PAIR_END, None))
+            else:
+                for expected_key, _, _ in self._weights_info:
+                    recv_key, tensor = channel.get()
+                    if recv_key != expected_key:
+                        raise RuntimeError(
+                            f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
+                        )
+                    if rollout_name == "vllm":
+                        inference_model.load_weights([(expected_key, tensor)])
+                    elif rollout_name == "sglang":
+                        if inference_model is not None:
+                            loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
+                end_key, _ = channel.get()
+                if end_key != _LOCAL_PAIR_END:
+                    raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+            if self._is_actor and self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            get_torch_device().empty_cache()
+            return
+
         for key, shape, dtype in self._weights_info:
             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor:
@@ -97,6 +174,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         ttl_seconds = int(buffer_cfg.get("ttl_seconds", 7200))
         self._traj_buffer = TrajectoryBuffer(max_items=max_items, ttl_seconds=ttl_seconds)
         self._weight_sync_group_name = "actor_rollout"
+        self._weight_sync_mode = "collective"
 
     def _decode_action_text(self, response_tokens: torch.Tensor) -> str:
         if response_tokens is None:
@@ -274,6 +352,10 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
     def set_weight_sync_group_name(self, group_name: str):
         self._weight_sync_group_name = str(group_name)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_weight_sync_mode(self, mode: str):
+        self._weight_sync_mode = str(mode).strip().lower()
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
@@ -296,7 +378,41 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                 raise NotImplementedError(f"Unknown rollout name: {rollout_name}")
         loop = get_event_loop()
         group_name = getattr(self, "_weight_sync_group_name", "actor_rollout")
-        device_name = get_device_name()
+        sync_mode = str(getattr(self, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
+        if sync_mode == "local_pair":
+            channel = _get_local_pair_channel(group_name)
+            if self._is_actor:
+                try:
+                    for key, shape, dtype in self._weights_info:
+                        assert key in params
+                        origin_data = params[key]
+                        if hasattr(origin_data, "full_tensor"):
+                            origin_data = origin_data.full_tensor()
+                        tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                        tensor.copy_(origin_data)
+                        channel.put((key, tensor))
+                finally:
+                    channel.put((_LOCAL_PAIR_END, None))
+            else:
+                for expected_key, _, _ in self._weights_info:
+                    recv_key, tensor = channel.get()
+                    if recv_key != expected_key:
+                        raise RuntimeError(
+                            f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
+                        )
+                    if rollout_name == "vllm":
+                        inference_model.load_weights([(expected_key, tensor)])
+                    elif rollout_name == "sglang":
+                        if inference_model is not None:
+                            loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
+                end_key, _ = channel.get()
+                if end_key != _LOCAL_PAIR_END:
+                    raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+            if self._is_actor and self._is_offload_param:
+                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            get_torch_device().empty_cache()
+            return
+
         for key, shape, dtype in self._weights_info:
             tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor:

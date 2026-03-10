@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 import uuid
 import zlib
 from collections import defaultdict
@@ -255,11 +256,12 @@ class StarRayTrainer:
             return [x]
 
         # Weight-sync mode:
-        # - auto (default): try Ray collective first, fallback to stateless.
+        # - auto (default): try Ray collective first, fallback to local_pair on CUDA, stateless on NPU.
         # - collective: use Ray collective only.
-        # - stateless: use stateless process group only.
+        # - stateless: force stateless process group (NPU) or local_pair on CUDA.
+        # - local_pair: colocated actor/rollout in-process sync without cross-role NCCL.
         mode = str(os.environ.get("STAR_WEIGHT_SYNC_MODE", "auto")).strip().lower()
-        if mode not in {"auto", "collective", "stateless"}:
+        if mode not in {"auto", "collective", "stateless", "local_pair"}:
             print(f"[star] invalid STAR_WEIGHT_SYNC_MODE={mode}, fallback to auto")
             mode = "auto"
 
@@ -285,9 +287,21 @@ class StarRayTrainer:
                 if mode == "collective":
                     raise
 
-        need_stateless = (self.device_name == "npu") or (mode == "stateless") or (
-            mode == "auto" and not collective_ready
+        # CUDA + colocated WorkerDict cannot safely build a 2*N stateless NCCL communicator,
+        # because actor/rollout are on the same local GPU and trigger duplicate GPU ranks.
+        use_local_pair = self.device_name != "npu" and (
+            mode == "local_pair" or ((mode in {"auto", "stateless"}) and not collective_ready)
         )
+        if use_local_pair:
+            ctx.actor_wg.set_weight_sync_mode("local_pair")
+            ctx.rollout_wg.set_weight_sync_mode("local_pair")
+            print(f"[star] local_pair weight sync ready model={model_id} group={group_name}")
+            return
+
+        ctx.actor_wg.set_weight_sync_mode("collective")
+        ctx.rollout_wg.set_weight_sync_mode("collective")
+
+        need_stateless = self.device_name == "npu" and (mode in {"auto", "stateless"} or not collective_ready)
         if need_stateless:
             last_err = None
             for attempt in range(max_retries):
