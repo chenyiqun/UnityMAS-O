@@ -37,6 +37,7 @@ class ModelWorkerContext:
     resource_pool: RayResourcePool
     actor_wg: RayWorkerGroup
     rollout_wg: RayWorkerGroup
+    rollout_manager: Optional[Any] = None
     critic_wg: Optional[RayWorkerGroup] = None
     ref_policy_wg: Optional[RayWorkerGroup] = None
     rm_wg: Optional[RayWorkerGroup] = None
@@ -151,12 +152,23 @@ class StarRayTrainer:
         cfg = OmegaConf.create(OmegaConf.to_container(self.config.actor_rollout_ref, resolve=True))
         cfg.model_id = model_id
         cfg.star_buffer = OmegaConf.to_container(self.config.star.buffer, resolve=True)
+        with open_dict(cfg):
+            if OmegaConf.select(cfg, "rollout.custom") is None:
+                cfg.rollout.custom = {}
+            # Multi-model async server actors must use distinct names in the same Ray namespace.
+            cfg.rollout.custom["server_name_prefix"] = f"star_{model_id}_"
         engine_cfg = self.engine_cfg_by_model_id.get(model_id, None)
         if engine_cfg is not None:
             # Optional per-engine model path override for true multi-LLM training.
             engine_model_path = engine_cfg.get("model_path", None)
             if engine_model_path is not None:
                 cfg.model.path = str(engine_model_path)
+        return cfg
+
+    def _build_manager_cfg_for_model(self, actor_rollout_cfg):
+        cfg = OmegaConf.create(OmegaConf.to_container(self.config, resolve=True))
+        with open_dict(cfg):
+            cfg.actor_rollout_ref = OmegaConf.create(OmegaConf.to_container(actor_rollout_cfg, resolve=True))
         return cfg
 
     def _clone_critic_cfg_for_model(self, model_id: str, actor_model_path: Optional[str] = None):
@@ -239,6 +251,14 @@ class StarRayTrainer:
             rollout_wg = spawned["rollout"]
             actor_wg.init_model()
             rollout_wg.init_model()
+            rollout_manager = None
+            rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode", default="async"))
+            if rollout_mode == "async":
+                from verl.experimental.one_step_off_policy.agent_loop.agent_loop import OneStepOffAgentLoopManager
+
+                manager_cfg = self._build_manager_cfg_for_model(actor_rollout_cfg)
+                rollout_manager = OneStepOffAgentLoopManager(config=manager_cfg, worker_group=rollout_wg)
+                print(f"[star] async rollout manager ready model={spec.model_id}")
 
             critic_wg = spawned.get("critic")
             if critic_wg is not None:
@@ -257,6 +277,7 @@ class StarRayTrainer:
                 resource_pool=resource_pool,
                 actor_wg=actor_wg,
                 rollout_wg=rollout_wg,
+                rollout_manager=rollout_manager,
                 critic_wg=critic_wg,
                 ref_policy_wg=ref_wg,
                 rm_wg=rm_wg,
@@ -391,8 +412,14 @@ class StarRayTrainer:
         ctx = self.model_contexts[model_id]
         if model_id not in self._rollout_semaphore_by_model:
             self._rollout_semaphore_by_model[model_id] = asyncio.Semaphore(max(1, self._max_parallel_rollouts_per_model))
+        gen_batch = self._get_gen_batch(batch)
         async with self._rollout_semaphore_by_model[model_id]:
-            thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, self._get_gen_batch(batch))
+            if ctx.rollout_manager is None:
+                thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
+            else:
+                fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
+                full_batch = gen_batch.union(fat)
+                thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
         return model_id, thin, batch
 
     @staticmethod

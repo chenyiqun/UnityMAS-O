@@ -86,6 +86,8 @@ class ServerAdapter(BaseRollout):
         self.replica_rank = rank // rollout_world_size
         self.rollout_rank = rank % rollout_world_size
         self.node_rank = self.rollout_rank // local_world_size
+        custom_cfg = config.get("custom", {}) or {}
+        self.server_name_prefix = str(custom_cfg.get("server_name_prefix", "") or "")
 
         if config.layered_summon or (config.expert_parallel_size > 1 and not _check_vllm_version_for_sleep_level()):
             logger.warning("Setting the sleep level to 1 may cause a memory overflow.")
@@ -105,6 +107,9 @@ class ServerAdapter(BaseRollout):
                 "your software and CANN toolkit versions meet the requirements for IPC support. (Ascend HDK version "
                 ">= 25.3.rc1 and CANN toolkit version >= 8.3.RC1)"
             )
+
+    def _server_actor_name(self) -> str:
+        return f"{self.server_name_prefix}vllm_server_{self.replica_rank}_{self.node_rank}"
 
     async def _execute_method(
         self,
@@ -131,7 +136,7 @@ class ServerAdapter(BaseRollout):
 
         # Lazy init http server adapter because http server is launched after hybrid engine.
         if self.server_handle is None:
-            self.server_handle = ray.get_actor(f"vllm_server_{self.replica_rank}_{self.node_rank}")
+            self.server_handle = ray.get_actor(self._server_actor_name())
 
         future = self.server_handle.collective_rpc.remote(method, timeout=timeout, args=args, kwargs=kwargs)
         return future if non_block else await future

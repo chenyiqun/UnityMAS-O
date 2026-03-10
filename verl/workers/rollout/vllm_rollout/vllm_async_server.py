@@ -728,6 +728,8 @@ class vLLMReplica(RolloutReplica):
         assert len(self.workers) == self.world_size, (
             f"worker number {len(self.workers)} not equal to world size {self.world_size}"
         )
+        custom_cfg = self.config.get("custom", {}) or {}
+        server_name_prefix = str(custom_cfg.get("server_name_prefix", "") or "")
 
         # NOTE: We always use MP Executor backend whether it's single-node or multi-node.
         # For multi-node without DP (e.g TP=16), need vllm>=0.11.1, https://github.com/vllm-project/vllm/pull/23691
@@ -760,9 +762,9 @@ class vLLMReplica(RolloutReplica):
             )
             node_id = worker_node_ids[node_rank * gpus_per_replica_node]
             name = (
-                f"vllm_server_{self.replica_rank}_{node_rank}"
+                f"{server_name_prefix}vllm_server_{self.replica_rank}_{node_rank}"
                 if not self.is_reward_model
-                else f"vllm_server_reward_{self.replica_rank}_{node_rank}"
+                else f"{server_name_prefix}vllm_server_reward_{self.replica_rank}_{node_rank}"
             )
             server = self.server_class.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(

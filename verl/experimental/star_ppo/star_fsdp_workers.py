@@ -229,12 +229,10 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         except Exception:
             return ""
 
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
-    def generate_sequences_thin(self, prompts: DataProto) -> DataProto:
-        fat_output = self.generate_sequences(prompts)
-        bsz = len(fat_output)
-        query_ids = prompts.non_tensor_batch.get("query_id", np.array(["unknown"] * bsz, dtype=object))
-        agent_ids = prompts.non_tensor_batch.get("agent_id", np.array(["agent_0"] * bsz, dtype=object))
+    def _build_thin_from_batch(self, full_batch: DataProto) -> DataProto:
+        bsz = len(full_batch)
+        query_ids = full_batch.non_tensor_batch.get("query_id", np.array(["unknown"] * bsz, dtype=object))
+        agent_ids = full_batch.non_tensor_batch.get("agent_id", np.array(["agent_0"] * bsz, dtype=object))
         model_id = str(self.config.get("model_id", "unknown_model"))
 
         traj_ids = np.empty((bsz,), dtype=object)
@@ -242,7 +240,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         action_text = np.empty((bsz,), dtype=object)
         created_ts = np.empty((bsz,), dtype=np.float64)
 
-        responses = fat_output.batch.get("responses", None)
+        responses = full_batch.batch.get("responses", None)
         now = time.time()
         for i in range(bsz):
             traj_id = uuid.uuid4().hex
@@ -253,7 +251,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             response_tokens = responses[i] if responses is not None else None
             action_text[i] = self._decode_action_text(response_tokens)
 
-            fat_item = fat_output[i : i + 1]
+            fat_item = full_batch[i : i + 1]
             self._traj_buffer.put(
                 TrajectoryEntry(
                     traj_id=traj_id,
@@ -275,6 +273,16 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             },
             meta_info={"thin_only": True},
         )
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    def generate_sequences_thin(self, prompts: DataProto) -> DataProto:
+        fat_output = self.generate_sequences(prompts)
+        full_batch = prompts.union(fat_output)
+        return self._build_thin_from_batch(full_batch)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
+    def build_thin_from_generated(self, full_batch: DataProto) -> DataProto:
+        return self._build_thin_from_batch(full_batch)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def commit_rewards(self, rewards: DataProto) -> dict:
