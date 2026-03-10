@@ -418,7 +418,13 @@ class StarRayTrainer:
                 thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
             else:
                 fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
-                full_batch = gen_batch.union(fat)
+                # Avoid DataProto.union() conflicts on object-typed non-tensor fields
+                # (e.g. raw_prompt) that may be semantically equivalent but not deeply equal.
+                # The async agent-loop output already carries the required rollout tensors.
+                full_batch = fat
+                for key in ("query_id", "agent_id"):
+                    if key not in full_batch.non_tensor_batch and key in gen_batch.non_tensor_batch:
+                        full_batch.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
                 thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
         return model_id, thin, batch
 
