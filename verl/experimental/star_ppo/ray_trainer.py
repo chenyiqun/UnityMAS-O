@@ -83,6 +83,10 @@ class StarRayTrainer:
         self.global_steps = 0
         self._max_parallel_rollouts_per_model = int(self.config.star.workflow.get("max_parallel_rollouts_per_model", 32))
         self._rollout_semaphore_by_model: dict[str, asyncio.Semaphore] = {}
+        # For tiny batches (especially bsz=1), ND dispatch padding can bias samples
+        # to shard-0 if we always slice the first item. Use round-robin shard pick to
+        # spread committed trajectories across rollout shards.
+        self._thin_pick_cursor_by_model: dict[str, int] = defaultdict(int)
         self.workflow_runner = self._create_workflow_runner()
         if self.config.algorithm.use_kl_in_reward:
             for model_id in self.model_ids:
@@ -421,8 +425,20 @@ class StarRayTrainer:
                     pad = rollout_dp_size - (bsz % rollout_dp_size)
                     padded_indices = list(range(bsz)) + [bsz - 1] * pad
                     padded_batch = gen_batch.select_idxs(padded_indices)
+                    keep_mask = np.zeros((len(padded_indices),), dtype=bool)
+                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                        pick = int(self._thin_pick_cursor_by_model[model_id] % rollout_dp_size)
+                        self._thin_pick_cursor_by_model[model_id] += 1
+                        keep_mask[pick] = True
+                    else:
+                        keep_mask[:bsz] = True
+                    padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
                     thin_padded = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, padded_batch)
-                    thin = thin_padded.select_idxs(list(range(bsz)))
+                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                        pick_idx = int(np.argmax(keep_mask))
+                        thin = thin_padded.select_idxs([pick_idx])
+                    else:
+                        thin = thin_padded.select_idxs(list(range(bsz)))
                 else:
                     thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
             else:
@@ -441,8 +457,20 @@ class StarRayTrainer:
                     pad = rollout_dp_size - (bsz % rollout_dp_size)
                     padded_indices = list(range(bsz)) + [bsz - 1] * pad
                     padded_batch = full_batch.select_idxs(padded_indices)
+                    keep_mask = np.zeros((len(padded_indices),), dtype=bool)
+                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                        pick = int(self._thin_pick_cursor_by_model[model_id] % rollout_dp_size)
+                        self._thin_pick_cursor_by_model[model_id] += 1
+                        keep_mask[pick] = True
+                    else:
+                        keep_mask[:bsz] = True
+                    padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
                     thin_padded = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, padded_batch)
-                    thin = thin_padded.select_idxs(list(range(bsz)))
+                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                        pick_idx = int(np.argmax(keep_mask))
+                        thin = thin_padded.select_idxs([pick_idx])
+                    else:
+                        thin = thin_padded.select_idxs(list(range(bsz)))
                 else:
                     thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
         return model_id, thin, batch

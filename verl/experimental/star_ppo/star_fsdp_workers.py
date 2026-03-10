@@ -233,6 +233,13 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         bsz = len(full_batch)
         query_ids = full_batch.non_tensor_batch.get("query_id", np.array(["unknown"] * bsz, dtype=object))
         agent_ids = full_batch.non_tensor_batch.get("agent_id", np.array(["agent_0"] * bsz, dtype=object))
+        keep_mask = full_batch.non_tensor_batch.get("__star_keep_in_buffer__", None)
+        if keep_mask is None:
+            keep_mask = np.ones((bsz,), dtype=bool)
+        else:
+            keep_mask = np.array(keep_mask, dtype=bool).reshape(-1)
+            if keep_mask.shape[0] != bsz:
+                keep_mask = np.ones((bsz,), dtype=bool)
         model_id = str(self.config.get("model_id", "unknown_model"))
 
         traj_ids = np.empty((bsz,), dtype=object)
@@ -243,7 +250,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         responses = full_batch.batch.get("responses", None)
         now = time.time()
         for i in range(bsz):
-            traj_id = uuid.uuid4().hex
+            traj_id = uuid.uuid4().hex if bool(keep_mask[i]) else ""
             traj_ids[i] = traj_id
             model_ids[i] = model_id
             created_ts[i] = now
@@ -251,16 +258,17 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             response_tokens = responses[i] if responses is not None else None
             action_text[i] = self._decode_action_text(response_tokens)
 
-            fat_item = full_batch[i : i + 1]
-            self._traj_buffer.put(
-                TrajectoryEntry(
-                    traj_id=traj_id,
-                    model_id=model_id,
-                    query_id=str(query_ids[i]),
-                    agent_id=str(agent_ids[i]),
-                    fat_data=fat_item,
+            if bool(keep_mask[i]):
+                fat_item = full_batch[i : i + 1]
+                self._traj_buffer.put(
+                    TrajectoryEntry(
+                        traj_id=traj_id,
+                        model_id=model_id,
+                        query_id=str(query_ids[i]),
+                        agent_id=str(agent_ids[i]),
+                        fat_data=fat_item,
+                    )
                 )
-            )
 
         return DataProto.from_dict(
             non_tensors={
