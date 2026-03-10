@@ -322,8 +322,21 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         if len(entries) == 0:
             return self._empty_batch()
 
-        fat_list = [e.fat_data for e in entries]
+        fat_list = []
+        for e in entries:
+            # Each trajectory may carry per-call timing/metrics in meta_info.
+            # Those fields are expected to differ and would make DataProto.concat
+            # raise on conflicting meta values, so sanitize before concatenation.
+            fat = e.fat_data
+            if fat.meta_info is None:
+                fat.meta_info = {}
+            else:
+                fat.meta_info.pop("timing", None)
+                fat.meta_info.pop("metrics", None)
+            fat_list.append(fat)
         batch = DataProto.concat(fat_list)
+        # Keep rollout-ready batch meta deterministic for downstream consumers.
+        batch.meta_info = {}
 
         response_mask = batch.batch.get("response_mask", None)
         responses = batch.batch.get("responses", None)
