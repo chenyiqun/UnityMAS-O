@@ -159,6 +159,26 @@ class StarRayTrainer:
                 cfg.model.path = str(engine_model_path)
         return cfg
 
+    def _clone_critic_cfg_for_model(self, model_id: str, actor_model_path: Optional[str] = None):
+        cfg = OmegaConf.create(OmegaConf.to_container(self.config.critic, resolve=True))
+        engine_cfg = self.engine_cfg_by_model_id.get(model_id, None)
+        model_path = None
+        if engine_cfg is not None:
+            engine_model_path = engine_cfg.get("model_path", None)
+            if engine_model_path:
+                model_path = str(engine_model_path)
+        if not model_path and actor_model_path:
+            model_path = str(actor_model_path)
+
+        if model_path:
+            with open_dict(cfg):
+                if OmegaConf.select(cfg, "model") is None:
+                    cfg.model = {}
+                cfg.model.path = model_path
+                # Keep critic tokenizer aligned with actor model to guarantee same-model pairing.
+                cfg.model.tokenizer_path = model_path
+        return cfg
+
     def init_workers(self):
         for spec in self.engine_specs:
             resource_pool = RayResourcePool(
@@ -180,9 +200,16 @@ class StarRayTrainer:
             }
 
             if self.use_critic:
-                critic_cfg = omega_conf_to_dataclass(self.config.critic)
+                actor_model_path = OmegaConf.select(actor_rollout_cfg, "model.path")
+                critic_cfg = omega_conf_to_dataclass(
+                    self._clone_critic_cfg_for_model(spec.model_id, actor_model_path=actor_model_path)
+                )
                 class_dict["critic"] = RayClassWithInitArgs(
                     cls=self.role_worker_mapping[Role.Critic], config=critic_cfg
+                )
+                print(
+                    f"[star] model={spec.model_id} actor_model={actor_model_path} "
+                    f"critic_model={critic_cfg.model.path}"
                 )
 
             if self.use_reference_policy:
