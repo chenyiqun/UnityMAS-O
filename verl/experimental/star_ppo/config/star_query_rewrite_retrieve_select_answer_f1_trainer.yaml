@@ -59,7 +59,7 @@ actor_rollout_ref:
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
     # Leave more GPU headroom for actor/critic + weight sync clones on colocated setup.
     # Lower if OOM; try VLLM_USE_V1=0 if v1 fails.
-    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.45}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
     max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,1024}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
     # Disable prefix caching to save memory when OOM; set ROLLOUT_ENABLE_PREFIX_CACHING=true to re-enable.
@@ -87,9 +87,9 @@ data:
   train_files: ${oc.env:TRAIN_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}
   val_files: ${oc.env:VAL_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}
   # Batch sizes (smaller defaults for multi-node stability); can be overridden by env.
-  train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
-  gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
-  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,64}}
+  train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
+  gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
+  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,512}}
 
 ray_kwargs:
   ray_init:
