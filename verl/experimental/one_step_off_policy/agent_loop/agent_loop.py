@@ -49,7 +49,13 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
             split_size = math.ceil(len(prompts) / target_workers)
             chunks = prompts.split(split_size)
 
-        workers = self.agent_loop_workers[: len(chunks)]
+        # Use round-robin worker selection so tiny batches (especially len=1 in STAR
+        # per-node workflow execution) do not always hit worker-0.
+        if not hasattr(self, "_rr_worker_cursor"):
+            self._rr_worker_cursor = 0
+        start = int(self._rr_worker_cursor % len(self.agent_loop_workers))
+        workers = [self.agent_loop_workers[(start + i) % len(self.agent_loop_workers)] for i in range(len(chunks))]
+        self._rr_worker_cursor += len(chunks)
         outputs = await asyncio.gather(
             *[
                 asyncio.to_thread(ray.get, worker.generate_sequences.remote(chunk))

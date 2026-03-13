@@ -104,8 +104,11 @@ ray_kwargs:
 star:
   workflow:
     name: graph_query_rewrite_retrieve_select_answer
+    # Disable hard per-node timeout by default; avoid aborting whole training
+    # when a single LLM call is temporarily queued for >300s.
+    llm_timeout_seconds: 0
     max_inflight_queries: 128
-    max_parallel_rollouts_per_model: 32
+    max_parallel_rollouts_per_model: 128
     # Truncate each LLM node prompt by token length before inference.
     # Keep this slightly smaller than rollout.prompt_length to reserve chat-template overhead.
     per_infer_prompt_max_tokens: ${oc.decode:${oc.env:STAR_PER_INFER_PROMPT_MAX_TOKENS,8064}}

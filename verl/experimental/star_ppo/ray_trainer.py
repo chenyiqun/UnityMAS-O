@@ -14,6 +14,7 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from ray.util.collective import collective
 from torch.utils.data import DataLoader, Dataset, Sampler
+from tqdm.auto import tqdm
 
 from verl import DataProto
 from verl.experimental.star_ppo.types import EngineSpec
@@ -1043,6 +1044,7 @@ class StarRayTrainer:
     async def _run_validation(self, epoch: int, global_step: int) -> dict[str, float]:
         max_batches = int(self.config.trainer.get("val_max_batches", -1))
         val_progress_every = int(os.environ.get("STAR_VAL_PROGRESS_EVERY", "0"))
+        tqdm_disable = str(os.environ.get("STAR_TQDM_DISABLE", "false")).strip().lower() in {"1", "true", "yes", "on"}
         batch_count = 0
         reward_sum = 0.0
         reward_count = 0
@@ -1054,36 +1056,59 @@ class StarRayTrainer:
                 f"max_batches={max_batches}"
             )
 
-        for batch_idx, batch_dict in enumerate(self.val_dataloader):
-            if max_batches > 0 and batch_idx >= max_batches:
-                break
-            batch_start = time.time()
-            batch_count += 1
-            batch = DataProto.from_single_dict(batch_dict)
-            if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
-                print(
-                    f"[star] validation batch_start idx={batch_idx} size={len(batch)} "
-                    f"inflight={self.config.star.workflow.get('max_inflight_queries', 32)}"
-                )
-            self._ensure_routing_fields(batch)
-            rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
-            if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
-                print(
-                    f"[star] validation batch_done idx={batch_idx} "
-                    f"elapsed={time.time() - batch_start:.2f}s reward_samples={len(rewards)}"
-                )
+        total_val_batches = len(self.val_dataloader)
+        if max_batches > 0:
+            total_val_batches = min(total_val_batches, max_batches)
+        val_iter = tqdm(
+            enumerate(self.val_dataloader),
+            total=total_val_batches,
+            desc=f"[star-val] e{epoch} gs{global_step}",
+            leave=True,
+            dynamic_ncols=True,
+            disable=tqdm_disable,
+        )
+        try:
+            for batch_idx, batch_dict in val_iter:
+                if max_batches > 0 and batch_idx >= max_batches:
+                    break
+                batch_start = time.time()
+                batch_count += 1
+                batch = DataProto.from_single_dict(batch_dict)
+                if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
+                    print(
+                        f"[star] validation batch_start idx={batch_idx} size={len(batch)} "
+                        f"inflight={self.config.star.workflow.get('max_inflight_queries', 32)}"
+                    )
+                self._ensure_routing_fields(batch)
+                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+                if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
+                    print(
+                        f"[star] validation batch_done idx={batch_idx} "
+                        f"elapsed={time.time() - batch_start:.2f}s reward_samples={len(rewards)}"
+                    )
 
-            for key, val in workflow_metrics.items():
-                if isinstance(val, int | float):
-                    workflow_acc[key].append(float(val))
+                for key, val in workflow_metrics.items():
+                    if isinstance(val, int | float):
+                        workflow_acc[key].append(float(val))
 
-            if len(rewards) > 0:
-                reward_vec = rewards.batch["reward"].detach().cpu().float().reshape(-1).numpy()
-                reward_sum += float(np.sum(reward_vec))
-                reward_count += int(reward_vec.shape[0])
-                # Commit to local buffers so worker-side trajectory states are consistent.
-                self._commit_rewards(rewards)
-                self._drain_rollout_ready_queues()
+                if len(rewards) > 0:
+                    reward_vec = rewards.batch["reward"].detach().cpu().float().reshape(-1).numpy()
+                    reward_sum += float(np.sum(reward_vec))
+                    reward_count += int(reward_vec.shape[0])
+                    # Commit to local buffers so worker-side trajectory states are consistent.
+                    self._commit_rewards(rewards)
+                    self._drain_rollout_ready_queues()
+
+                val_iter.set_postfix(
+                    {
+                        "inflight": int(self.config.star.workflow.get("max_inflight_queries", 32)),
+                        "samples": int(reward_count),
+                        "rmean": float(reward_sum / max(1, reward_count)),
+                    },
+                    refresh=False,
+                )
+        finally:
+            val_iter.close()
 
         metrics: dict[str, float] = {
             "validation/global_step": float(global_step),
@@ -1106,6 +1131,7 @@ class StarRayTrainer:
             default_backend=self.config.trainer.logger,
             config=OmegaConf.to_container(self.config, resolve=True),
         )
+        tqdm_disable = str(os.environ.get("STAR_TQDM_DISABLE", "false")).strip().lower() in {"1", "true", "yes", "on"}
 
         global_step = self._load_checkpoint()
         self._global_step = global_step
@@ -1123,42 +1149,64 @@ class StarRayTrainer:
             return
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
-                global_step += 1
-                self._global_step = global_step
-                if global_step > self.total_training_steps:
-                    break
+            train_iter = tqdm(
+                enumerate(self.train_dataloader),
+                total=len(self.train_dataloader),
+                desc=f"[star-train] e{epoch}",
+                leave=True,
+                dynamic_ncols=True,
+                disable=tqdm_disable,
+            )
+            try:
+                for _, batch_dict in train_iter:
+                    global_step += 1
+                    self._global_step = global_step
+                    if global_step > self.total_training_steps:
+                        break
 
-                batch = DataProto.from_single_dict(batch_dict)
-                self._ensure_routing_fields(batch)
-                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
-                if len(rewards) == 0:
-                    continue
+                    batch = DataProto.from_single_dict(batch_dict)
+                    self._ensure_routing_fields(batch)
+                    rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+                    if len(rewards) == 0:
+                        train_iter.set_postfix({"gstep": int(global_step), "samples": 0}, refresh=False)
+                        continue
 
-                commit_metrics = self._commit_rewards(rewards)
-                sync_metrics = await self._global_sync_and_update()
+                    commit_metrics = self._commit_rewards(rewards)
+                    sync_metrics = await self._global_sync_and_update()
 
-                step_metrics = {
-                    "training/global_step": float(global_step),
-                    "training/epoch": float(epoch),
-                    **workflow_metrics,
-                    **commit_metrics,
-                    **sync_metrics,
-                }
-                logger.log(data=step_metrics, step=global_step)
-                if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
-                    print(f"[star] step={global_step} batch_update={step_metrics}")
+                    step_metrics = {
+                        "training/global_step": float(global_step),
+                        "training/epoch": float(epoch),
+                        **workflow_metrics,
+                        **commit_metrics,
+                        **sync_metrics,
+                    }
+                    logger.log(data=step_metrics, step=global_step)
+                    if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
+                        print(f"[star] step={global_step} batch_update={step_metrics}")
 
-                is_last_step = global_step >= self.total_training_steps
-                if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
-                    val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
-                    logger.log(data=val_metrics, step=global_step)
-                    print(f"[star] step={global_step} validation={val_metrics}")
+                    train_iter.set_postfix(
+                        {
+                            "gstep": int(global_step),
+                            "inflight": int(self.config.star.workflow.get("max_inflight_queries", 32)),
+                            "samples": int(workflow_metrics.get("workflow/samples", 0)),
+                            "reward": float(workflow_metrics.get("workflow/outcome_reward_mean", 0.0)),
+                        },
+                        refresh=False,
+                    )
 
-                if self.config.trainer.save_freq > 0 and (
-                    is_last_step or global_step % self.config.trainer.save_freq == 0
-                ):
-                    self._save_checkpoint(global_step)
+                    is_last_step = global_step >= self.total_training_steps
+                    if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
+                        val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
+                        logger.log(data=val_metrics, step=global_step)
+                        print(f"[star] step={global_step} validation={val_metrics}")
+
+                    if self.config.trainer.save_freq > 0 and (
+                        is_last_step or global_step % self.config.trainer.save_freq == 0
+                    ):
+                        self._save_checkpoint(global_step)
+            finally:
+                train_iter.close()
 
             if global_step >= self.total_training_steps:
                 break
