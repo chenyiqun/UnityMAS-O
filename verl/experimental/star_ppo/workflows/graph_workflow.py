@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import string
+from collections.abc import Mapping
 from collections import Counter, defaultdict
 from typing import Any
 
@@ -136,7 +137,8 @@ class GraphWorkflowRunner(WorkflowRunner):
         for item in list(edges_cfg):
             if isinstance(item, str):
                 edges.append({"to": item, "when": None})
-            elif isinstance(item, dict) and "to" in item:
+            # OmegaConf DictConfig is Mapping-like but not a plain dict.
+            elif isinstance(item, Mapping) and "to" in item:
                 edges.append({"to": str(item["to"]), "when": item.get("when", None)})
         return edges
 
@@ -493,6 +495,9 @@ class GraphWorkflowRunner(WorkflowRunner):
                     f"[star-debug] batch={debug_batch_idx} query_idx={query_local_idx} query_id={query_id}"
                 )
                 debug_lines.append(f"[star-debug] question={self._clip_debug_text(context['question'])}")
+                debug_lines.append(
+                    f"[star-debug] ground_truth={self._summarize_debug_value(context['ground_truth'])}"
+                )
 
             frontier = list(self.start_nodes)
             llm_exec_records: list[dict[str, Any]] = []
