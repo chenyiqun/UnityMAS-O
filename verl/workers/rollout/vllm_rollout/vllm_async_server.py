@@ -191,6 +191,12 @@ class vLLMHttpServer:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ):
+        # vLLM V1 worker may not expose `clear_kv_cache`; keep compatibility by
+        # routing it to the server-level cache reset implementation.
+        if method == "clear_kv_cache":
+            await self.clear_kv_cache()
+            return
+
         await self.engine.collective_rpc(
             method=method,
             timeout=timeout,
