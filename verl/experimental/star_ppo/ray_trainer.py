@@ -199,6 +199,26 @@ class StarRayTrainer:
         pending_init_refs: list[Any] = []
         actor_rollout_cfg_by_model_id = {}
 
+        def _enqueue_role_init(model_id: str, role_name: str, wg: RayWorkerGroup):
+            worker0 = wg.workers[0]
+            method_candidates = [f"{role_name}_init_model", "init_model"]
+            method_name = None
+            for candidate in method_candidates:
+                if hasattr(worker0, candidate):
+                    method_name = candidate
+                    break
+            if method_name is None:
+                raise AttributeError(
+                    f"No init method found for role={role_name}. "
+                    f"Tried candidates={method_candidates}"
+                )
+            refs = wg.execute_all_async(method_name)
+            print(
+                f"[star] enqueue init_model model={model_id} role={role_name} "
+                f"remote_method={method_name} workers={len(wg.workers)} calls={len(refs)}"
+            )
+            return refs
+
         for spec in self.engine_specs:
             resource_pool = RayResourcePool(
                 process_on_nodes=[spec.n_gpus_per_node] * spec.nnodes,
@@ -272,39 +292,19 @@ class StarRayTrainer:
             )
             actor_rollout_cfg_by_model_id[spec.model_id] = actor_rollout_cfg
 
-            actor_refs = actor_wg.execute_all_async("init_model")
+            actor_refs = _enqueue_role_init(spec.model_id, "actor", actor_wg)
             pending_init_refs.extend(actor_refs)
-            print(
-                f"[star] enqueue init_model model={spec.model_id} role=actor "
-                f"workers={len(actor_wg.workers)} calls={len(actor_refs)}"
-            )
-            rollout_refs = rollout_wg.execute_all_async("init_model")
+            rollout_refs = _enqueue_role_init(spec.model_id, "rollout", rollout_wg)
             pending_init_refs.extend(rollout_refs)
-            print(
-                f"[star] enqueue init_model model={spec.model_id} role=rollout "
-                f"workers={len(rollout_wg.workers)} calls={len(rollout_refs)}"
-            )
             if critic_wg is not None:
-                critic_refs = critic_wg.execute_all_async("init_model")
+                critic_refs = _enqueue_role_init(spec.model_id, "critic", critic_wg)
                 pending_init_refs.extend(critic_refs)
-                print(
-                    f"[star] enqueue init_model model={spec.model_id} role=critic "
-                    f"workers={len(critic_wg.workers)} calls={len(critic_refs)}"
-                )
             if ref_wg is not None:
-                ref_refs = ref_wg.execute_all_async("init_model")
+                ref_refs = _enqueue_role_init(spec.model_id, "ref", ref_wg)
                 pending_init_refs.extend(ref_refs)
-                print(
-                    f"[star] enqueue init_model model={spec.model_id} role=ref "
-                    f"workers={len(ref_wg.workers)} calls={len(ref_refs)}"
-                )
             if rm_wg is not None:
-                rm_refs = rm_wg.execute_all_async("init_model")
+                rm_refs = _enqueue_role_init(spec.model_id, "rm", rm_wg)
                 pending_init_refs.extend(rm_refs)
-                print(
-                    f"[star] enqueue init_model model={spec.model_id} role=rm "
-                    f"workers={len(rm_wg.workers)} calls={len(rm_refs)}"
-                )
 
         # Load all models in parallel across all engines/roles first.
         if pending_init_refs:
