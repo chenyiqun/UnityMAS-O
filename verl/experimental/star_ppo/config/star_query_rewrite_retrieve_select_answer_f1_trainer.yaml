@@ -53,6 +53,8 @@ actor_rollout_ref:
     # Required by rollout config. Options: hf / vllm / sglang / trtllm.
     # You can override via env: ROLLOUT_NAME.
     name: ${oc.env:ROLLOUT_NAME,vllm}
+    # Increase per-inference prompt budget from default 512 to reduce max_tokens=0 risk.
+    prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
     # Leave more GPU headroom for actor/critic + weight sync clones on colocated setup.
     # Lower if OOM; try VLLM_USE_V1=0 if v1 fails.
     gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
@@ -97,6 +99,10 @@ star:
     name: graph_query_rewrite_retrieve_select_answer
     max_inflight_queries: 32
     max_parallel_rollouts_per_model: 32
+    # Truncate each LLM node prompt by token length before inference.
+    # Keep this slightly smaller than rollout.prompt_length to reserve chat-template overhead.
+    per_infer_prompt_max_tokens: ${oc.decode:${oc.env:STAR_PER_INFER_PROMPT_MAX_TOKENS,8064}}
+    prompt_truncation_margin: ${oc.decode:${oc.env:STAR_PROMPT_TRUNCATION_MARGIN,128}}
     debug:
       # Enable concise workflow trace for debugging:
       # STAR_WORKFLOW_DEBUG=true
@@ -159,7 +165,7 @@ star:
           type: tool
           tool: retriever
           input_template: "{rewrite.rewritten_query}"
-          top_k: 8
+          top_k: 5
           max_attempts: 5
           output_key: retrieved_docs
           next:

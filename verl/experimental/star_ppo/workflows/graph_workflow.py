@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import string
@@ -15,6 +16,8 @@ from verl.experimental.star_ppo.tools import build_retriever_tool
 from verl.experimental.star_ppo.workflows.base import WorkflowRunner
 from verl.utils.import_utils import load_extern_object
 from verl.utils.reward_score.search_r1_like_qa_em import em_check
+
+logger = logging.getLogger(__name__)
 
 
 class GraphWorkflowRunner(WorkflowRunner):
@@ -72,6 +75,13 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.outcome_cfg = self.graph_cfg.get("outcome_reward", {"type": "em", "source": "", "weight": 1.0})
         self.tools = self._build_tools()
         self._validate_graph()
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        prompt_len_cfg = int(rollout_cfg.get("prompt_length", 4096))
+        trunc_margin = int(self.workflow_cfg.get("prompt_truncation_margin", 128))
+        self.per_infer_prompt_max_tokens = max(256, prompt_len_cfg - trunc_margin)
+        self.per_infer_prompt_max_tokens = int(
+            self.workflow_cfg.get("per_infer_prompt_max_tokens", self.per_infer_prompt_max_tokens)
+        )
         debug_cfg = dict(self.workflow_cfg.get("debug", {}))
         env_debug = str(os.environ.get("STAR_WORKFLOW_DEBUG", "")).strip().lower()
         self.debug_enabled = bool(debug_cfg.get("enabled", False)) or env_debug in {"1", "true", "yes", "on"}
@@ -179,6 +189,45 @@ class GraphWorkflowRunner(WorkflowRunner):
                 return f"dict(keys={keys[:5]}, {', '.join(preview)})"
             return f"dict(keys={keys[:5]})"
         return self._clip_debug_text(value)
+
+    def _truncate_prompt_for_inference(self, prompt_text: str) -> tuple[str, int]:
+        """Token-level truncation before each LLM node inference.
+
+        Returns:
+            tuple[str, int]: (possibly truncated prompt text, removed_token_count)
+        """
+        tokenizer = getattr(self.trainer, "tokenizer", None)
+        max_tokens = int(self.per_infer_prompt_max_tokens)
+        if tokenizer is None or max_tokens <= 0:
+            return prompt_text, 0
+
+        try:
+            token_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
+        except TypeError:
+            token_ids = tokenizer.encode(prompt_text)
+        except Exception:
+            return prompt_text, 0
+
+        if not isinstance(token_ids, list):
+            return prompt_text, 0
+
+        total = len(token_ids)
+        if total <= max_tokens:
+            return prompt_text, 0
+
+        # Keep instruction head + latest evidence tail.
+        head_keep = max(64, int(max_tokens * 0.35))
+        head_keep = min(head_keep, max_tokens - 1)
+        tail_keep = max_tokens - head_keep
+        kept_ids = token_ids[:head_keep] + token_ids[-tail_keep:]
+
+        try:
+            new_text = tokenizer.decode(kept_ids, skip_special_tokens=True)
+        except TypeError:
+            new_text = tokenizer.decode(kept_ids)
+        except Exception:
+            return prompt_text, 0
+        return new_text, total - len(kept_ids)
 
     @staticmethod
     def _as_template_value(v: Any) -> str:
@@ -377,6 +426,16 @@ class GraphWorkflowRunner(WorkflowRunner):
             model_id = str(node_cfg["model_id"])
             agent_id = str(node_cfg.get("agent_id", node_id))
             prompt_text = self._render_template(str(node_cfg.get("prompt_template", "{question}")), context)
+            prompt_text, prompt_trimmed = self._truncate_prompt_for_inference(prompt_text)
+            if prompt_trimmed > 0:
+                query_id = self._extract_from_batch(query_batch, "query_id")
+                logger.warning(
+                    "Prompt truncated before inference: node=%s query_id=%s removed_tokens=%d max_prompt_tokens=%d",
+                    node_id,
+                    query_id,
+                    int(prompt_trimmed),
+                    int(self.per_infer_prompt_max_tokens),
+                )
             prompt_batch = self.trainer._build_workflow_prompt_batch(
                 query_batch,
                 [[{"role": "user", "content": prompt_text}]],
@@ -400,6 +459,7 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "format_reward": float(format_reward),
                 "output_key": output_key,
                 "output_value": parsed_value,
+                "prompt_trimmed_tokens": int(prompt_trimmed),
             }
 
         if node_type == "tool":
@@ -525,10 +585,14 @@ class GraphWorkflowRunner(WorkflowRunner):
                     node_id = result["node_id"]
                     if debug_on:
                         if result["node_type"] == "llm":
+                            trim_note = ""
+                            trimmed = int(result.get("prompt_trimmed_tokens", 0))
+                            if trimmed > 0:
+                                trim_note = f" trimmed={trimmed}tok"
                             debug_lines.append(
                                 f"[star-debug] step={step} node={node_id} "
                                 f"out={result['output_key']}:{self._summarize_debug_value(result['output_value'])} "
-                                f"format={float(result['format_reward']):.2f}"
+                                f"format={float(result['format_reward']):.2f}{trim_note}"
                             )
                         else:
                             debug_lines.append(
