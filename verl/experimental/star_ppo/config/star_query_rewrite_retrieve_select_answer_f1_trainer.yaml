@@ -54,9 +54,12 @@ actor_rollout_ref:
     # You can override via env: ROLLOUT_NAME.
     name: ${oc.env:ROLLOUT_NAME,vllm}
     # Leave more GPU headroom for actor/critic + weight sync clones on colocated setup.
-    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.35}}
-    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,4096}}
-    max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,256}}
+    # Lower if OOM; try VLLM_USE_V1=0 if v1 fails.
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
+    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,2048}}
+    max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
+    # Disable prefix caching to save memory when OOM; set ROLLOUT_ENABLE_PREFIX_CACHING=true to re-enable.
+    enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
     checkpoint_engine:
       # Must be larger than the largest single weight tensor during actor->rollout sync.
       # You can override via env: ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB.
