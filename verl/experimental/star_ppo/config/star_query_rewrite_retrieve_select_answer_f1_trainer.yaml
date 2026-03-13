@@ -89,7 +89,7 @@ data:
   # Batch sizes (smaller defaults for multi-node stability); can be overridden by env.
   train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
   gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
-  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,512}}
+  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,64}}
 
 ray_kwargs:
   ray_init:
@@ -99,7 +99,7 @@ ray_kwargs:
 star:
   workflow:
     name: graph_query_rewrite_retrieve_select_answer
-    max_inflight_queries: 32
+    max_inflight_queries: 64
     max_parallel_rollouts_per_model: 32
     # Truncate each LLM node prompt by token length before inference.
     # Keep this slightly smaller than rollout.prompt_length to reserve chat-template overhead.

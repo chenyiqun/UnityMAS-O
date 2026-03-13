@@ -24,7 +24,7 @@ trainer:
 star:
   workflow:
     name: single_agent
-    max_inflight_queries: 32
+    max_inflight_queries: 64
     max_parallel_rollouts_per_model: 32
   buffer:
     max_items: 100000
