@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import string
 from collections import Counter, defaultdict
@@ -70,6 +71,17 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.outcome_cfg = self.graph_cfg.get("outcome_reward", {"type": "em", "source": "", "weight": 1.0})
         self.tools = self._build_tools()
         self._validate_graph()
+        debug_cfg = dict(self.workflow_cfg.get("debug", {}))
+        env_debug = str(os.environ.get("STAR_WORKFLOW_DEBUG", "")).strip().lower()
+        self.debug_enabled = bool(debug_cfg.get("enabled", False)) or env_debug in {"1", "true", "yes", "on"}
+        self.debug_sample_index = int(
+            debug_cfg.get("sample_index", os.environ.get("STAR_WORKFLOW_DEBUG_SAMPLE_INDEX", 0))
+        )
+        self.debug_max_chars = int(debug_cfg.get("max_chars", os.environ.get("STAR_WORKFLOW_DEBUG_MAX_CHARS", 160)))
+        self.debug_every_n_batches = max(
+            1, int(debug_cfg.get("every_n_batches", os.environ.get("STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES", 20)))
+        )
+        self._debug_batch_counter = 0
 
     def _build_tools(self) -> dict[str, Any]:
         tools = {}
@@ -138,6 +150,33 @@ class GraphWorkflowRunner(WorkflowRunner):
             seen.add(x)
             out.append(x)
         return out
+
+    def _clip_debug_text(self, value: Any) -> str:
+        text = str(value or "")
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= self.debug_max_chars:
+            return text
+        return text[: max(0, self.debug_max_chars - 3)] + "..."
+
+    def _summarize_debug_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            if len(value) == 0:
+                return "list(len=0)"
+            first = self._clip_debug_text(value[0])
+            return f"list(len={len(value)}, first={first})"
+        if isinstance(value, dict):
+            keys = list(value.keys())
+            preview = []
+            for k in keys[:3]:
+                v = value[k]
+                if isinstance(v, str | int | float | bool):
+                    preview.append(f"{k}={self._clip_debug_text(v)}")
+            if preview:
+                return f"dict(keys={keys[:5]}, {', '.join(preview)})"
+            return f"dict(keys={keys[:5]})"
+        return self._clip_debug_text(value)
 
     @staticmethod
     def _as_template_value(v: Any) -> str:
@@ -429,14 +468,32 @@ class GraphWorkflowRunner(WorkflowRunner):
         recall = overlap / float(len(gt_tokens))
         return 2.0 * precision * recall / (precision + recall)
 
-    async def _run_one_query(self, query_batch: DataProto, query_sem: asyncio.Semaphore) -> dict[str, Any]:
+    async def _run_one_query(
+        self,
+        query_batch: DataProto,
+        query_sem: asyncio.Semaphore,
+        query_local_idx: int,
+        debug_query_idx: int | None,
+        debug_batch_idx: int,
+    ) -> dict[str, Any]:
         async with query_sem:
+            debug_lines: list[str] = []
+            debug_on = self.debug_enabled and debug_query_idx is not None and query_local_idx == debug_query_idx
+
             context = {
                 "question": self._extract_question(query_batch),
                 "ground_truth": self._extract_gt_list(query_batch),
                 "nodes": {},
                 "step": 0,
             }
+
+            if debug_on:
+                query_id = self._extract_from_batch(query_batch, "query_id")
+                debug_lines.append(
+                    f"[star-debug] batch={debug_batch_idx} query_idx={query_local_idx} query_id={query_id}"
+                )
+                debug_lines.append(f"[star-debug] question={self._clip_debug_text(context['question'])}")
+
             frontier = list(self.start_nodes)
             llm_exec_records: list[dict[str, Any]] = []
 
@@ -451,6 +508,18 @@ class GraphWorkflowRunner(WorkflowRunner):
                 hit_end = False
                 for result in node_results:
                     node_id = result["node_id"]
+                    if debug_on:
+                        if result["node_type"] == "llm":
+                            debug_lines.append(
+                                f"[star-debug] step={step} node={node_id} "
+                                f"out={result['output_key']}:{self._summarize_debug_value(result['output_value'])} "
+                                f"format={float(result['format_reward']):.2f}"
+                            )
+                        else:
+                            debug_lines.append(
+                                f"[star-debug] step={step} node={node_id} "
+                                f"out={result['output_key']}:{self._summarize_debug_value(result['output_value'])}"
+                            )
                     if result["node_type"] == "llm":
                         llm_exec_records.append(result)
                     if node_id in self.end_nodes:
@@ -465,6 +534,25 @@ class GraphWorkflowRunner(WorkflowRunner):
                     frontier = self._dedupe_keep_order(next_frontier)
 
             outcome_reward = self._compute_outcome_reward(context)
+            debug_dump = None
+            if debug_on:
+                outcome_source = str(self.outcome_cfg.get("source", "") or "")
+                if outcome_source:
+                    pred = self._lookup_path(context, outcome_source, default="")
+                    debug_lines.append(
+                        f"[star-debug] final={outcome_source}:{self._summarize_debug_value(pred)}"
+                    )
+                debug_lines.append(
+                    f"[star-debug] outcome_reward={float(outcome_reward):.4f} llm_nodes={len(llm_exec_records)}"
+                )
+                debug_dump = "\n".join(
+                    [
+                        "[star-debug] ===== trace begin =====",
+                        *debug_lines,
+                        "[star-debug] ===== trace end =====",
+                    ]
+                )
+
             reward_parts = []
             node_format = {}
             for rec in llm_exec_records:
@@ -487,13 +575,38 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "outcome_reward": float(outcome_reward),
                 "node_format": node_format,
                 "llm_node_count": float(len(llm_exec_records)),
+                "debug_dump": debug_dump,
             }
 
     async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
         del epoch
+        self._debug_batch_counter += 1
+        debug_this_batch = self.debug_enabled and (
+            self._debug_batch_counter % max(1, self.debug_every_n_batches) == 0
+        )
+        debug_query_idx = None
+        if debug_this_batch and len(batch) > 0:
+            debug_query_idx = int(self.debug_sample_index) % len(batch)
+
         query_sem = asyncio.Semaphore(max(1, self.max_inflight_queries))
-        tasks = [self._run_one_query(batch.select_idxs([i]), query_sem) for i in range(len(batch))]
+        tasks = [
+            self._run_one_query(
+                batch.select_idxs([i]),
+                query_sem,
+                query_local_idx=i,
+                debug_query_idx=debug_query_idx,
+                debug_batch_idx=self._debug_batch_counter,
+            )
+            for i in range(len(batch))
+        ]
         query_results = await asyncio.gather(*tasks)
+
+        if debug_this_batch:
+            for item in query_results:
+                dump = item.get("debug_dump", None)
+                if dump:
+                    print(dump, flush=True)
+                    break
 
         reward_parts = []
         outcome_rewards = []

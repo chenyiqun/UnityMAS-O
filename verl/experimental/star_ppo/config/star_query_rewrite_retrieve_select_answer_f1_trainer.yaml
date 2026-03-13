@@ -97,6 +97,16 @@ star:
     name: graph_query_rewrite_retrieve_select_answer
     max_inflight_queries: 32
     max_parallel_rollouts_per_model: 32
+    debug:
+      # Enable concise workflow trace for debugging:
+      # STAR_WORKFLOW_DEBUG=true
+      enabled: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG,false}}
+      # Trace only one query in each sampled batch (0-based local index in batch).
+      sample_index: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_SAMPLE_INDEX,0}}
+      # Max chars for each logged field.
+      max_chars: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_MAX_CHARS,160}}
+      # Print once every N batches to avoid noisy logs.
+      every_n_batches: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES,20}}
     runner:
       path: pkg://verl.experimental.star_ppo.workflows.graph_workflow
       name: GraphWorkflowRunner
