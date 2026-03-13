@@ -1,5 +1,5 @@
 import json
-import random
+import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -29,6 +29,12 @@ class HttpRetrieverTool(RetrieverToolInterface):
         if len(self.api_urls) == 0:
             raise ValueError("api_urls must contain at least one valid URL")
         self.timeout_seconds = float(timeout_seconds)
+        # Sticky endpoint routing:
+        # - cache the last successful endpoint
+        # - permanently skip endpoints that return 404
+        self._preferred_url: str | None = None
+        self._bad_urls_404: set[str] = set()
+        self._state_lock = threading.Lock()
 
     @staticmethod
     def _expand_candidate_urls(raw_url: str) -> list[str]:
@@ -122,27 +128,51 @@ class HttpRetrieverTool(RetrieverToolInterface):
             {"questions": [str(question)], "N": int(N)},
             {"queries": [str(question)], "topk": int(N), "return_scores": False},
         ]
-        attempts = 0
-        tried_urls: set[str] = set()
         last_error = ""
+        attempts = 0
 
         while attempts < max_attempts:
-            available_urls = [url for url in self.api_urls if url not in tried_urls]
-            if not available_urls:
-                available_urls = self.api_urls
+            with self._state_lock:
+                preferred = self._preferred_url
+                bad_404 = set(self._bad_urls_404)
 
-            api_url = random.choice(available_urls)
-            tried_urls.add(api_url)
-            for payload in payload_candidates:
-                try:
-                    data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
-                    return self._extract_top_k_docs(data)
-                except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as e:
-                    last_error = (
-                        f"url={api_url}, payload_keys={list(payload.keys())}, "
-                        f"err={type(e).__name__}: {e}"
-                    )
+            candidate_urls: list[str] = []
+            if preferred and preferred not in bad_404:
+                candidate_urls.append(preferred)
+            for url in self.api_urls:
+                if url in bad_404:
                     continue
+                if url not in candidate_urls:
+                    candidate_urls.append(url)
+
+            # If all urls were marked bad (e.g. service updated), allow re-probing.
+            if len(candidate_urls) == 0:
+                candidate_urls = list(self.api_urls)
+
+            for api_url in candidate_urls:
+                for payload in payload_candidates:
+                    try:
+                        data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
+                        docs = self._extract_top_k_docs(data)
+                        with self._state_lock:
+                            self._preferred_url = api_url
+                        return docs
+                    except error.HTTPError as e:
+                        # 404 means wrong endpoint path; blacklist it to avoid log spam.
+                        if int(getattr(e, "code", 0)) == 404:
+                            with self._state_lock:
+                                self._bad_urls_404.add(api_url)
+                        last_error = (
+                            f"url={api_url}, payload_keys={list(payload.keys())}, "
+                            f"err={type(e).__name__}: {e}"
+                        )
+                        continue
+                    except (error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as e:
+                        last_error = (
+                            f"url={api_url}, payload_keys={list(payload.keys())}, "
+                            f"err={type(e).__name__}: {e}"
+                        )
+                        continue
             attempts += 1
 
         suffix = f", last_error: {last_error}" if last_error else ""

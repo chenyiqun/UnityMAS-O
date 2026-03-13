@@ -53,12 +53,14 @@ actor_rollout_ref:
     # Required by rollout config. Options: hf / vllm / sglang / trtllm.
     # You can override via env: ROLLOUT_NAME.
     name: ${oc.env:ROLLOUT_NAME,vllm}
+    # Free vLLM cache around weight update to avoid OOM in update_weights_from_ipc.
+    free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
     # Increase per-inference prompt budget from default 512 to reduce max_tokens=0 risk.
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
     # Leave more GPU headroom for actor/critic + weight sync clones on colocated setup.
     # Lower if OOM; try VLLM_USE_V1=0 if v1 fails.
-    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
-    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,2048}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.45}}
+    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,1024}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
     # Disable prefix caching to save memory when OOM; set ROLLOUT_ENABLE_PREFIX_CACHING=true to re-enable.
     enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
@@ -87,7 +89,7 @@ data:
   # Batch sizes (smaller defaults for multi-node stability); can be overridden by env.
   train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
   gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,256}}
-  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,64}}
+  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,512}}
 
 ray_kwargs:
   ray_init:
@@ -153,11 +155,25 @@ star:
             format_weight: 1.0
             share_outcome: true
           prompt_template: |
-            You are the query rewrite agent.
-            Rewrite the question into a concise retrieval query.
-            Output format MUST be:
+            You are a query rewrite assistant.
+
+            You are given:
+            - One original question.
+
+            Your task:
+            1. Rewrite the original question into one concise and searchable retrieval query.
+            2. Keep critical entities, time constraints, and comparison conditions.
+            3. Do not answer the question; only rewrite it for retrieval.
+
+            Output format (strict):
             <rewrite_query>your rewritten query</rewrite_query>
-            Question: {question}
+
+            Rules:
+            - Output exactly one <rewrite_query>...</rewrite_query> block.
+            - Do not output any extra text, explanation, markdown, or other tags.
+
+            Original question:
+            {question}
           next:
             - to: retrieve
 
@@ -186,13 +202,33 @@ star:
             format_weight: 1.0
             share_outcome: true
           prompt_template: |
-            You are the document selection agent.
-            Select the most relevant evidence for answering the question.
-            Output format MUST be:
-            <selected_docs>concise selected evidence</selected_docs>
-            Question: {question}
-            Rewritten Query: {rewrite.rewritten_query}
-            Retrieved Documents:
+            You are an evidence selection assistant.
+
+            You are given:
+            - The original question
+            - A rewritten retrieval query
+            - Retrieved documents
+
+            Your task:
+            1. Select only the most answer-relevant evidence from retrieved documents.
+            2. Prefer precise facts (names, dates, numbers, relations) over long passages.
+            3. If evidence is weak, keep the best available clues and do not fabricate facts.
+
+            Output format (strict):
+            <selected_docs>concise evidence text</selected_docs>
+
+            Rules:
+            - Output exactly one <selected_docs>...</selected_docs> block.
+            - No extra text, explanation, markdown, or other tags.
+            - Keep selected evidence concise and directly useful for final answering.
+
+            Original question:
+            {question}
+
+            Rewritten query:
+            {rewrite.rewritten_query}
+
+            Retrieved documents:
             {retrieve.retrieved_docs}
           next:
             - to: answer
@@ -212,11 +248,35 @@ star:
             format_weight: 1.0
             share_outcome: true
           prompt_template: |
-            You are the final answer agent.
-            Generate the final answer from selected evidence.
-            Output format MUST be:
-            <final_answer>final short answer</final_answer>
-            Question: {question}
-            Selected Evidence:
+            You are a final answer generation assistant.
+
+            You are given:
+            - The original question
+            - Selected evidence
+
+            Your task:
+            1. Infer the final answer strictly from the selected evidence.
+            2. Provide a short direct answer only (no reasoning).
+            3. If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <final_answer>your answer here</final_answer>
+
+            Example style:
+            Question: When did the lightning thief book come out?
+            Answer: <final_answer>2005</final_answer>
+            Question: Are Calochone and Adlumia both plants?
+            Answer: <final_answer>yes</final_answer>
+            Question: Which us president appears as a character in the play annie?
+            Answer: <final_answer>Franklin D. Roosevelt</final_answer>
+
+            Rules:
+            - Output exactly one <final_answer>...</final_answer> block.
+            - No extra text, explanation, markdown, or other tags.
+
+            Original question:
+            {question}
+
+            Selected evidence:
             {select_docs.selected_docs}
           next: []
