@@ -101,6 +101,7 @@ Additional env you should set:
 - `CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `2`)
 - `ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `2`)
 - `REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
+- `VAL_BATCH_SIZE` (optional, default `128`)
 - `STAR_WEIGHT_SYNC_MASTER_PORT` (optional, default `29600`)
 - `STAR_WEIGHT_SYNC_TIMEOUT_SEC` (optional, default `900`)
 - `STAR_WEIGHT_SYNC_RETRIES` (optional, default `3`)
