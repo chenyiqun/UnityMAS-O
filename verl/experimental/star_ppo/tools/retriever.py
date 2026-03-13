@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 from urllib import error, request
+from urllib.parse import urlparse
 
 
 class RetrieverToolInterface(ABC):
@@ -20,10 +21,44 @@ class HttpRetrieverTool(RetrieverToolInterface):
     def __init__(self, api_urls: list[str], timeout_seconds: float = 5.0):
         if not api_urls:
             raise ValueError("api_urls list cannot be empty")
-        self.api_urls = [str(x) for x in api_urls if str(x).strip()]
-        if not self.api_urls:
+        expanded_urls: list[str] = []
+        for raw_url in api_urls:
+            expanded_urls.extend(self._expand_candidate_urls(str(raw_url)))
+        # keep order, remove duplicates
+        self.api_urls = list(dict.fromkeys(expanded_urls))
+        if len(self.api_urls) == 0:
             raise ValueError("api_urls must contain at least one valid URL")
         self.timeout_seconds = float(timeout_seconds)
+
+    @staticmethod
+    def _expand_candidate_urls(raw_url: str) -> list[str]:
+        """Expand one config item to candidate endpoints.
+
+        Supports:
+        - full endpoint URL (e.g., http://host:8000/retrieve)
+        - host only/base URL (e.g., http://host:8000), then auto-try common paths.
+        """
+        url = str(raw_url).strip()
+        if not url:
+            return []
+
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return [url]
+
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        path = (parsed.path or "").rstrip("/")
+
+        if path and path != "":
+            # If user already provided a concrete endpoint, keep it first.
+            candidates = [url]
+            # Compatibility fallback for services that don't expose /retrieve.
+            if path.lower() == "/retrieve":
+                candidates.extend([f"{base}/query", f"{base}/search"])
+            return candidates
+
+        # Base URL only: try common endpoint names.
+        return [f"{base}/retrieve", f"{base}/query", f"{base}/search", base]
 
     @staticmethod
     def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> Any:
@@ -39,7 +74,7 @@ class HttpRetrieverTool(RetrieverToolInterface):
 
     @staticmethod
     def _extract_top_k_docs(resp_obj: Any) -> list[dict[str, Any]]:
-        # Expected format:
+        # Format A (legacy expected):
         # [{"top_k_docs": [...]}, ...]
         if isinstance(resp_obj, list) and len(resp_obj) > 0 and isinstance(resp_obj[0], dict):
             docs = resp_obj[0].get("top_k_docs", None)
@@ -51,12 +86,45 @@ class HttpRetrieverTool(RetrieverToolInterface):
                     else:
                         out.append({"text": str(item)})
                 return out
+
+        # Format B (some retriever servers):
+        # {"result": [[{"document": "..."} ...], ...]}
+        if isinstance(resp_obj, dict):
+            result = resp_obj.get("result", None)
+            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+                out = []
+                for item in result[0]:
+                    if isinstance(item, dict):
+                        text = item.get("text", item.get("document", item.get("content", None)))
+                        if text is not None:
+                            out.append({"text": str(text)})
+                        else:
+                            out.append({"text": json.dumps(item, ensure_ascii=False)})
+                    else:
+                        out.append({"text": str(item)})
+                if len(out) > 0:
+                    return out
+
+            docs = resp_obj.get("top_k_docs", None)
+            if isinstance(docs, list):
+                out = []
+                for item in docs:
+                    if isinstance(item, dict):
+                        out.append(item)
+                    else:
+                        out.append({"text": str(item)})
+                return out
+
         raise ValueError("Unexpected API response format: expecting list[{'top_k_docs': list}]")
 
     def query(self, question: str, N: int, max_attempts: int = 5) -> list[dict[str, Any]]:
-        payload = {"questions": [str(question)], "N": int(N)}
+        payload_candidates = [
+            {"questions": [str(question)], "N": int(N)},
+            {"queries": [str(question)], "topk": int(N), "return_scores": False},
+        ]
         attempts = 0
         tried_urls: set[str] = set()
+        last_error = ""
 
         while attempts < max_attempts:
             available_urls = [url for url in self.api_urls if url not in tried_urls]
@@ -65,13 +133,20 @@ class HttpRetrieverTool(RetrieverToolInterface):
 
             api_url = random.choice(available_urls)
             tried_urls.add(api_url)
-            try:
-                data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
-                return self._extract_top_k_docs(data)
-            except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError):
-                attempts += 1
+            for payload in payload_candidates:
+                try:
+                    data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
+                    return self._extract_top_k_docs(data)
+                except (error.URLError, error.HTTPError, TimeoutError, ValueError, json.JSONDecodeError) as e:
+                    last_error = (
+                        f"url={api_url}, payload_keys={list(payload.keys())}, "
+                        f"err={type(e).__name__}: {e}"
+                    )
+                    continue
+            attempts += 1
 
-        raise RuntimeError(f"Request failed after {max_attempts} attempts")
+        suffix = f", last_error: {last_error}" if last_error else ""
+        raise RuntimeError(f"Request failed after {max_attempts} attempts{suffix}")
 
     def retrieve(self, query: str, top_k: int) -> list[str]:
         docs = self.query(question=query, N=top_k)

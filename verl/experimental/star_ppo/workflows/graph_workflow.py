@@ -411,7 +411,17 @@ class GraphWorkflowRunner(WorkflowRunner):
             top_k = int(node_cfg.get("top_k", 3))
             if hasattr(tool, "query"):
                 max_attempts = int(node_cfg.get("max_attempts", 5))
-                output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
+                # Prefer legacy named args used by RetrievalTool(question, N, max_attempts),
+                # then fallback to positional for custom tool implementations.
+                try:
+                    output = await asyncio.to_thread(
+                        tool.query,
+                        question=input_text,
+                        N=top_k,
+                        max_attempts=max_attempts,
+                    )
+                except TypeError:
+                    output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
             elif hasattr(tool, "retrieve"):
                 output = await asyncio.to_thread(tool.retrieve, input_text, top_k)
             elif callable(tool):
