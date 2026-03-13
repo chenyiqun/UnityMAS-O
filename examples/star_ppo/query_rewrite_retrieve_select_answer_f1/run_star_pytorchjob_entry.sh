@@ -82,23 +82,30 @@ if [[ "${RANK}" == "0" ]]; then
     --disable-usage-stats
 
   echo "[star-pytorchjob] waiting for ${WORLD_SIZE} Ray nodes"
-  python3 - <<'PY'
+  if [[ "${WORLD_SIZE}" == "1" ]]; then
+    echo "[star-pytorchjob] WORLD_SIZE=1, skip waiting for workers"
+  else
+    python3 - <<PY
 import os
 import time
 import ray
 
 expected = int(os.environ.get("WORLD_SIZE", "4"))
 ray.init(address="auto")
-for _ in range(180):
+timeout = int(os.environ.get("STAR_NODE_WAIT_TIMEOUT", "180"))  # 默认 15 分钟
+for i in range(timeout):
     alive = sum(1 for n in ray.nodes() if n.get("Alive", False))
     print(f"[star-pytorchjob] alive nodes: {alive}/{expected}")
     if alive >= expected:
         break
+    if i > 0 and i % 6 == 0:
+        print("[star-pytorchjob] 提示: 若一直卡住，请确保已在所有 worker 节点执行相同命令")
     time.sleep(5)
 else:
-    raise RuntimeError(f"Timed out waiting for {expected} nodes")
+    raise RuntimeError(f"Timed out waiting for {expected} nodes (waited {timeout*5}s)")
 ray.shutdown()
 PY
+  fi
 
   echo "[star-pytorchjob] launching training on rank0"
   python3 -m verl.experimental.star_ppo.main_ppo \
