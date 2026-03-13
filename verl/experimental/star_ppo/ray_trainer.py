@@ -196,6 +196,9 @@ class StarRayTrainer:
         return cfg
 
     def init_workers(self):
+        pending_init_refs: list[Any] = []
+        actor_rollout_cfg_by_model_id = {}
+
         for spec in self.engine_specs:
             resource_pool = RayResourcePool(
                 process_on_nodes=[spec.n_gpus_per_node] * spec.nnodes,
@@ -253,41 +256,75 @@ class StarRayTrainer:
 
             actor_wg = spawned["actor"]
             rollout_wg = spawned["rollout"]
-            actor_wg.init_model()
-            rollout_wg.init_model()
-            rollout_manager = None
-            rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode", default="async"))
-            if rollout_mode == "async":
-                from verl.experimental.one_step_off_policy.agent_loop.agent_loop import OneStepOffAgentLoopManager
-
-                manager_cfg = self._build_manager_cfg_for_model(actor_rollout_cfg)
-                rollout_manager = OneStepOffAgentLoopManager(config=manager_cfg, worker_group=rollout_wg)
-                print(f"[star] async rollout manager ready model={spec.model_id}")
 
             critic_wg = spawned.get("critic")
-            if critic_wg is not None:
-                critic_wg.init_model()
-
             ref_wg = spawned.get("ref")
-            if ref_wg is not None:
-                ref_wg.init_model()
-
             rm_wg = spawned.get("rm")
-            if rm_wg is not None:
-                rm_wg.init_model()
-
             self.model_contexts[spec.model_id] = ModelWorkerContext(
                 model_id=spec.model_id,
                 resource_pool=resource_pool,
                 actor_wg=actor_wg,
                 rollout_wg=rollout_wg,
-                rollout_manager=rollout_manager,
+                rollout_manager=None,
                 critic_wg=critic_wg,
                 ref_policy_wg=ref_wg,
                 rm_wg=rm_wg,
             )
-            self._init_weight_sync_group(spec.model_id, self.model_contexts[spec.model_id])
-            self._sync_rollout_weights(spec.model_id, self.model_contexts[spec.model_id])
+            actor_rollout_cfg_by_model_id[spec.model_id] = actor_rollout_cfg
+
+            actor_refs = actor_wg.execute_all_async("init_model")
+            pending_init_refs.extend(actor_refs)
+            print(
+                f"[star] enqueue init_model model={spec.model_id} role=actor "
+                f"workers={len(actor_wg.workers)} calls={len(actor_refs)}"
+            )
+            rollout_refs = rollout_wg.execute_all_async("init_model")
+            pending_init_refs.extend(rollout_refs)
+            print(
+                f"[star] enqueue init_model model={spec.model_id} role=rollout "
+                f"workers={len(rollout_wg.workers)} calls={len(rollout_refs)}"
+            )
+            if critic_wg is not None:
+                critic_refs = critic_wg.execute_all_async("init_model")
+                pending_init_refs.extend(critic_refs)
+                print(
+                    f"[star] enqueue init_model model={spec.model_id} role=critic "
+                    f"workers={len(critic_wg.workers)} calls={len(critic_refs)}"
+                )
+            if ref_wg is not None:
+                ref_refs = ref_wg.execute_all_async("init_model")
+                pending_init_refs.extend(ref_refs)
+                print(
+                    f"[star] enqueue init_model model={spec.model_id} role=ref "
+                    f"workers={len(ref_wg.workers)} calls={len(ref_refs)}"
+                )
+            if rm_wg is not None:
+                rm_refs = rm_wg.execute_all_async("init_model")
+                pending_init_refs.extend(rm_refs)
+                print(
+                    f"[star] enqueue init_model model={spec.model_id} role=rm "
+                    f"workers={len(rm_wg.workers)} calls={len(rm_refs)}"
+                )
+
+        # Load all models in parallel across all engines/roles first.
+        if pending_init_refs:
+            print(f"[star] parallel init_model begin total_remote_calls={len(pending_init_refs)}")
+            ray.get(pending_init_refs)
+            print("[star] parallel init_model done")
+
+        for spec in self.engine_specs:
+            ctx = self.model_contexts[spec.model_id]
+            actor_rollout_cfg = actor_rollout_cfg_by_model_id[spec.model_id]
+            rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode", default="async"))
+            if rollout_mode == "async":
+                from verl.experimental.one_step_off_policy.agent_loop.agent_loop import OneStepOffAgentLoopManager
+
+                manager_cfg = self._build_manager_cfg_for_model(actor_rollout_cfg)
+                ctx.rollout_manager = OneStepOffAgentLoopManager(config=manager_cfg, worker_group=ctx.rollout_wg)
+                print(f"[star] async rollout manager ready model={spec.model_id}")
+
+            self._init_weight_sync_group(spec.model_id, ctx)
+            self._sync_rollout_weights(spec.model_id, ctx)
 
     def _init_weight_sync_group(self, model_id: str, ctx: ModelWorkerContext):
         weights_info = ctx.actor_wg.get_actor_weights_info()[0]
