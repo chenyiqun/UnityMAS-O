@@ -1042,18 +1042,36 @@ class StarRayTrainer:
 
     async def _run_validation(self, epoch: int, global_step: int) -> dict[str, float]:
         max_batches = int(self.config.trainer.get("val_max_batches", -1))
+        val_progress_every = int(os.environ.get("STAR_VAL_PROGRESS_EVERY", "0"))
         batch_count = 0
         reward_sum = 0.0
         reward_count = 0
         workflow_acc: dict[str, list[float]] = defaultdict(list)
 
+        if val_progress_every > 0:
+            print(
+                f"[star] validation start epoch={epoch} global_step={global_step} "
+                f"max_batches={max_batches}"
+            )
+
         for batch_idx, batch_dict in enumerate(self.val_dataloader):
             if max_batches > 0 and batch_idx >= max_batches:
                 break
+            batch_start = time.time()
             batch_count += 1
             batch = DataProto.from_single_dict(batch_dict)
+            if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
+                print(
+                    f"[star] validation batch_start idx={batch_idx} size={len(batch)} "
+                    f"inflight={self.config.star.workflow.get('max_inflight_queries', 32)}"
+                )
             self._ensure_routing_fields(batch)
             rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+            if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
+                print(
+                    f"[star] validation batch_done idx={batch_idx} "
+                    f"elapsed={time.time() - batch_start:.2f}s reward_samples={len(rewards)}"
+                )
 
             for key, val in workflow_metrics.items():
                 if isinstance(val, int | float):
@@ -1077,6 +1095,8 @@ class StarRayTrainer:
         for key, values in workflow_acc.items():
             if values:
                 metrics[f"validation/{key}"] = float(np.mean(values))
+        if val_progress_every > 0:
+            print(f"[star] validation end metrics={metrics}")
         return metrics
 
     async def fit(self):
@@ -1094,6 +1114,7 @@ class StarRayTrainer:
         test_freq = int(self.config.trainer.get("test_freq", -1))
 
         if val_before_train:
+            print(f"[star] pre-train validation start epoch={start_epoch} global_step={global_step}")
             val_metrics = await self._run_validation(epoch=start_epoch, global_step=global_step)
             logger.log(data=val_metrics, step=global_step)
             print(f"[star] pre-train validation={val_metrics}")

@@ -55,6 +55,9 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.max_steps = int(self.graph_cfg.get("max_steps", 16))
         self.stop_on_end = bool(self.graph_cfg.get("stop_on_end", True))
         self.max_inflight_queries = int(self.workflow_cfg.get("max_inflight_queries", 32))
+        self.llm_timeout_seconds = float(
+            self.workflow_cfg.get("llm_timeout_seconds", os.environ.get("STAR_LLM_TIMEOUT_SECONDS", 0))
+        )
         self.question_candidates = list(
             self.workflow_cfg.get("question_candidates", ["question", "query", "problem", "extra_info.question"])
         )
@@ -441,7 +444,18 @@ class GraphWorkflowRunner(WorkflowRunner):
                 [[{"role": "user", "content": prompt_text}]],
                 agent_id,
             )
-            _, thin, _ = await self.trainer._rollout_model_async(model_id, prompt_batch)
+            rollout_coro = self.trainer._rollout_model_async(model_id, prompt_batch)
+            if self.llm_timeout_seconds > 0:
+                try:
+                    _, thin, _ = await asyncio.wait_for(rollout_coro, timeout=self.llm_timeout_seconds)
+                except asyncio.TimeoutError as e:
+                    query_id = self._extract_from_batch(query_batch, "query_id")
+                    raise TimeoutError(
+                        f"LLM node timeout: node={node_id} model_id={model_id} "
+                        f"query_id={query_id} timeout_s={self.llm_timeout_seconds}"
+                    ) from e
+            else:
+                _, thin, _ = await rollout_coro
             action_text_vec = thin.non_tensor_batch.get("action_text", np.array([], dtype=object))
             raw_text = str(action_text_vec[0]) if len(action_text_vec) > 0 else ""
             parsed_value, format_reward = self._parse_llm_output(raw_text, node_cfg)
