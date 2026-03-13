@@ -96,9 +96,10 @@ Additional env you should set:
 - `TEST_FREQ`
 - `SAVE_FREQ`
 - `ROLLOUT_NAME` (optional, default `vllm`; options: `hf`/`vllm`/`sglang`/`trtllm`)
-- `ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
-- `CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
-- `ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
+- `ACTOR_PPO_MINI_BATCH_SIZE` (optional, default `64`)
+- `ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `2`)
+- `CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU` (optional, default `2`)
+- `ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `2`)
 - `REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU` (optional, default `1`)
 - `STAR_WEIGHT_SYNC_MASTER_PORT` (optional, default `29600`)
 - `STAR_WEIGHT_SYNC_TIMEOUT_SEC` (optional, default `900`)
