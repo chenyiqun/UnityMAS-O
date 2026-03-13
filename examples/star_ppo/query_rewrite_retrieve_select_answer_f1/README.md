@@ -46,7 +46,7 @@ REWRITE_MODEL_PATH=/path/to/rewrite_7b \
 SELECT_MODEL_PATH=/path/to/select_7b \
 ANSWER_MODEL_PATH=/path/to/answer_14b \
 RETRIEVAL_API_URLS_JSON='["http://api1/retrieve","http://api2/retrieve"]' \
-VAL_BEFORE_TRAIN=true \
+VAL_BEFORE_TRAIN=false \
 TEST_FREQ=50 \
 SAVE_FREQ=50 \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_head_train.sh
@@ -92,7 +92,7 @@ Additional env you should set:
 - `SELECT_MODEL_PATH`
 - `ANSWER_MODEL_PATH`
 - `RETRIEVAL_API_URLS_JSON`
-- `VAL_BEFORE_TRAIN`
+- `VAL_BEFORE_TRAIN` (optional, default `false`)
 - `TEST_FREQ`
 - `SAVE_FREQ`
 - `ROLLOUT_NAME` (optional, default `vllm`; options: `hf`/`vllm`/`sglang`/`trtllm`)

@@ -24,7 +24,7 @@ ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_mod
 # Replace with your real retriever endpoint pool if needed.
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
 
-VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"
 TEST_FREQ="${TEST_FREQ:-50}"
 SAVE_FREQ="${SAVE_FREQ:-50}"
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
