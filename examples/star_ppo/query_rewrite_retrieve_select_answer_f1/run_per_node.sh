@@ -59,7 +59,13 @@ export RAY_DEDUP_LOGS=0
 export ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.6}"
 export ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-2048}"
 export ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+# vLLM v1 memory pool is incompatible with expandable_segments:True.
+# See: https://github.com/pytorch/pytorch/issues/147851
+if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
+  echo "[run_per_node] Detected incompatible PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}, unsetting it."
+  unset PYTORCH_CUDA_ALLOC_CONF
+fi
 
 # --- 清理残留 Ray 进程（可选，首次运行建议保留）---
 (ray stop -f >/dev/null 2>&1 || true)
