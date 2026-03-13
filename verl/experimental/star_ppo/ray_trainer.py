@@ -196,8 +196,14 @@ class StarRayTrainer:
         return cfg
 
     def init_workers(self):
-        pending_init_refs: list[Any] = []
         actor_rollout_cfg_by_model_id = {}
+        init_targets_by_role: dict[str, list[tuple[str, RayWorkerGroup]]] = {
+            "actor": [],
+            "rollout": [],
+            "critic": [],
+            "ref": [],
+            "rm": [],
+        }
 
         def _enqueue_role_init(model_id: str, role_name: str, wg: RayWorkerGroup):
             worker0 = wg.workers[0]
@@ -292,25 +298,27 @@ class StarRayTrainer:
             )
             actor_rollout_cfg_by_model_id[spec.model_id] = actor_rollout_cfg
 
-            actor_refs = _enqueue_role_init(spec.model_id, "actor", actor_wg)
-            pending_init_refs.extend(actor_refs)
-            rollout_refs = _enqueue_role_init(spec.model_id, "rollout", rollout_wg)
-            pending_init_refs.extend(rollout_refs)
+            init_targets_by_role["actor"].append((spec.model_id, actor_wg))
+            init_targets_by_role["rollout"].append((spec.model_id, rollout_wg))
             if critic_wg is not None:
-                critic_refs = _enqueue_role_init(spec.model_id, "critic", critic_wg)
-                pending_init_refs.extend(critic_refs)
+                init_targets_by_role["critic"].append((spec.model_id, critic_wg))
             if ref_wg is not None:
-                ref_refs = _enqueue_role_init(spec.model_id, "ref", ref_wg)
-                pending_init_refs.extend(ref_refs)
+                init_targets_by_role["ref"].append((spec.model_id, ref_wg))
             if rm_wg is not None:
-                rm_refs = _enqueue_role_init(spec.model_id, "rm", rm_wg)
-                pending_init_refs.extend(rm_refs)
+                init_targets_by_role["rm"].append((spec.model_id, rm_wg))
 
-        # Load all models in parallel across all engines/roles first.
-        if pending_init_refs:
-            print(f"[star] parallel init_model begin total_remote_calls={len(pending_init_refs)}")
-            ray.get(pending_init_refs)
-            print("[star] parallel init_model done")
+        # Init order is role-serial (safe on colocated WorkerDict), model-parallel per role.
+        for role_name in ("actor", "rollout", "critic", "ref", "rm"):
+            role_refs = []
+            for model_id, wg in init_targets_by_role[role_name]:
+                role_refs.extend(_enqueue_role_init(model_id, role_name, wg))
+            if role_refs:
+                print(
+                    f"[star] parallel init_model role={role_name} "
+                    f"models={len(init_targets_by_role[role_name])} total_remote_calls={len(role_refs)}"
+                )
+                ray.get(role_refs)
+                print(f"[star] parallel init_model role={role_name} done")
 
         for spec in self.engine_specs:
             ctx = self.model_contexts[spec.model_id]
