@@ -160,6 +160,13 @@ class ServerAdapter(BaseRollout):
         """Update model weights via CUDA IPC (fallback to shared memory if IPC not supported) to inference workers."""
         start_time = time.time()
 
+        # Proactively clear prefix/KV cache before weight sync to reduce peak memory
+        # during IPC tensor clone on vLLM workers.
+        try:
+            await self._execute_method("clear_kv_cache", timeout=120)
+        except Exception as e:
+            logger.warning(f"clear_kv_cache before update_weights failed (continue): {e}")
+
         future = await self._execute_method(
             "update_weights_from_ipc",
             non_block=True,
