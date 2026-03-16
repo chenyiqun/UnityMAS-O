@@ -13,6 +13,8 @@ trainer:
   val_before_train: true
   # 2) run validation every N training steps
   test_freq: 50
+  # 4) validation uses at most N batches each run (-1 means full val set)
+  val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,10}}
   # 3) save checkpoint every N training steps
   save_freq: 50
   llm_engines:
@@ -54,8 +56,8 @@ actor_rollout_ref:
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,3072}}
     response_length: ${oc.decode:${oc.env:ROLLOUT_RESPONSE_LENGTH,128}}
     gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
-    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,1024}}
-    max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
+    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,8192}}
+    max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,64}}
     enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
     checkpoint_engine:
       update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,4096}}
@@ -86,8 +88,8 @@ star:
     # split: share final outcome reward equally across llm nodes with share_outcome=true
     # full: each shared node gets full final outcome reward
     outcome_share_mode: full
-    max_inflight_queries: 128
-    max_parallel_rollouts_per_model: 128
+    max_inflight_queries: ${oc.decode:${oc.env:STAR_MAX_INFLIGHT_QUERIES,64}}
+    max_parallel_rollouts_per_model: ${oc.decode:${oc.env:STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL,32}}
     per_infer_prompt_max_tokens: ${oc.decode:${oc.env:STAR_PER_INFER_PROMPT_MAX_TOKENS,3072}}
     prompt_truncation_margin: ${oc.decode:${oc.env:STAR_PROMPT_TRUNCATION_MARGIN,128}}
     debug:
