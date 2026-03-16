@@ -326,7 +326,7 @@ class StarRayTrainer:
         for spec in self.engine_specs:
             ctx = self.model_contexts[spec.model_id]
             actor_rollout_cfg = actor_rollout_cfg_by_model_id[spec.model_id]
-            rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode", default="async"))
+            rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode") or "async")
             if rollout_mode == "async":
                 from verl.experimental.one_step_off_policy.agent_loop.agent_loop import OneStepOffAgentLoopManager
 

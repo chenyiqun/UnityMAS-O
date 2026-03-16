@@ -86,7 +86,7 @@ def validate_config(
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-    topology = str(OmegaConf.select(config, "trainer.topology", "") or "").strip().lower()
+    topology = str(OmegaConf.select(config, "trainer.topology") or "").strip().lower()
     is_star_topology = topology == "star"
 
     # For STAR topology, each model has an independent rollout/update queue and
