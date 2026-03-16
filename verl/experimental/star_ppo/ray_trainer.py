@@ -90,6 +90,10 @@ class StarRayTrainer:
         # to shard-0 if we always slice the first item. Use round-robin shard pick to
         # spread committed trajectories across rollout shards.
         self._thin_pick_cursor_by_model: dict[str, int] = defaultdict(int)
+        timing_print_flag = str(os.environ.get("STAR_TIMING_PRINT", "true")).strip().lower()
+        self._timing_print_enabled = timing_print_flag in {"1", "true", "yes", "on"}
+        self._timing_print_every_n_batches = max(1, int(os.environ.get("STAR_TIMING_PRINT_EVERY_N_BATCHES", "1")))
+        self._timing_group_topk = max(1, int(os.environ.get("STAR_TIMING_GROUP_TOPK", "8")))
         self.workflow_runner = self._create_workflow_runner()
         if self.config.algorithm.use_kl_in_reward:
             for model_id in self.model_ids:
@@ -1058,6 +1062,63 @@ class StarRayTrainer:
         for _, ctx in self.model_contexts.items():
             _ = ctx.rollout_wg.build_ready_train_batch(max_items=0)
 
+    @staticmethod
+    def _pick_metric(metrics: dict[str, float], key: str, default: float = 0.0) -> float:
+        value = metrics.get(key, default)
+        if isinstance(value, int | float):
+            return float(value)
+        return float(default)
+
+    def _print_batch_timing(
+        self,
+        stage: str,
+        batch_idx: int,
+        batch_size: int,
+        metrics: dict[str, float],
+        extra_timings: dict[str, float] | None = None,
+    ):
+        if not self._timing_print_enabled:
+            return
+        if batch_idx % self._timing_print_every_n_batches != 0:
+            return
+
+        workflow_total = self._pick_metric(metrics, "workflow/timing/batch_total_s")
+        query_mean = self._pick_metric(metrics, "workflow/timing/query_s_mean")
+        llm_mean = self._pick_metric(metrics, "workflow/timing/llm_node_s_mean")
+        tool_mean = self._pick_metric(metrics, "workflow/timing/tool_node_s_mean")
+        node_calls = int(self._pick_metric(metrics, "workflow/timing/node_invocations"))
+        group_pairs: list[tuple[str, float]] = []
+        group_prefix = "workflow/timing/group/"
+        group_suffix = "_s_mean"
+        for key, value in metrics.items():
+            if not isinstance(value, int | float):
+                continue
+            if not key.startswith(group_prefix) or not key.endswith(group_suffix):
+                continue
+            group_name = key[len(group_prefix) : -len(group_suffix)]
+            if not group_name:
+                continue
+            group_pairs.append((group_name, float(value)))
+        group_pairs.sort(key=lambda x: x[1], reverse=True)
+        group_pairs = group_pairs[: self._timing_group_topk]
+        group_text = ""
+        if group_pairs:
+            group_text = " groups=" + ",".join([f"{name}:{val:.3f}s" for name, val in group_pairs])
+
+        extra_parts = []
+        if extra_timings:
+            for key in ("workflow_wall_s", "commit_s", "drain_s", "sync_update_s", "batch_elapsed_s"):
+                if key in extra_timings:
+                    extra_parts.append(f"{key}={float(extra_timings[key]):.3f}s")
+        extra_text = (" " + " ".join(extra_parts)) if extra_parts else ""
+        print(
+            "[star-timing] "
+            f"stage={stage} batch={batch_idx} size={batch_size} "
+            f"workflow={workflow_total:.3f}s query_mean={query_mean:.3f}s "
+            f"llm_mean={llm_mean:.3f}s tool_mean={tool_mean:.3f}s "
+            f"node_calls={node_calls}{group_text}{extra_text}"
+        )
+
     async def _run_validation(self, epoch: int, global_step: int) -> dict[str, float]:
         max_batches = int(self.config.trainer.get("val_max_batches", -1))
         val_progress_every = int(os.environ.get("STAR_VAL_PROGRESS_EVERY", "0"))
@@ -1097,24 +1158,48 @@ class StarRayTrainer:
                         f"inflight={self.config.star.workflow.get('max_inflight_queries', 32)}"
                     )
                 self._ensure_routing_fields(batch)
+                workflow_t0 = time.time()
                 rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+                workflow_wall_s = time.time() - workflow_t0
+                workflow_metrics["workflow/timing/validation_workflow_wall_s"] = float(workflow_wall_s)
+                commit_s = 0.0
+                drain_s = 0.0
                 if val_progress_every > 0 and (batch_idx % val_progress_every == 0):
                     print(
                         f"[star] validation batch_done idx={batch_idx} "
                         f"elapsed={time.time() - batch_start:.2f}s reward_samples={len(rewards)}"
                     )
 
-                for key, val in workflow_metrics.items():
-                    if isinstance(val, int | float):
-                        workflow_acc[key].append(float(val))
-
                 if len(rewards) > 0:
                     reward_vec = rewards.batch["reward"].detach().cpu().float().reshape(-1).numpy()
                     reward_sum += float(np.sum(reward_vec))
                     reward_count += int(reward_vec.shape[0])
                     # Commit to local buffers so worker-side trajectory states are consistent.
+                    commit_t0 = time.time()
                     self._commit_rewards(rewards)
+                    commit_s = time.time() - commit_t0
+                    drain_t0 = time.time()
                     self._drain_rollout_ready_queues()
+                    drain_s = time.time() - drain_t0
+                workflow_metrics["workflow/timing/validation_commit_s"] = float(commit_s)
+                workflow_metrics["workflow/timing/validation_drain_s"] = float(drain_s)
+
+                for key, val in workflow_metrics.items():
+                    if isinstance(val, int | float):
+                        workflow_acc[key].append(float(val))
+
+                self._print_batch_timing(
+                    stage="val",
+                    batch_idx=batch_idx,
+                    batch_size=len(batch),
+                    metrics=workflow_metrics,
+                    extra_timings={
+                        "workflow_wall_s": workflow_wall_s,
+                        "commit_s": commit_s,
+                        "drain_s": drain_s,
+                        "batch_elapsed_s": float(time.time() - batch_start),
+                    },
+                )
 
                 val_iter.set_postfix(
                     {
@@ -1189,15 +1274,29 @@ class StarRayTrainer:
 
                     batch = DataProto.from_single_dict(batch_dict)
                     self._ensure_routing_fields(batch)
+                    workflow_t0 = time.time()
                     rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+                    workflow_wall_s = time.time() - workflow_t0
+                    workflow_metrics["workflow/timing/train_workflow_wall_s"] = float(workflow_wall_s)
                     if len(rewards) == 0:
                         empty_reward_streak += 1
                         empty_metrics = {
                             "training/global_step": float(global_step),
                             "training/epoch": float(epoch),
+                            "training/timing/workflow_wall_s": float(workflow_wall_s),
+                            **workflow_metrics,
                             "workflow/empty_reward_batch": 1.0,
                             "workflow/empty_reward_streak": float(empty_reward_streak),
                         }
+                        self._print_batch_timing(
+                            stage="train",
+                            batch_idx=global_step,
+                            batch_size=len(batch),
+                            metrics=empty_metrics,
+                            extra_timings={
+                                "workflow_wall_s": workflow_wall_s,
+                            },
+                        )
                         logger.log(data=empty_metrics, step=global_step)
                         if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
                             print(f"[star] step={global_step} empty_reward_batch streak={empty_reward_streak}")
@@ -1205,16 +1304,34 @@ class StarRayTrainer:
                         continue
                     empty_reward_streak = 0
 
+                    commit_t0 = time.time()
                     commit_metrics = self._commit_rewards(rewards)
+                    commit_s = time.time() - commit_t0
+                    sync_t0 = time.time()
                     sync_metrics = await self._global_sync_and_update()
+                    sync_update_s = time.time() - sync_t0
 
                     step_metrics = {
                         "training/global_step": float(global_step),
                         "training/epoch": float(epoch),
+                        "training/timing/workflow_wall_s": float(workflow_wall_s),
+                        "training/timing/commit_s": float(commit_s),
+                        "training/timing/sync_update_s": float(sync_update_s),
                         **workflow_metrics,
                         **commit_metrics,
                         **sync_metrics,
                     }
+                    self._print_batch_timing(
+                        stage="train",
+                        batch_idx=global_step,
+                        batch_size=len(batch),
+                        metrics=step_metrics,
+                        extra_timings={
+                            "workflow_wall_s": workflow_wall_s,
+                            "commit_s": commit_s,
+                            "sync_update_s": sync_update_s,
+                        },
+                    )
                     logger.log(data=step_metrics, step=global_step)
                     if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
                         print(f"[star] step={global_step} batch_update={step_metrics}")

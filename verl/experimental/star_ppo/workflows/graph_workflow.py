@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import string
+import time
 from collections.abc import Mapping
 from collections import Counter, defaultdict
 from typing import Any
@@ -31,6 +32,7 @@ class GraphWorkflowRunner(WorkflowRunner):
       - llm node:
         - `type: llm`
         - `model_id`, `agent_id`, `prompt_template`
+        - optional `timing_group` (for reusable timing aggregation labels)
         - `parser`: {`type`: `json_key|raw`, `key`: str}
         - `output_key`: str
         - `reward`: {`format_weight`: float, `share_outcome`: bool}
@@ -38,6 +40,7 @@ class GraphWorkflowRunner(WorkflowRunner):
       - tool node:
         - `type: tool`
         - `tool`: tool alias in `star.workflow.tools`
+        - optional `timing_group` (for reusable timing aggregation labels)
         - `input_template`: str
         - `top_k`: int (for retriever-like tools)
         - `output_key`: str
@@ -266,6 +269,32 @@ class GraphWorkflowRunner(WorkflowRunner):
         after_tokens = len(kept_ids) + int(chat_overhead_tokens)
         removed_tokens = max(0, content_total - len(kept_ids))
         return new_text, removed_tokens, before_tokens, after_tokens
+
+    @staticmethod
+    def _sanitize_metric_key(text: str) -> str:
+        s = str(text or "").strip().lower()
+        s = re.sub(r"[^a-z0-9_.-]+", "_", s)
+        s = re.sub(r"_+", "_", s).strip("_.-")
+        return s or "unknown"
+
+    def _resolve_timing_group(self, node_id: str, node_type: str, node_cfg: Mapping[str, Any]) -> str:
+        custom = str(node_cfg.get("timing_group", "") or "").strip()
+        if custom:
+            return self._sanitize_metric_key(custom)
+        if node_type == "llm":
+            agent_id = str(node_cfg.get("agent_id", "") or "").strip()
+            if agent_id:
+                return self._sanitize_metric_key(f"llm.{agent_id}")
+            return "llm"
+        if node_type == "tool":
+            tool_name = str(node_cfg.get("tool", "") or "").strip()
+            if tool_name:
+                return self._sanitize_metric_key(f"tool.{tool_name}")
+            return "tool"
+        nid = str(node_id or "").strip()
+        if "_" in nid:
+            return self._sanitize_metric_key(f"node.{nid.split('_', 1)[0]}")
+        return self._sanitize_metric_key(f"node.{nid}")
 
     def _count_tokens(self, text: str) -> int:
         tokenizer = getattr(self.trainer, "tokenizer", None)
@@ -546,6 +575,8 @@ class GraphWorkflowRunner(WorkflowRunner):
     async def _execute_node(self, node_id: str, query_batch: DataProto, context: dict[str, Any]) -> dict[str, Any]:
         node_cfg = self.nodes[node_id]
         node_type = str(node_cfg.get("type", "llm"))
+        timing_group = self._resolve_timing_group(node_id, node_type, node_cfg)
+        node_start = time.perf_counter()
         if node_type == "llm":
             model_id = str(node_cfg["model_id"])
             agent_id = str(node_cfg.get("agent_id", node_id))
@@ -611,6 +642,8 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "prompt_trimmed_tokens": int(prompt_trimmed),
                 "prompt_tokens": int(prompt_tokens),
                 "output_tokens": int(output_tokens),
+                "timing_group": timing_group,
+                "duration_s": float(time.perf_counter() - node_start),
             }
 
         if node_type == "tool":
@@ -650,6 +683,8 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "node_type": "tool",
                 "output_key": output_key,
                 "output_value": output,
+                "timing_group": timing_group,
+                "duration_s": float(time.perf_counter() - node_start),
             }
 
         raise ValueError(f"Unsupported node type for {node_id}: {node_type}")
@@ -700,6 +735,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         debug_batch_idx: int,
     ) -> dict[str, Any]:
         async with query_sem:
+            query_start = time.perf_counter()
             debug_lines: list[str] = []
             debug_on = self.debug_enabled and debug_query_idx is not None and query_local_idx == debug_query_idx
 
@@ -722,6 +758,7 @@ class GraphWorkflowRunner(WorkflowRunner):
 
             frontier = list(self.start_nodes)
             llm_exec_records: list[dict[str, Any]] = []
+            node_timing_records: list[dict[str, Any]] = []
 
             for step in range(self.max_steps):
                 if len(frontier) == 0:
@@ -752,6 +789,14 @@ class GraphWorkflowRunner(WorkflowRunner):
                             )
                     if result["node_type"] == "llm":
                         llm_exec_records.append(result)
+                    node_timing_records.append(
+                        {
+                            "node_id": str(node_id),
+                            "node_type": str(result.get("node_type", "unknown")),
+                            "timing_group": str(result.get("timing_group", "")),
+                            "duration_s": float(result.get("duration_s", 0.0)),
+                        }
+                    )
                     if node_id in self.end_nodes:
                         hit_end = True
                     for edge in self._normalize_edges(self.nodes[node_id].get("next", [])):
@@ -827,10 +872,13 @@ class GraphWorkflowRunner(WorkflowRunner):
                     }
                     for rec in llm_exec_records
                 ],
+                "node_timing_records": node_timing_records,
+                "query_elapsed_s": float(time.perf_counter() - query_start),
             }
 
     async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
         del epoch
+        batch_start = time.perf_counter()
         self._debug_batch_counter += 1
         debug_this_batch = self.debug_enabled and (
             self._debug_batch_counter % max(1, self.debug_every_n_batches) == 0
@@ -867,6 +915,11 @@ class GraphWorkflowRunner(WorkflowRunner):
         node_output_len_acc = defaultdict(list)
         agent_prompt_len_acc = defaultdict(list)
         agent_output_len_acc = defaultdict(list)
+        query_elapsed_acc: list[float] = []
+        node_timing_by_id = defaultdict(list)
+        node_timing_by_type = defaultdict(list)
+        node_timing_by_group = defaultdict(list)
+        node_timing_all: list[float] = []
         for item in query_results:
             reward_parts.extend(item["reward_parts"])
             outcome_rewards.append(item["outcome_reward"])
@@ -884,6 +937,20 @@ class GraphWorkflowRunner(WorkflowRunner):
                 if agent_id:
                     agent_prompt_len_acc[agent_id].append(float(prompt_tokens))
                     agent_output_len_acc[agent_id].append(float(output_tokens))
+            query_elapsed_acc.append(float(item.get("query_elapsed_s", 0.0)))
+            for timing_rec in item.get("node_timing_records", []):
+                node_id = str(timing_rec.get("node_id", ""))
+                node_type = str(timing_rec.get("node_type", "unknown"))
+                timing_group = self._sanitize_metric_key(str(timing_rec.get("timing_group", "")))
+                duration_s = float(timing_rec.get("duration_s", 0.0))
+                if duration_s <= 0:
+                    continue
+                node_timing_all.append(duration_s)
+                if node_id:
+                    node_timing_by_id[node_id].append(duration_s)
+                if timing_group:
+                    node_timing_by_group[timing_group].append(duration_s)
+                node_timing_by_type[node_type].append(duration_s)
 
         if len(reward_parts) == 0:
             rewards = self.trainer._empty_rewards()
@@ -917,4 +984,24 @@ class GraphWorkflowRunner(WorkflowRunner):
                 metrics[f"workflow/agent/{agent_id}/output_tokens_min"] = float(np.min(values))
                 metrics[f"workflow/agent/{agent_id}/output_tokens_max"] = float(np.max(values))
                 metrics[f"workflow/agent/{agent_id}/output_tokens_mean"] = float(np.mean(values))
+        if query_elapsed_acc:
+            metrics["workflow/timing/query_s_mean"] = float(np.mean(query_elapsed_acc))
+            metrics["workflow/timing/query_s_max"] = float(np.max(query_elapsed_acc))
+        if node_timing_all:
+            metrics["workflow/timing/node_s_mean"] = float(np.mean(node_timing_all))
+            metrics["workflow/timing/node_s_max"] = float(np.max(node_timing_all))
+            metrics["workflow/timing/node_invocations"] = float(len(node_timing_all))
+        if node_timing_by_type.get("llm"):
+            metrics["workflow/timing/llm_node_s_mean"] = float(np.mean(node_timing_by_type["llm"]))
+        if node_timing_by_type.get("tool"):
+            metrics["workflow/timing/tool_node_s_mean"] = float(np.mean(node_timing_by_type["tool"]))
+        for node_id, values in node_timing_by_id.items():
+            if values:
+                metrics[f"workflow/timing/node/{node_id}_s_mean"] = float(np.mean(values))
+        for group, values in node_timing_by_group.items():
+            if values:
+                metrics[f"workflow/timing/group/{group}_s_mean"] = float(np.mean(values))
+                metrics[f"workflow/timing/group/{group}_s_max"] = float(np.max(values))
+                metrics[f"workflow/timing/group/{group}_count"] = float(len(values))
+        metrics["workflow/timing/batch_total_s"] = float(time.perf_counter() - batch_start)
         return rewards, metrics
