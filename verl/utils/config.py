@@ -86,7 +86,14 @@ def validate_config(
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-    if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+    topology = str(OmegaConf.select(config, "trainer.topology", "") or "").strip().lower()
+    is_star_topology = topology == "star"
+
+    # For STAR topology, each model has an independent rollout/update queue and
+    # batch divisibility is handled per-model in trainer runtime (e.g. drop_last
+    # by model DP size). The global single-model divisibility check here is not
+    # applicable and should be skipped.
+    if not config.actor_rollout_ref.actor.use_dynamic_bsz and not is_star_topology:
         if config.actor_rollout_ref.actor.strategy == "megatron":
             model_parallel_size = (
                 config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size

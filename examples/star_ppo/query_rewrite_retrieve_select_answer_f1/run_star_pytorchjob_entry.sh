@@ -17,9 +17,13 @@ MASTER_ADDR_FILE="${MASTER_ADDR_FILE:-}"
 
 TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}"
 VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}"
-REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-/path/to/rewrite_7b}"
-SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/path/to/select_7b}"
-ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/path/to/answer_14b}"
+CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
+AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-}"
+REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-${AGENT_MODEL_PATH:-/path/to/rewrite_7b}}"
+SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+DECOMPOSE_MODEL_PATH="${DECOMPOSE_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+SUMMARY_MODEL_PATH="${SUMMARY_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
 ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 VLLM_USE_V1="${VLLM_USE_V1:-1}"
@@ -76,6 +80,8 @@ fi
 export MASTER_ADDR
 export VLLM_USE_V1
 export WANDB_API_KEY
+export CONFIG_NAME
+export DECOMPOSE_MODEL_PATH SUMMARY_MODEL_PATH
 export ROLLOUT_FREE_CACHE_ENGINE
 export ROLLOUT_GPU_MEMORY_UTILIZATION
 export ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE
@@ -123,7 +129,7 @@ PY
 
   echo "[star-pytorchjob] launching training on rank0"
   python3 -m verl.experimental.star_ppo.main_ppo \
-    --config-name star_query_rewrite_retrieve_select_answer_f1_trainer \
+    --config-name "${CONFIG_NAME}" \
     data.train_files="${TRAIN_PARQUET}" \
     data.val_files="${VAL_PARQUET}" \
     trainer.nnodes="${WORLD_SIZE}" \

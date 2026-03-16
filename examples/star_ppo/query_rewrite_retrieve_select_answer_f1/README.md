@@ -6,6 +6,12 @@ This setup trains three LLM agents in one graph workflow:
 - `select_docs` (7B, 1 node)
 - `answer` (14B, 2 nodes)
 
+You can also run the new 7B workflow:
+
+- config: `star_query_decompose_retrieve_summarize_answer_f1_trainer`
+- stages: `decompose -> (retrieve x up to 5 in parallel) -> (summarize x up to 5 in parallel) -> answer`
+- each retrieval branch uses `top_k=5`
+
 Retrieval is a tool call to an external API that supports:
 
 - input: `{"questions": [question], "N": N}`
@@ -40,11 +46,10 @@ bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_worker.s
 ```bash
 HEAD_IP=<head_ip> \
 WORLD_SIZE=4 \
+CONFIG_NAME=star_query_decompose_retrieve_summarize_answer_f1_trainer \
 TRAIN_PARQUET=/path/to/train.parquet \
 VAL_PARQUET=/path/to/val.parquet \
-REWRITE_MODEL_PATH=/path/to/rewrite_7b \
-SELECT_MODEL_PATH=/path/to/select_7b \
-ANSWER_MODEL_PATH=/path/to/answer_14b \
+AGENT_MODEL_PATH=/path/to/your_7b_model \
 RETRIEVAL_API_URLS_JSON='["http://api1/retrieve","http://api2/retrieve"]' \
 VAL_BEFORE_TRAIN=false \
 TEST_FREQ=50 \
@@ -57,11 +62,10 @@ bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_head_tra
 ```bash
 HEAD_IP=<head_ip> \
 WORLD_SIZE=4 \
+CONFIG_NAME=star_query_decompose_retrieve_summarize_answer_f1_trainer \
 TRAIN_PARQUET=/path/to/train.parquet \
 VAL_PARQUET=/path/to/val.parquet \
-REWRITE_MODEL_PATH=/path/to/rewrite_7b \
-SELECT_MODEL_PATH=/path/to/select_7b \
-ANSWER_MODEL_PATH=/path/to/answer_14b \
+AGENT_MODEL_PATH=/path/to/your_7b_model \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_head_test.sh
 ```
 

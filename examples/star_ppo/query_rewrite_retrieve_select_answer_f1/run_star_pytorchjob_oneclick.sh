@@ -13,13 +13,17 @@ CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-verl}"
 FORCE_ENV_SETUP="${FORCE_ENV_SETUP:-false}"
 HEAD_IP="${HEAD_IP:-}"
+CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
 
 # Your defaults (can still be overridden by env vars from job config).
 TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}"
 VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}"
-REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
-SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
-ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-14B-Instruct}"
+AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-}"
+REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-${AGENT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}"
+SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+DECOMPOSE_MODEL_PATH="${DECOMPOSE_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+SUMMARY_MODEL_PATH="${SUMMARY_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
 
 # Replace with your real retriever endpoint pool if needed.
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
@@ -74,8 +78,10 @@ else
 fi
 
 export CONDA_ROOT CONDA_ENV_NAME
+export CONFIG_NAME
 export TRAIN_PARQUET VAL_PARQUET
 export REWRITE_MODEL_PATH SELECT_MODEL_PATH ANSWER_MODEL_PATH
+export DECOMPOSE_MODEL_PATH SUMMARY_MODEL_PATH
 export RETRIEVAL_API_URLS_JSON
 export VAL_BEFORE_TRAIN TEST_FREQ SAVE_FREQ
 export GEN_BATCH_SIZE VAL_BATCH_SIZE

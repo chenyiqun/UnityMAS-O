@@ -54,6 +54,9 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.end_nodes = set(self.graph_cfg.get("end_nodes", []))
         self.max_steps = int(self.graph_cfg.get("max_steps", 16))
         self.stop_on_end = bool(self.graph_cfg.get("stop_on_end", True))
+        self.outcome_share_mode = str(self.workflow_cfg.get("outcome_share_mode", "full")).strip().lower()
+        if self.outcome_share_mode not in {"full", "split"}:
+            self.outcome_share_mode = "full"
         self.max_inflight_queries = int(self.workflow_cfg.get("max_inflight_queries", 32))
         self.llm_timeout_seconds = float(
             self.workflow_cfg.get("llm_timeout_seconds", os.environ.get("STAR_LLM_TIMEOUT_SECONDS", 0))
@@ -253,10 +256,28 @@ class GraphWorkflowRunner(WorkflowRunner):
     def _lookup_path(self, context: dict[str, Any], dotted: str, default: Any = "") -> Any:
         cur: Any = context
         for key in str(dotted).split("."):
-            if isinstance(cur, dict) and key in cur:
-                cur = cur[key]
-            else:
+            if isinstance(cur, dict):
+                if key in cur:
+                    cur = cur[key]
+                    continue
                 return default
+            if isinstance(cur, list | tuple):
+                if not str(key).isdigit():
+                    return default
+                idx = int(key)
+                if idx < 0 or idx >= len(cur):
+                    return default
+                cur = cur[idx]
+                continue
+            if isinstance(cur, np.ndarray):
+                if not str(key).isdigit():
+                    return default
+                idx = int(key)
+                if idx < 0 or idx >= int(cur.shape[0]):
+                    return default
+                cur = cur[idx]
+                continue
+            return default
         return cur
 
     def _render_template(self, template: str, context: dict[str, Any]) -> str:
@@ -275,11 +296,43 @@ class GraphWorkflowRunner(WorkflowRunner):
     def _dict_lookup(value: Any, dotted: str) -> Any:
         cur = value
         for key in str(dotted).split("."):
-            if isinstance(cur, dict) and key in cur:
-                cur = cur[key]
-            else:
+            if isinstance(cur, dict):
+                if key in cur:
+                    cur = cur[key]
+                    continue
                 return None
+            if isinstance(cur, list | tuple):
+                if not str(key).isdigit():
+                    return None
+                idx = int(key)
+                if idx < 0 or idx >= len(cur):
+                    return None
+                cur = cur[idx]
+                continue
+            if isinstance(cur, np.ndarray):
+                if not str(key).isdigit():
+                    return None
+                idx = int(key)
+                if idx < 0 or idx >= int(cur.shape[0]):
+                    return None
+                cur = cur[idx]
+                continue
+            return None
         return cur
+
+    @staticmethod
+    def _has_content(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return len(value.strip()) > 0
+        if isinstance(value, np.ndarray):
+            return int(value.size) > 0
+        if isinstance(value, list | tuple | set):
+            return any(GraphWorkflowRunner._has_content(x) for x in value)
+        if isinstance(value, dict):
+            return len(value) > 0
+        return True
 
     def _extract_from_batch(self, query_batch: DataProto, key_or_path: str) -> Any:
         key_or_path = str(key_or_path)
@@ -372,11 +425,33 @@ class GraphWorkflowRunner(WorkflowRunner):
         parser_type = str(parser.get("type", "raw"))
         output_key = str(node_cfg.get("output_key", parser.get("key", "output")))
         if parser_type == "json_key":
+            valid_reward = float(parser.get("valid_reward", 1.0))
+            invalid_reward = float(parser.get("invalid_reward", 0.0))
             obj = self.trainer._extract_first_json_object(raw_text)
             if isinstance(obj, dict):
-                value = str(obj.get(str(parser.get("key", output_key)), "")).strip()
-                return value, 1.0 if value else 0.0
-            return raw_text.strip(), 0.0
+                key = str(parser.get("key", output_key))
+                if key in obj:
+                    value = obj.get(key)
+                else:
+                    value = parser.get("default", "")
+                if isinstance(value, str):
+                    value = value.strip()
+                elif isinstance(value, list):
+                    cleaned = []
+                    for item in value:
+                        if isinstance(item, str):
+                            item = item.strip()
+                            if not item:
+                                continue
+                        if item is None:
+                            continue
+                        cleaned.append(item)
+                    value = cleaned
+                    max_items = int(parser.get("max_items", 0))
+                    if max_items > 0:
+                        value = value[:max_items]
+                return value, valid_reward if self._has_content(value) else invalid_reward
+            return raw_text.strip(), invalid_reward
         if parser_type in {"tag", "tag_between"}:
             tag = str(parser.get("tag", "")).strip()
             open_tag = str(parser.get("open_tag", f"<{tag}>" if tag else "")).strip()
@@ -648,12 +723,24 @@ class GraphWorkflowRunner(WorkflowRunner):
 
             reward_parts = []
             node_format = {}
+            shared_outcome_nodes = []
+            for rec in llm_exec_records:
+                node_id = rec["node_id"]
+                reward_cfg = dict(self.nodes[node_id].get("reward", {}))
+                if bool(reward_cfg.get("share_outcome", True)):
+                    shared_outcome_nodes.append(node_id)
+            denom = max(1, len(shared_outcome_nodes))
+
             for rec in llm_exec_records:
                 node_id = rec["node_id"]
                 reward_cfg = dict(self.nodes[node_id].get("reward", {}))
                 format_weight = float(reward_cfg.get("format_weight", 0.0))
                 share_outcome = bool(reward_cfg.get("share_outcome", True))
-                total = format_weight * float(rec["format_reward"]) + (outcome_reward if share_outcome else 0.0)
+                if share_outcome and self.outcome_share_mode == "split":
+                    shared_outcome = float(outcome_reward) / float(denom)
+                else:
+                    shared_outcome = float(outcome_reward) if share_outcome else 0.0
+                total = format_weight * float(rec["format_reward"]) + shared_outcome
                 thin_len = len(rec["thin"])
                 if thin_len > 0:
                     reward_parts.append(

@@ -1,0 +1,432 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - star_ppo_trainer
+  - _self_
+
+trainer:
+  experiment_name: star_qd_retrieve_summarize_answer_f1
+  # Validation control:
+  # 1) run one validation pass before training starts
+  val_before_train: false
+  # 2) run validation every N training steps
+  test_freq: 50
+  # 3) save checkpoint every N training steps
+  save_freq: 50
+  llm_engines:
+    - model_id: decompose_agent_7b
+      nnodes: 1
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: ${oc.env:DECOMPOSE_MODEL_PATH,null}
+    - model_id: summary_agent_7b
+      nnodes: 1
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: ${oc.env:SUMMARY_MODEL_PATH,null}
+    - model_id: answer_agent_7b
+      nnodes: 1
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: ${oc.env:ANSWER_MODEL_PATH,null}
+  routing:
+    policy: epoch_dynamic
+    refresh_every_epoch: true
+
+actor_rollout_ref:
+  # Star detached actor/rollout workers require hybrid_engine to be disabled.
+  hybrid_engine: false
+  actor:
+    ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
+    ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
+  rollout:
+    # Required by rollout config. Options: hf / vllm / sglang / trtllm.
+    name: ${oc.env:ROLLOUT_NAME,vllm}
+    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,1}}
+    free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
+    prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.5}}
+    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,1024}}
+    max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
+    enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
+    checkpoint_engine:
+      update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,4096}}
+    log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,2}}
+
+critic:
+  model:
+    path: ${oc.select:actor_rollout_ref.model.path,null}
+    tokenizer_path: ${oc.select:actor_rollout_ref.model.path,null}
+  ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+
+data:
+  train_files: ${oc.env:TRAIN_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}
+  val_files: ${oc.env:VAL_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}
+  train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
+  gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
+  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,128}}
+
+ray_kwargs:
+  ray_init:
+    # This workflow launches Ray head/workers outside main_ppo, so connect to existing cluster.
+    address: auto
+
+star:
+  workflow:
+    name: graph_query_decompose_retrieve_summarize_answer
+    llm_timeout_seconds: ${oc.decode:${oc.env:STAR_LLM_TIMEOUT_SECONDS,0}}
+    # split: share final outcome reward equally across llm nodes with share_outcome=true
+    # full: each shared node gets full final outcome reward
+    outcome_share_mode: full
+    max_inflight_queries: 128
+    max_parallel_rollouts_per_model: 128
+    per_infer_prompt_max_tokens: ${oc.decode:${oc.env:STAR_PER_INFER_PROMPT_MAX_TOKENS,8064}}
+    prompt_truncation_margin: ${oc.decode:${oc.env:STAR_PROMPT_TRUNCATION_MARGIN,128}}
+    debug:
+      enabled: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG,false}}
+      sample_index: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_SAMPLE_INDEX,0}}
+      max_chars: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_MAX_CHARS,160}}
+      every_n_batches: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES,20}}
+    runner:
+      path: pkg://verl.experimental.star_ppo.workflows.graph_workflow
+      name: GraphWorkflowRunner
+    question_candidates: ["question", "query", "problem", "extra_info.question"]
+    ground_truth_candidates: ["answer", "ground_truth", "extra_info.answer", "reward_model.ground_truth", "reward_model"]
+    tools:
+      retriever:
+        type: query_api_pool
+        api_urls: ["http://10.158.147.72:8000/retrieve"]
+        timeout_seconds: 5
+    graph:
+      start_nodes: ["decompose"]
+      end_nodes: ["answer"]
+      max_steps: 10
+      stop_on_end: true
+      outcome_reward:
+        type: f1
+        source: answer.final_answer
+        weight: 1.0
+      nodes:
+        decompose:
+          type: llm
+          model_id: decompose_agent_7b
+          agent_id: decompose_agent
+          output_key: sub_queries
+          parser:
+            type: json_key
+            key: sub_queries
+            default: []
+            max_items: 5
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are a query decomposition assistant.
+
+            Given one original user query, decompose it into 1 to 5 searchable sub-questions.
+
+            Requirements:
+            1. Return at least 1 sub-question.
+            2. Return at most 5 sub-questions.
+            3. Each sub-question must be concise and independently searchable.
+            4. Keep key entities, relations, and time constraints from the original query.
+            5. Do not answer the query.
+
+            Output strictly valid JSON:
+            {{"sub_queries":["sub-question 1","sub-question 2"]}}
+
+            Original query:
+            {question}
+          next:
+            - to: retrieve_1
+              when: "len(nodes.get('decompose', {}).get('sub_queries', []) or []) >= 1"
+            - to: retrieve_2
+              when: "len(nodes.get('decompose', {}).get('sub_queries', []) or []) >= 2"
+            - to: retrieve_3
+              when: "len(nodes.get('decompose', {}).get('sub_queries', []) or []) >= 3"
+            - to: retrieve_4
+              when: "len(nodes.get('decompose', {}).get('sub_queries', []) or []) >= 4"
+            - to: retrieve_5
+              when: "len(nodes.get('decompose', {}).get('sub_queries', []) or []) >= 5"
+            - to: answer
+              when: "len(nodes.get('decompose', {}).get('sub_queries', []) or []) == 0"
+
+        retrieve_1:
+          type: tool
+          tool: retriever
+          input_template: "{decompose.sub_queries.0}"
+          top_k: 5
+          max_attempts: 5
+          output_key: retrieved_docs_1
+          next:
+            - to: summarize_1
+        retrieve_2:
+          type: tool
+          tool: retriever
+          input_template: "{decompose.sub_queries.1}"
+          top_k: 5
+          max_attempts: 5
+          output_key: retrieved_docs_2
+          next:
+            - to: summarize_2
+        retrieve_3:
+          type: tool
+          tool: retriever
+          input_template: "{decompose.sub_queries.2}"
+          top_k: 5
+          max_attempts: 5
+          output_key: retrieved_docs_3
+          next:
+            - to: summarize_3
+        retrieve_4:
+          type: tool
+          tool: retriever
+          input_template: "{decompose.sub_queries.3}"
+          top_k: 5
+          max_attempts: 5
+          output_key: retrieved_docs_4
+          next:
+            - to: summarize_4
+        retrieve_5:
+          type: tool
+          tool: retriever
+          input_template: "{decompose.sub_queries.4}"
+          top_k: 5
+          max_attempts: 5
+          output_key: retrieved_docs_5
+          next:
+            - to: summarize_5
+
+        summarize_1:
+          type: llm
+          model_id: summary_agent_7b
+          agent_id: summary_agent
+          output_key: sub_answer_1
+          parser:
+            type: tag
+            open_tag: "<sub_answer>"
+            close_tag: "</sub_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are a sub-question summarization assistant.
+
+            Read the retrieved passages and produce one concise answer for the sub-question.
+            If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <sub_answer>your concise sub-answer</sub_answer>
+
+            Original query:
+            {question}
+
+            Sub-question:
+            {decompose.sub_queries.0}
+
+            Retrieved top-5 passages:
+            {retrieve_1.retrieved_docs_1}
+          next:
+            - to: answer
+        summarize_2:
+          type: llm
+          model_id: summary_agent_7b
+          agent_id: summary_agent
+          output_key: sub_answer_2
+          parser:
+            type: tag
+            open_tag: "<sub_answer>"
+            close_tag: "</sub_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are a sub-question summarization assistant.
+
+            Read the retrieved passages and produce one concise answer for the sub-question.
+            If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <sub_answer>your concise sub-answer</sub_answer>
+
+            Original query:
+            {question}
+
+            Sub-question:
+            {decompose.sub_queries.1}
+
+            Retrieved top-5 passages:
+            {retrieve_2.retrieved_docs_2}
+          next:
+            - to: answer
+        summarize_3:
+          type: llm
+          model_id: summary_agent_7b
+          agent_id: summary_agent
+          output_key: sub_answer_3
+          parser:
+            type: tag
+            open_tag: "<sub_answer>"
+            close_tag: "</sub_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are a sub-question summarization assistant.
+
+            Read the retrieved passages and produce one concise answer for the sub-question.
+            If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <sub_answer>your concise sub-answer</sub_answer>
+
+            Original query:
+            {question}
+
+            Sub-question:
+            {decompose.sub_queries.2}
+
+            Retrieved top-5 passages:
+            {retrieve_3.retrieved_docs_3}
+          next:
+            - to: answer
+        summarize_4:
+          type: llm
+          model_id: summary_agent_7b
+          agent_id: summary_agent
+          output_key: sub_answer_4
+          parser:
+            type: tag
+            open_tag: "<sub_answer>"
+            close_tag: "</sub_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are a sub-question summarization assistant.
+
+            Read the retrieved passages and produce one concise answer for the sub-question.
+            If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <sub_answer>your concise sub-answer</sub_answer>
+
+            Original query:
+            {question}
+
+            Sub-question:
+            {decompose.sub_queries.3}
+
+            Retrieved top-5 passages:
+            {retrieve_4.retrieved_docs_4}
+          next:
+            - to: answer
+        summarize_5:
+          type: llm
+          model_id: summary_agent_7b
+          agent_id: summary_agent
+          output_key: sub_answer_5
+          parser:
+            type: tag
+            open_tag: "<sub_answer>"
+            close_tag: "</sub_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are a sub-question summarization assistant.
+
+            Read the retrieved passages and produce one concise answer for the sub-question.
+            If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <sub_answer>your concise sub-answer</sub_answer>
+
+            Original query:
+            {question}
+
+            Sub-question:
+            {decompose.sub_queries.4}
+
+            Retrieved top-5 passages:
+            {retrieve_5.retrieved_docs_5}
+          next:
+            - to: answer
+
+        answer:
+          type: llm
+          model_id: answer_agent_7b
+          agent_id: answer_agent
+          output_key: final_answer
+          parser:
+            type: tag
+            open_tag: "<final_answer>"
+            close_tag: "</final_answer>"
+            valid_reward: 0.0
+            invalid_reward: -1.0
+          reward:
+            format_weight: 1.0
+            share_outcome: true
+          prompt_template: |
+            You are the final answer agent.
+
+            Input:
+            - Original query
+            - Decomposed sub-questions
+            - Corresponding sub-answers
+
+            Task:
+            1. Synthesize a final answer for the original query based on sub-answers.
+            2. Keep the answer concise and direct.
+            3. If evidence is insufficient, output Unknown.
+
+            Output format (strict):
+            <final_answer>your final answer</final_answer>
+
+            Original query:
+            {question}
+
+            Sub-question 1:
+            {decompose.sub_queries.0}
+            Sub-answer 1:
+            {summarize_1.sub_answer_1}
+
+            Sub-question 2:
+            {decompose.sub_queries.1}
+            Sub-answer 2:
+            {summarize_2.sub_answer_2}
+
+            Sub-question 3:
+            {decompose.sub_queries.2}
+            Sub-answer 3:
+            {summarize_3.sub_answer_3}
+
+            Sub-question 4:
+            {decompose.sub_queries.3}
+            Sub-answer 4:
+            {summarize_4.sub_answer_4}
+
+            Sub-question 5:
+            {decompose.sub_queries.4}
+            Sub-answer 5:
+            {summarize_5.sub_answer_5}
+          next: []

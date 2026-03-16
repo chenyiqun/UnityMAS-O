@@ -10,9 +10,12 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 
 TRAIN_PARQUET="${TRAIN_PARQUET:?TRAIN_PARQUET is required}"
 VAL_PARQUET="${VAL_PARQUET:?VAL_PARQUET is required}"
-REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:?REWRITE_MODEL_PATH is required}"
-SELECT_MODEL_PATH="${SELECT_MODEL_PATH:?SELECT_MODEL_PATH is required}"
-ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:?ANSWER_MODEL_PATH is required}"
+AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-}"
+REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-${AGENT_MODEL_PATH}}"
+SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:?REWRITE_MODEL_PATH (or AGENT_MODEL_PATH) is required}"
+CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
 ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 
@@ -49,7 +52,7 @@ PY
 
 echo "[star-head-test] launching smoke test run"
 python3 -m verl.experimental.star_ppo.main_ppo \
-  --config-name star_query_rewrite_retrieve_select_answer_f1_trainer \
+  --config-name "${CONFIG_NAME}" \
   data.train_files="${TRAIN_PARQUET}" \
   data.val_files="${VAL_PARQUET}" \
   data.train_max_samples=32 \
