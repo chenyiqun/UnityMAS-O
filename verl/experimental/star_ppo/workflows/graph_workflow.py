@@ -196,44 +196,76 @@ class GraphWorkflowRunner(WorkflowRunner):
             return f"dict(keys={keys[:5]})"
         return self._clip_debug_text(value)
 
-    def _truncate_prompt_for_inference(self, prompt_text: str) -> tuple[str, int]:
+    def _truncate_prompt_for_inference(self, prompt_text: str) -> tuple[str, int, int, int]:
         """Token-level truncation before each LLM node inference.
 
         Returns:
-            tuple[str, int]: (possibly truncated prompt text, removed_token_count)
+            tuple[str, int, int, int]:
+                (possibly truncated prompt text, removed_token_count, before_tokens, after_tokens)
         """
         tokenizer = getattr(self.trainer, "tokenizer", None)
         max_tokens = int(self.per_infer_prompt_max_tokens)
         if tokenizer is None or max_tokens <= 0:
-            return prompt_text, 0
+            text_len = len(str(prompt_text or ""))
+            return prompt_text, 0, text_len, text_len
+
+        chat_overhead_tokens = 0
+        if hasattr(tokenizer, "apply_chat_template"):
+            # Reserve chat-template overhead so the final model input respects max_tokens.
+            empty_messages = [{"role": "user", "content": ""}]
+            try:
+                empty_ids = tokenizer.apply_chat_template(
+                    empty_messages, tokenize=True, add_generation_prompt=True
+                )
+            except TypeError:
+                try:
+                    empty_ids = tokenizer.apply_chat_template(empty_messages, tokenize=True)
+                except Exception:
+                    empty_ids = None
+            except Exception:
+                empty_ids = None
+
+            if isinstance(empty_ids, list):
+                chat_overhead_tokens = len(empty_ids)
+            elif hasattr(empty_ids, "tolist"):
+                try:
+                    chat_overhead_tokens = len(empty_ids.tolist())
+                except Exception:
+                    chat_overhead_tokens = 0
 
         try:
             token_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         except TypeError:
             token_ids = tokenizer.encode(prompt_text)
         except Exception:
-            return prompt_text, 0
+            text_len = len(str(prompt_text or ""))
+            return prompt_text, 0, text_len, text_len
 
         if not isinstance(token_ids, list):
-            return prompt_text, 0
+            text_len = len(str(prompt_text or ""))
+            return prompt_text, 0, text_len, text_len
 
-        total = len(token_ids)
-        if total <= max_tokens:
-            return prompt_text, 0
+        content_total = len(token_ids)
+        allowed_content_tokens = max(1, max_tokens - int(chat_overhead_tokens))
+        if content_total <= allowed_content_tokens:
+            total_with_overhead = content_total + int(chat_overhead_tokens)
+            return prompt_text, 0, total_with_overhead, total_with_overhead
 
-        # Keep instruction head + latest evidence tail.
-        head_keep = max(64, int(max_tokens * 0.35))
-        head_keep = min(head_keep, max_tokens - 1)
-        tail_keep = max_tokens - head_keep
-        kept_ids = token_ids[:head_keep] + token_ids[-tail_keep:]
+        # Direct truncation to the max allowed length.
+        kept_ids = token_ids[:allowed_content_tokens]
 
         try:
             new_text = tokenizer.decode(kept_ids, skip_special_tokens=True)
         except TypeError:
             new_text = tokenizer.decode(kept_ids)
         except Exception:
-            return prompt_text, 0
-        return new_text, total - len(kept_ids)
+            total_with_overhead = content_total + int(chat_overhead_tokens)
+            return prompt_text, 0, total_with_overhead, total_with_overhead
+
+        before_tokens = content_total + int(chat_overhead_tokens)
+        after_tokens = len(kept_ids) + int(chat_overhead_tokens)
+        removed_tokens = max(0, content_total - len(kept_ids))
+        return new_text, removed_tokens, before_tokens, after_tokens
 
     def _count_tokens(self, text: str) -> int:
         tokenizer = getattr(self.trainer, "tokenizer", None)
@@ -518,14 +550,25 @@ class GraphWorkflowRunner(WorkflowRunner):
             model_id = str(node_cfg["model_id"])
             agent_id = str(node_cfg.get("agent_id", node_id))
             prompt_text = self._render_template(str(node_cfg.get("prompt_template", "{question}")), context)
-            prompt_text, prompt_trimmed = self._truncate_prompt_for_inference(prompt_text)
+            query_id = self._extract_from_batch(query_batch, "query_id")
+            prompt_text, prompt_trimmed, prompt_before_tokens, prompt_after_tokens = self._truncate_prompt_for_inference(
+                prompt_text
+            )
             prompt_tokens = self._count_tokens(prompt_text)
             if prompt_trimmed > 0:
-                query_id = self._extract_from_batch(query_batch, "query_id")
+                msg = (
+                    "[star-trunc] Prompt truncated before inference: "
+                    f"node={node_id} query_id={query_id} "
+                    f"before_tokens={int(prompt_before_tokens)} after_tokens={int(prompt_after_tokens)} "
+                    f"removed_tokens={int(prompt_trimmed)} max_prompt_tokens={int(self.per_infer_prompt_max_tokens)}"
+                )
+                print(msg, flush=True)
                 logger.warning(
-                    "Prompt truncated before inference: node=%s query_id=%s removed_tokens=%d max_prompt_tokens=%d",
+                    "Prompt truncated before inference: node=%s query_id=%s before_tokens=%d after_tokens=%d removed_tokens=%d max_prompt_tokens=%d",
                     node_id,
                     query_id,
+                    int(prompt_before_tokens),
+                    int(prompt_after_tokens),
                     int(prompt_trimmed),
                     int(self.per_infer_prompt_max_tokens),
                 )
