@@ -1132,6 +1132,7 @@ class StarRayTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
         tqdm_disable = str(os.environ.get("STAR_TQDM_DISABLE", "false")).strip().lower() in {"1", "true", "yes", "on"}
+        print(f"[star] tracking_backends={list(logger.logger.keys())}")
 
         global_step = self._load_checkpoint()
         self._global_step = global_step
@@ -1149,6 +1150,7 @@ class StarRayTrainer:
             return
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
+            empty_reward_streak = 0
             train_iter = tqdm(
                 enumerate(self.train_dataloader),
                 total=len(self.train_dataloader),
@@ -1168,8 +1170,19 @@ class StarRayTrainer:
                     self._ensure_routing_fields(batch)
                     rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
                     if len(rewards) == 0:
+                        empty_reward_streak += 1
+                        empty_metrics = {
+                            "training/global_step": float(global_step),
+                            "training/epoch": float(epoch),
+                            "workflow/empty_reward_batch": 1.0,
+                            "workflow/empty_reward_streak": float(empty_reward_streak),
+                        }
+                        logger.log(data=empty_metrics, step=global_step)
+                        if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
+                            print(f"[star] step={global_step} empty_reward_batch streak={empty_reward_streak}")
                         train_iter.set_postfix({"gstep": int(global_step), "samples": 0}, refresh=False)
                         continue
+                    empty_reward_streak = 0
 
                     commit_metrics = self._commit_rewards(rewards)
                     sync_metrics = await self._global_sync_and_update()
