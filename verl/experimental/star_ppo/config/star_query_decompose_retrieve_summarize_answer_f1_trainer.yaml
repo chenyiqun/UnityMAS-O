@@ -10,7 +10,7 @@ trainer:
   experiment_name: star_qd_retrieve_summarize_answer_f1
   # Validation control:
   # 1) run one validation pass before training starts
-  val_before_train: false
+  val_before_train: true
   # 2) run validation every N training steps
   test_freq: 50
   # 3) save checkpoint every N training steps
@@ -52,7 +52,7 @@ actor_rollout_ref:
     tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,1}}
     free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
-    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.5}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
     max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,1024}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
     enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
