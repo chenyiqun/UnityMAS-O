@@ -235,6 +235,20 @@ class GraphWorkflowRunner(WorkflowRunner):
             return prompt_text, 0
         return new_text, total - len(kept_ids)
 
+    def _count_tokens(self, text: str) -> int:
+        tokenizer = getattr(self.trainer, "tokenizer", None)
+        if tokenizer is None:
+            return len(str(text or ""))
+        try:
+            token_ids = tokenizer.encode(str(text or ""), add_special_tokens=False)
+        except TypeError:
+            token_ids = tokenizer.encode(str(text or ""))
+        except Exception:
+            return len(str(text or ""))
+        if isinstance(token_ids, list):
+            return int(len(token_ids))
+        return len(str(text or ""))
+
     @staticmethod
     def _as_template_value(v: Any) -> str:
         if v is None:
@@ -505,6 +519,7 @@ class GraphWorkflowRunner(WorkflowRunner):
             agent_id = str(node_cfg.get("agent_id", node_id))
             prompt_text = self._render_template(str(node_cfg.get("prompt_template", "{question}")), context)
             prompt_text, prompt_trimmed = self._truncate_prompt_for_inference(prompt_text)
+            prompt_tokens = self._count_tokens(prompt_text)
             if prompt_trimmed > 0:
                 query_id = self._extract_from_batch(query_batch, "query_id")
                 logger.warning(
@@ -533,6 +548,7 @@ class GraphWorkflowRunner(WorkflowRunner):
                 _, thin, _ = await rollout_coro
             action_text_vec = thin.non_tensor_batch.get("action_text", np.array([], dtype=object))
             raw_text = str(action_text_vec[0]) if len(action_text_vec) > 0 else ""
+            output_tokens = self._count_tokens(raw_text)
             parsed_value, format_reward = self._parse_llm_output(raw_text, node_cfg)
             output_key = str(node_cfg.get("output_key", "output"))
             context["nodes"][node_id] = {
@@ -544,11 +560,14 @@ class GraphWorkflowRunner(WorkflowRunner):
             return {
                 "node_id": node_id,
                 "node_type": "llm",
+                "agent_id": agent_id,
                 "thin": thin,
                 "format_reward": float(format_reward),
                 "output_key": output_key,
                 "output_value": parsed_value,
                 "prompt_trimmed_tokens": int(prompt_trimmed),
+                "prompt_tokens": int(prompt_tokens),
+                "output_tokens": int(output_tokens),
             }
 
         if node_type == "tool":
@@ -756,6 +775,15 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "node_format": node_format,
                 "llm_node_count": float(len(llm_exec_records)),
                 "debug_dump": debug_dump,
+                "llm_length_records": [
+                    {
+                        "node_id": rec["node_id"],
+                        "agent_id": str(rec.get("agent_id", rec["node_id"])),
+                        "prompt_tokens": int(rec.get("prompt_tokens", 0)),
+                        "output_tokens": int(rec.get("output_tokens", 0)),
+                    }
+                    for rec in llm_exec_records
+                ],
             }
 
     async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
@@ -792,12 +820,27 @@ class GraphWorkflowRunner(WorkflowRunner):
         outcome_rewards = []
         llm_node_counts = []
         node_format_acc = defaultdict(list)
+        node_prompt_len_acc = defaultdict(list)
+        node_output_len_acc = defaultdict(list)
+        agent_prompt_len_acc = defaultdict(list)
+        agent_output_len_acc = defaultdict(list)
         for item in query_results:
             reward_parts.extend(item["reward_parts"])
             outcome_rewards.append(item["outcome_reward"])
             llm_node_counts.append(item["llm_node_count"])
             for node_id, val in item["node_format"].items():
                 node_format_acc[node_id].append(float(val))
+            for rec in item.get("llm_length_records", []):
+                node_id = str(rec.get("node_id", ""))
+                agent_id = str(rec.get("agent_id", ""))
+                prompt_tokens = int(rec.get("prompt_tokens", 0))
+                output_tokens = int(rec.get("output_tokens", 0))
+                if node_id:
+                    node_prompt_len_acc[node_id].append(float(prompt_tokens))
+                    node_output_len_acc[node_id].append(float(output_tokens))
+                if agent_id:
+                    agent_prompt_len_acc[agent_id].append(float(prompt_tokens))
+                    agent_output_len_acc[agent_id].append(float(output_tokens))
 
         if len(reward_parts) == 0:
             rewards = self.trainer._empty_rewards()
@@ -811,4 +854,24 @@ class GraphWorkflowRunner(WorkflowRunner):
         }
         for node_id, values in node_format_acc.items():
             metrics[f"workflow/node/{node_id}/format_reward_mean"] = float(np.mean(values)) if values else 0.0
+        for node_id, values in node_prompt_len_acc.items():
+            if values:
+                metrics[f"workflow/node/{node_id}/prompt_tokens_min"] = float(np.min(values))
+                metrics[f"workflow/node/{node_id}/prompt_tokens_max"] = float(np.max(values))
+                metrics[f"workflow/node/{node_id}/prompt_tokens_mean"] = float(np.mean(values))
+        for node_id, values in node_output_len_acc.items():
+            if values:
+                metrics[f"workflow/node/{node_id}/output_tokens_min"] = float(np.min(values))
+                metrics[f"workflow/node/{node_id}/output_tokens_max"] = float(np.max(values))
+                metrics[f"workflow/node/{node_id}/output_tokens_mean"] = float(np.mean(values))
+        for agent_id, values in agent_prompt_len_acc.items():
+            if values:
+                metrics[f"workflow/agent/{agent_id}/prompt_tokens_min"] = float(np.min(values))
+                metrics[f"workflow/agent/{agent_id}/prompt_tokens_max"] = float(np.max(values))
+                metrics[f"workflow/agent/{agent_id}/prompt_tokens_mean"] = float(np.mean(values))
+        for agent_id, values in agent_output_len_acc.items():
+            if values:
+                metrics[f"workflow/agent/{agent_id}/output_tokens_min"] = float(np.min(values))
+                metrics[f"workflow/agent/{agent_id}/output_tokens_max"] = float(np.max(values))
+                metrics[f"workflow/agent/{agent_id}/output_tokens_mean"] = float(np.mean(values))
         return rewards, metrics
