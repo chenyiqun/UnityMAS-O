@@ -99,8 +99,16 @@ class ServerAdapter(BaseRollout):
         self.zmq_context = zmq.Context()
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
 
-        self.use_shm = not is_support_ipc()
-        if self.use_shm:
+        force_shm_weight_sync = (
+            str(os.getenv("VERL_VLLM_FORCE_SHM_WEIGHT_SYNC", "0")).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        self.use_shm = force_shm_weight_sync or (not is_support_ipc())
+        if force_shm_weight_sync:
+            logger.warning(
+                "VERL_VLLM_FORCE_SHM_WEIGHT_SYNC is enabled. "
+                "Use shared memory path for weight sync to reduce CUDA IPC clone peak memory."
+            )
+        elif self.use_shm:
             logger.warning(
                 "IPC is not supported on your devices. Falling back to shared memory for weight transfer, "
                 "which may cause performance degradation. If you are using Ascend NPUs, please ensure that "
