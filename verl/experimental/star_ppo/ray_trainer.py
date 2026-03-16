@@ -14,6 +14,7 @@ import torch
 from omegaconf import OmegaConf, open_dict
 from ray.util.collective import collective
 from torch.utils.data import DataLoader, Dataset, Sampler
+from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm.auto import tqdm
 
 from verl import DataProto
@@ -82,6 +83,7 @@ class StarRayTrainer:
         self.kl_ctrl_by_model = {}
         self.query_reward_ledger: dict[str, float] = defaultdict(float)
         self.global_steps = 0
+        self._train_loader_state_loaded = False
         self._max_parallel_rollouts_per_model = int(self.config.star.workflow.get("max_parallel_rollouts_per_model", 32))
         self._rollout_semaphore_by_model: dict[str, asyncio.Semaphore] = {}
         # For tiny batches (especially bsz=1), ND dispatch padding can bias samples
@@ -120,7 +122,7 @@ class StarRayTrainer:
 
             collate_fn = default_collate_fn
 
-        self.train_dataloader = DataLoader(
+        self.train_dataloader = StatefulDataLoader(
             train_dataset,
             batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
             num_workers=self.config.data.get("dataloader_num_workers", 0),
@@ -990,6 +992,11 @@ class StarRayTrainer:
                     max_ckpt_to_keep=max_critic_ckpt_to_keep,
                 )
 
+        # save train dataloader cursor/sampler state for strict resume
+        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+        dataloader_state_dict = self.train_dataloader.state_dict()
+        torch.save(dataloader_state_dict, dataloader_local_path)
+
         star_meta = {"global_step": step, "models": sorted(self.model_contexts.keys())}
         with open(os.path.join(global_step_folder, "star_meta.json"), "w", encoding="utf-8") as f:
             json.dump(star_meta, f, ensure_ascii=False, indent=2)
@@ -1033,6 +1040,16 @@ class StarRayTrainer:
                 )
 
             self._sync_rollout_weights(model_id, ctx)
+
+        # restore train dataloader cursor/sampler state if present
+        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+        if os.path.exists(dataloader_local_path):
+            dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
+            self.train_dataloader.load_state_dict(dataloader_state_dict)
+            self._train_loader_state_loaded = True
+        else:
+            self._train_loader_state_loaded = False
+            print(f"[star] no dataloader state at {dataloader_local_path}, resume from sampler start")
         return self.global_steps
 
     def _drain_rollout_ready_queues(self):
@@ -1151,10 +1168,14 @@ class StarRayTrainer:
 
         for epoch in range(start_epoch, self.config.trainer.total_epochs):
             empty_reward_streak = 0
+            resume_batch_offset = 0
+            if self._train_loader_state_loaded and epoch == start_epoch and len(self.train_dataloader) > 0:
+                resume_batch_offset = int(global_step % len(self.train_dataloader))
             train_iter = tqdm(
                 enumerate(self.train_dataloader),
                 total=len(self.train_dataloader),
                 desc=f"[star-train] e{epoch}",
+                initial=resume_batch_offset,
                 leave=True,
                 dynamic_ncols=True,
                 disable=tqdm_disable,
