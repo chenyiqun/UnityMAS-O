@@ -14,7 +14,7 @@ trainer:
   # 2) run validation every N training steps
   test_freq: 50
   # 4) validation uses at most N batches each run (-1 means full val set)
-  val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,10}}
+  val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,5}}
   # 3) save checkpoint every N training steps
   save_freq: 50
   llm_engines:
