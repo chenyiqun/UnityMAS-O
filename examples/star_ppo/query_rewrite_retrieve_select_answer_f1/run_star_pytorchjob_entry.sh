@@ -18,6 +18,8 @@ MASTER_ADDR_FILE="${MASTER_ADDR_FILE:-}"
 TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}"
 VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}"
 CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
+PROJECT_NAME="${PROJECT_NAME:-}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
 AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-}"
 REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-${AGENT_MODEL_PATH:-/path/to/rewrite_7b}}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
@@ -133,23 +135,32 @@ PY
   fi
 
   echo "[star-pytorchjob] launching training on rank0"
+  hydra_overrides=(
+    data.train_files="${TRAIN_PARQUET}"
+    data.val_files="${VAL_PARQUET}"
+    trainer.nnodes="${WORLD_SIZE}"
+    trainer.n_gpus_per_node="${GPUS_PER_NODE}"
+    actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}"
+    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}"
+    star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}"
+    data.gen_batch_size="${GEN_BATCH_SIZE}"
+    data.train_batch_size="${GEN_BATCH_SIZE}"
+    data.val_batch_size="${VAL_BATCH_SIZE}"
+    trainer.val_before_train="${VAL_BEFORE_TRAIN}"
+    trainer.test_freq="${TEST_FREQ}"
+    ++trainer.val_max_batches="${VAL_MAX_BATCHES}"
+    trainer.save_freq="${SAVE_FREQ}"
+    trainer.logger='["console","wandb"]'
+  )
+  if [[ -n "${PROJECT_NAME}" ]]; then
+    hydra_overrides+=(trainer.project_name="${PROJECT_NAME}")
+  fi
+  if [[ -n "${EXPERIMENT_NAME}" ]]; then
+    hydra_overrides+=(trainer.experiment_name="${EXPERIMENT_NAME}")
+  fi
   python3 -m verl.experimental.star_ppo.main_ppo \
     --config-name "${CONFIG_NAME}" \
-    data.train_files="${TRAIN_PARQUET}" \
-    data.val_files="${VAL_PARQUET}" \
-    trainer.nnodes="${WORLD_SIZE}" \
-    trainer.n_gpus_per_node="${GPUS_PER_NODE}" \
-    actor_rollout_ref.model.path="${REWRITE_MODEL_PATH}" \
-    actor_rollout_ref.rollout.name="${ROLLOUT_NAME}" \
-    star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}" \
-    data.gen_batch_size="${GEN_BATCH_SIZE}" \
-    data.train_batch_size="${GEN_BATCH_SIZE}" \
-    data.val_batch_size="${VAL_BATCH_SIZE}" \
-    trainer.val_before_train="${VAL_BEFORE_TRAIN}" \
-    trainer.test_freq="${TEST_FREQ}" \
-    trainer.val_max_batches="${VAL_MAX_BATCHES}" \
-    trainer.save_freq="${SAVE_FREQ}" \
-    trainer.logger='["console","wandb"]'
+    "${hydra_overrides[@]}"
 else
   echo "[star-pytorchjob] rank${RANK} waits for Ray head ${MASTER_ADDR}:${MASTER_PORT}"
   python3 - <<'PY'
