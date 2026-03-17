@@ -64,9 +64,14 @@ elif [[ ! -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]; then
   need_setup="true"
 else
   # shellcheck disable=SC1090
+  # Some conda deactivate.d scripts are not nounset-safe; temporarily disable `set -u`.
+  set +u
   source "${CONDA_ROOT}/etc/profile.d/conda.sh"
   if ! conda env list | awk '{print $1}' | grep -Fxq "${CONDA_ENV_NAME}"; then
+    set -u
     need_setup="true"
+  else
+    set -u
   fi
 fi
 

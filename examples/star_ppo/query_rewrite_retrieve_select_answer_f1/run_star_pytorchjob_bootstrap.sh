@@ -18,15 +18,19 @@ if [[ ! -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]]; then
   exit 1
 fi
 
+# Some conda deactivate.d scripts are not nounset-safe; temporarily disable `set -u`.
+set +u
 source "${CONDA_ROOT}/etc/profile.d/conda.sh"
 
 if ! conda env list | awk '{print $1}' | grep -Fxq "${CONDA_ENV_NAME}"; then
+  set -u
   echo "[bootstrap] conda env '${CONDA_ENV_NAME}' not found."
   echo "[bootstrap] run once with DO_ENV_SETUP=true or execute setup_verl_env.sh manually."
   exit 1
 fi
 
 conda activate "${CONDA_ENV_NAME}"
+set -u
 
 echo "[bootstrap] using existing env '${CONDA_ENV_NAME}', starting rank-routed entry..."
 bash "${SCRIPT_DIR}/run_star_pytorchjob_entry.sh"
