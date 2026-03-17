@@ -72,7 +72,7 @@ actor_rollout_ref:
     checkpoint_engine:
       # Must be larger than the largest single weight tensor during actor->rollout sync.
       # You can override via env: ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB.
-      update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,2048}}
+      update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,3072}}
     # Required when dynamic batch sizing is disabled.
     # You can override via env: ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU.
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,2}}

@@ -52,7 +52,7 @@ export STAR_WEIGHT_SYNC_MODE="${STAR_WEIGHT_SYNC_MODE:-auto}"
 export STAR_WORKER_MAX_CONCURRENCY="${STAR_WORKER_MAX_CONCURRENCY:-8}"
 export STAR_WEIGHT_SYNC_RETRIES="${STAR_WEIGHT_SYNC_RETRIES:-5}"
 export STAR_WEIGHT_SYNC_PORT_RETRY_STRIDE="${STAR_WEIGHT_SYNC_PORT_RETRY_STRIDE:-20}"
-export ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB="${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-2048}"
+export ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB="${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB:-3072}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export PYTHONUNBUFFERED=1
 export RAY_DEDUP_LOGS=0
@@ -64,6 +64,18 @@ export ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-64}"
 export STAR_MAX_INFLIGHT_QUERIES="${STAR_MAX_INFLIGHT_QUERIES:-128}"
 export STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL="${STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL:-32}"
 export VERL_VLLM_FORCE_SHM_WEIGHT_SYNC="${VERL_VLLM_FORCE_SHM_WEIGHT_SYNC:-1}"
+
+# --- CUDA host compiler compatibility for flashinfer JIT (H800/CUDA12.x) ---
+# Prefer GCC 12 if available; otherwise allow unsupported compiler and
+# disable flashinfer sampler by default to avoid runtime JIT build failures.
+if command -v gcc-12 >/dev/null 2>&1 && command -v g++-12 >/dev/null 2>&1; then
+  export CC="${CC:-$(command -v gcc-12)}"
+  export CXX="${CXX:-$(command -v g++-12)}"
+  export CUDAHOSTCXX="${CUDAHOSTCXX:-${CXX}}"
+else
+  export NVCC_PREPEND_FLAGS="${NVCC_PREPEND_FLAGS:--allow-unsupported-compiler}"
+  export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
+fi
 
 # vLLM v1 memory pool is incompatible with expandable_segments:True.
 # See: https://github.com/pytorch/pytorch/issues/147851
