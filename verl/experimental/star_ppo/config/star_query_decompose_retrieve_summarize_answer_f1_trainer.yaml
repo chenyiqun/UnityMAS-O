@@ -51,11 +51,11 @@ actor_rollout_ref:
   rollout:
     # Required by rollout config. Options: hf / vllm / sglang / trtllm.
     name: ${oc.env:ROLLOUT_NAME,vllm}
-    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,1}}
+    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,2}}
     free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,3072}}
     response_length: ${oc.decode:${oc.env:ROLLOUT_RESPONSE_LENGTH,128}}
-    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.5}}
     max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,8192}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,64}}
     enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}

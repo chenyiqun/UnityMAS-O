@@ -55,16 +55,16 @@ actor_rollout_ref:
     # Required by rollout config. Options: hf / vllm / sglang / trtllm.
     # You can override via env: ROLLOUT_NAME.
     name: ${oc.env:ROLLOUT_NAME,vllm}
-    # Use TP=1 by default.
+    # Use TP=2 by default.
     # You can override via env: ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE.
-    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,1}}
+    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,2}}
     # Free vLLM cache around weight update to avoid OOM in update_weights_from_ipc.
     free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
     # Increase per-inference prompt budget from default 512 to reduce max_tokens=0 risk.
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
     # Leave more GPU headroom for actor/critic + weight sync clones on colocated setup.
     # Lower if OOM; try VLLM_USE_V1=0 if v1 fails.
-    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.6}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.5}}
     max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,1024}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
     # Disable prefix caching to save memory when OOM; set ROLLOUT_ENABLE_PREFIX_CACHING=true to re-enable.
