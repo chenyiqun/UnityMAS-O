@@ -179,15 +179,21 @@ class GraphWorkflowRunner(WorkflowRunner):
             return text
         return text[: max(0, self.debug_max_chars - 3)] + "..."
 
-    def _summarize_debug_value(self, value: Any) -> str:
+    def _summarize_debug_item(self, value: Any, depth: int = 0) -> str:
         if value is None:
             return ""
-        if isinstance(value, list):
-            if len(value) == 0:
-                return "list(len=0)"
-            first = self._clip_debug_text(value[0])
-            return f"list(len={len(value)}, first={first})"
+        if isinstance(value, str | int | float | bool):
+            return self._clip_debug_text(value)
         if isinstance(value, dict):
+            if "text" in value and isinstance(value["text"], str | int | float | bool):
+                extra_parts = []
+                for k in ("title", "source", "url", "id", "score"):
+                    if k in value and isinstance(value[k], str | int | float | bool):
+                        extra_parts.append(f"{k}={self._clip_debug_text(value[k])}")
+                    if len(extra_parts) >= 2:
+                        break
+                extra = (", " + ", ".join(extra_parts)) if extra_parts else ""
+                return "{text=" + self._clip_debug_text(value["text"]) + extra + "}"
             keys = list(value.keys())
             preview = []
             for k in keys[:3]:
@@ -195,8 +201,30 @@ class GraphWorkflowRunner(WorkflowRunner):
                 if isinstance(v, str | int | float | bool):
                     preview.append(f"{k}={self._clip_debug_text(v)}")
             if preview:
-                return f"dict(keys={keys[:5]}, {', '.join(preview)})"
+                return "{" + ", ".join(preview) + "}"
             return f"dict(keys={keys[:5]})"
+        if isinstance(value, list):
+            if depth >= 1:
+                return f"list(len={len(value)})"
+            limit = min(len(value), 5)
+            items = [self._summarize_debug_item(v, depth + 1) for v in value[:limit]]
+            suffix = f", ...+{len(value) - limit}" if len(value) > limit else ""
+            return f"list(len={len(value)}, items=[{', '.join(items)}{suffix}])"
+        return self._clip_debug_text(value)
+
+    def _summarize_debug_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            if len(value) == 0:
+                return "list(len=0)"
+            all_primitive = all(isinstance(v, str | int | float | bool) for v in value)
+            limit = len(value) if all_primitive and len(value) <= 10 else min(len(value), 5)
+            items = [self._summarize_debug_item(v) for v in value[:limit]]
+            suffix = f", ...+{len(value) - limit}" if len(value) > limit else ""
+            return f"list(len={len(value)}, items=[{', '.join(items)}{suffix}])"
+        if isinstance(value, dict):
+            return self._summarize_debug_item(value)
         return self._clip_debug_text(value)
 
     def _truncate_prompt_for_inference(self, prompt_text: str) -> tuple[str, int, int, int]:
