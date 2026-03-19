@@ -94,6 +94,8 @@ class StarRayTrainer:
         self._timing_print_enabled = timing_print_flag in {"1", "true", "yes", "on"}
         self._timing_print_every_n_batches = max(1, int(os.environ.get("STAR_TIMING_PRINT_EVERY_N_BATCHES", "1")))
         self._timing_group_topk = max(1, int(os.environ.get("STAR_TIMING_GROUP_TOPK", "8")))
+        wandb_timing_filter_flag = str(os.environ.get("STAR_WANDB_FILTER_FINE_TIMING", "true")).strip().lower()
+        self._wandb_filter_fine_timing = wandb_timing_filter_flag in {"1", "true", "yes", "on"}
         self.workflow_runner = self._create_workflow_runner()
         if self.config.algorithm.use_kl_in_reward:
             for model_id in self.model_ids:
@@ -1127,6 +1129,29 @@ class StarRayTrainer:
             return float(value)
         return float(default)
 
+    @staticmethod
+    def _is_fine_grained_timing_key(metric_key: str) -> bool:
+        key = str(metric_key)
+        return ("/timing/node/" in key) or ("/timing/group/" in key)
+
+    def _log_metrics(self, logger: Tracking, data: dict[str, float], step: int) -> None:
+        # Keep full metrics for local backends (console/file), but trim very
+        # high-cardinality timing keys from WandB payloads.
+        if not self._wandb_filter_fine_timing:
+            logger.log(data=data, step=step)
+            return
+
+        wandb_backends = [b for b in ("wandb", "vemlp_wandb") if b in logger.logger]
+        other_backends = [b for b in logger.logger.keys() if b not in {"wandb", "vemlp_wandb"}]
+
+        if other_backends:
+            logger.log(data=data, step=step, backend=other_backends)
+
+        if wandb_backends:
+            filtered = {k: v for k, v in data.items() if not self._is_fine_grained_timing_key(k)}
+            if filtered:
+                logger.log(data=filtered, step=step, backend=wandb_backends)
+
     def _print_batch_timing(
         self,
         stage: str,
@@ -1305,7 +1330,10 @@ class StarRayTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
         tqdm_disable = str(os.environ.get("STAR_TQDM_DISABLE", "false")).strip().lower() in {"1", "true", "yes", "on"}
-        print(f"[star] tracking_backends={list(logger.logger.keys())}")
+        print(
+            f"[star] tracking_backends={list(logger.logger.keys())} "
+            f"wandb_fine_timing_filter={self._wandb_filter_fine_timing}"
+        )
 
         global_step = self._load_checkpoint()
         self._global_step = global_step
@@ -1316,7 +1344,7 @@ class StarRayTrainer:
         if val_before_train:
             print(f"[star] pre-train validation start epoch={start_epoch} global_step={global_step}")
             val_metrics = await self._run_validation(epoch=start_epoch, global_step=global_step)
-            logger.log(data=val_metrics, step=global_step)
+            self._log_metrics(logger, val_metrics, global_step)
             print(f"[star] pre-train validation={val_metrics}")
 
         if bool(self.config.trainer.get("val_only", False)):
@@ -1368,7 +1396,7 @@ class StarRayTrainer:
                                 "workflow_wall_s": workflow_wall_s,
                             },
                         )
-                        logger.log(data=empty_metrics, step=global_step)
+                        self._log_metrics(logger, empty_metrics, global_step)
                         if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
                             print(f"[star] step={global_step} empty_reward_batch streak={empty_reward_streak}")
                         train_iter.set_postfix({"gstep": int(global_step), "samples": 0}, refresh=False)
@@ -1403,7 +1431,7 @@ class StarRayTrainer:
                             "sync_update_s": sync_update_s,
                         },
                     )
-                    logger.log(data=step_metrics, step=global_step)
+                    self._log_metrics(logger, step_metrics, global_step)
                     if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
                         print(f"[star] step={global_step} batch_update={step_metrics}")
 
@@ -1420,7 +1448,7 @@ class StarRayTrainer:
                     is_last_step = global_step >= self.total_training_steps
                     if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
                         val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
-                        logger.log(data=val_metrics, step=global_step)
+                        self._log_metrics(logger, val_metrics, global_step)
                         print(f"[star] step={global_step} validation={val_metrics}")
 
                     if self.config.trainer.save_freq > 0 and (
