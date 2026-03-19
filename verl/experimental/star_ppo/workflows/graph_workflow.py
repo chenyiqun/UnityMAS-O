@@ -985,7 +985,17 @@ class GraphWorkflowRunner(WorkflowRunner):
             "worker_buffer_put_s",
             "worker_build_overhead_s",
             "engine_generate_s",
+            "engine_generate_max_s",
             "agent_loop_tool_calls_s",
+            "agent_loop_tool_calls_max_s",
+            "agent_loop_manager_prep_s",
+            "agent_loop_manager_worker_rpc_wait_s",
+            "agent_loop_manager_worker_rpc_mean_s",
+            "agent_loop_manager_worker_rpc_max_s",
+            "agent_loop_manager_concat_s",
+            "agent_loop_manager_metrics_reduce_s",
+            "agent_loop_manager_total_s",
+            "agent_loop_manager_overhead_s",
         )
         llm_timing_all = {field: [] for field in llm_timing_fields}
         llm_timing_by_id = {field: defaultdict(list) for field in llm_timing_fields}

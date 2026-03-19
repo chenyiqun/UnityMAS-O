@@ -239,6 +239,24 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             generate_s = inner_timing.get("generate_sequences", None)
             if isinstance(generate_s, int | float | np.integer | np.floating):
                 timing["engine_generate_s"] = float(generate_s)
+            timing_aliases = {
+                "agent_loop/generate_sequences/mean": "engine_generate_s",
+                "agent_loop/generate_sequences/max": "engine_generate_max_s",
+                "agent_loop/tool_calls/mean": "agent_loop_tool_calls_s",
+                "agent_loop/tool_calls/max": "agent_loop_tool_calls_max_s",
+                "agent_loop/manager/prep": "agent_loop_manager_prep_s",
+                "agent_loop/manager/worker_rpc_wait": "agent_loop_manager_worker_rpc_wait_s",
+                "agent_loop/manager/worker_rpc_mean": "agent_loop_manager_worker_rpc_mean_s",
+                "agent_loop/manager/worker_rpc_max": "agent_loop_manager_worker_rpc_max_s",
+                "agent_loop/manager/concat": "agent_loop_manager_concat_s",
+                "agent_loop/manager/metrics_reduce": "agent_loop_manager_metrics_reduce_s",
+                "agent_loop/manager/total": "agent_loop_manager_total_s",
+                "agent_loop/manager/overhead": "agent_loop_manager_overhead_s",
+            }
+            for src_key, dst_key in timing_aliases.items():
+                value = inner_timing.get(src_key, None)
+                if isinstance(value, int | float | np.integer | np.floating):
+                    timing[dst_key] = float(value)
 
         metric_list = meta_info.get("metrics", None)
         if isinstance(metric_list, list):

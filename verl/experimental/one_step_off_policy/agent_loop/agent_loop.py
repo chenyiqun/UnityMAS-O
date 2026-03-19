@@ -15,7 +15,9 @@ import asyncio
 import logging
 import math
 import os
+import time
 
+import numpy as np
 import ray
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
@@ -39,6 +41,8 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         if len(self.agent_loop_workers) == 0:
             raise RuntimeError("No agent loop workers available for async generation.")
 
+        manager_start = time.perf_counter()
+
         # Validation/workflow may issue tiny batches (e.g. size=1).
         # DataProto.chunk requires equal split when padding is disabled, so fallback to
         # split() for non-divisible cases to avoid assertion failures.
@@ -56,17 +60,45 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         start = int(self._rr_worker_cursor % len(self.agent_loop_workers))
         workers = [self.agent_loop_workers[(start + i) % len(self.agent_loop_workers)] for i in range(len(chunks))]
         self._rr_worker_cursor += len(chunks)
-        outputs = await asyncio.gather(
-            *[
-                asyncio.to_thread(ray.get, worker.generate_sequences.remote(chunk))
-                for worker, chunk in zip(workers, chunks, strict=True)
-            ]
+
+        manager_prep_s = time.perf_counter() - manager_start
+
+        async def _run_chunk(worker, chunk):
+            rpc_start = time.perf_counter()
+            output = await asyncio.to_thread(ray.get, worker.generate_sequences.remote(chunk))
+            return output, time.perf_counter() - rpc_start
+
+        worker_rpc_start = time.perf_counter()
+        chunk_results = await asyncio.gather(
+            *[_run_chunk(worker, chunk) for worker, chunk in zip(workers, chunks, strict=True)]
         )
+        worker_rpc_elapsed_s = time.perf_counter() - worker_rpc_start
+        outputs = [output for output, _ in chunk_results]
+        worker_rpc_times = [elapsed_s for _, elapsed_s in chunk_results]
+
+        concat_start = time.perf_counter()
         output = DataProto.concat(outputs)
+        manager_concat_s = time.perf_counter() - concat_start
 
         # calculate performance metrics
+        metrics_start = time.perf_counter()
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
+        manager_metrics_reduce_s = time.perf_counter() - metrics_start
+
+        worker_rpc_times_np = np.array(worker_rpc_times, dtype=np.float64)
+        manager_total_s = time.perf_counter() - manager_start
+        timing["agent_loop/manager/prep"] = manager_prep_s
+        timing["agent_loop/manager/worker_rpc_wait"] = worker_rpc_elapsed_s
+        timing["agent_loop/manager/worker_rpc_mean"] = worker_rpc_times_np.mean()
+        timing["agent_loop/manager/worker_rpc_max"] = worker_rpc_times_np.max()
+        timing["agent_loop/manager/concat"] = manager_concat_s
+        timing["agent_loop/manager/metrics_reduce"] = manager_metrics_reduce_s
+        timing["agent_loop/manager/total"] = manager_total_s
+        timing["agent_loop/manager/overhead"] = max(
+            manager_total_s - float(worker_rpc_times_np.max()),
+            0.0,
+        )
 
         output.meta_info = {"timing": timing, **outputs[0].meta_info}
         return output

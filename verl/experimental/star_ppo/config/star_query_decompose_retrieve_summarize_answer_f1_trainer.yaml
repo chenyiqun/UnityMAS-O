@@ -10,7 +10,7 @@ trainer:
   experiment_name: star_qd_retrieve_summarize_answer_f1
   # Validation control:
   # 1) run one validation pass before training starts
-  val_before_train: true
+  val_before_train: false
   # 2) run validation every N training steps
   test_freq: 50
   # 4) validation uses at most N batches each run (-1 means full val set)

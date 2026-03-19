@@ -1147,6 +1147,7 @@ class StarRayTrainer:
         llm_exec_mean = self._pick_metric(metrics, "workflow/timing/llm_rollout_exec_s_mean")
         llm_rpc_overhead_mean = self._pick_metric(metrics, "workflow/timing/llm_rpc_overhead_s_mean")
         llm_engine_mean = self._pick_metric(metrics, "workflow/timing/llm_engine_generate_s_mean")
+        llm_mgr_mean = self._pick_metric(metrics, "workflow/timing/llm_agent_loop_manager_total_s_mean")
         tool_mean = self._pick_metric(metrics, "workflow/timing/tool_node_s_mean")
         node_calls = int(self._pick_metric(metrics, "workflow/timing/node_invocations"))
         group_pairs: list[tuple[str, float]] = []
@@ -1181,7 +1182,8 @@ class StarRayTrainer:
             f"workflow={workflow_total:.3f}s query_mean={query_mean:.3f}s "
             f"llm_mean={llm_mean:.3f}s llm_queue_mean={llm_queue_mean:.3f}s "
             f"llm_exec_mean={llm_exec_mean:.3f}s llm_rpc_ovh_mean={llm_rpc_overhead_mean:.3f}s "
-            f"llm_engine_mean={llm_engine_mean:.3f}s tool_mean={tool_mean:.3f}s "
+            f"llm_engine_mean={llm_engine_mean:.3f}s llm_mgr_mean={llm_mgr_mean:.3f}s "
+            f"tool_mean={tool_mean:.3f}s "
             f"node_calls={node_calls}{group_text}{extra_text}"
         )
 
