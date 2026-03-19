@@ -18,6 +18,7 @@ import inspect
 import json
 import logging
 import os
+import time
 from pprint import pprint
 from typing import Any, Callable, Optional
 
@@ -518,6 +519,7 @@ class vLLMHttpServer:
         priority: int = 0,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        server_start = time.perf_counter()
         # Calculate the maximum possible new tokens based on available context space
         # This serves as a safety upper bound
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
@@ -577,9 +579,15 @@ class vLLMHttpServer:
 
         # Get final response
         final_res: Optional[RequestOutput] = None
+        first_token_s = None
         async for output in generator:
+            if first_token_s is None:
+                first_token_s = time.perf_counter() - server_start
             final_res = output
         assert final_res is not None
+        server_total_s = time.perf_counter() - server_start
+        if first_token_s is None:
+            first_token_s = server_total_s
 
         token_ids = final_res.outputs[0].token_ids
         log_probs = None
@@ -610,6 +618,11 @@ class vLLMHttpServer:
             routed_experts=routed_experts,
             stop_reason=stop_reason,
             num_preempted=num_preempted,
+            timing={
+                "server_total": server_total_s,
+                "server_first_token": first_token_s,
+                "server_decode_tail": max(server_total_s - first_token_s, 0.0),
+            },
         )
 
     async def wake_up(self):

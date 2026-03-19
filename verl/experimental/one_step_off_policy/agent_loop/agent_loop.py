@@ -63,7 +63,58 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
 
         manager_prep_s = time.perf_counter() - manager_start
 
+        def _merge_worker_timings(outputs: list[DataProto]) -> dict[str, float]:
+            merged: dict[str, float] = {}
+            weighted_values: dict[str, list[tuple[float, int]]] = {}
+            max_values: dict[str, list[float]] = {}
+            scalar_values: dict[str, list[tuple[float, int]]] = {}
+
+            for output in outputs:
+                meta_info = output.meta_info or {}
+                chunk_timing = meta_info.get("timing", None)
+                if not isinstance(chunk_timing, dict):
+                    continue
+                weight = max(len(output), 1)
+                for key, value in chunk_timing.items():
+                    if not isinstance(value, int | float | np.integer | np.floating):
+                        continue
+                    key_str = str(key)
+                    if not (
+                        key_str.startswith("agent_loop/worker/")
+                        or key_str.startswith("agent_loop/server_")
+                        or key_str.startswith("agent_loop/server/")
+                    ):
+                        continue
+                    value_f = float(value)
+                    if key_str.endswith("/mean"):
+                        weighted_values.setdefault(key_str, []).append((value_f, weight))
+                    elif key_str.endswith("/max"):
+                        max_values.setdefault(key_str, []).append(value_f)
+                    else:
+                        scalar_values.setdefault(key_str, []).append((value_f, weight))
+
+            for key, pairs in weighted_values.items():
+                total_weight = float(sum(weight for _, weight in pairs))
+                if total_weight > 0:
+                    merged[key] = float(sum(value * weight for value, weight in pairs) / total_weight)
+            for key, values in max_values.items():
+                if values:
+                    merged[key] = float(max(values))
+            for key, pairs in scalar_values.items():
+                total_weight = float(sum(weight for _, weight in pairs))
+                if total_weight <= 0:
+                    continue
+                mean_key = f"{key}/mean"
+                max_key = f"{key}/max"
+                merged[mean_key] = float(sum(value * weight for value, weight in pairs) / total_weight)
+                merged[max_key] = float(max(value for value, _ in pairs))
+
+            return merged
+
         async def _run_chunk(worker, chunk):
+            if chunk.meta_info is None:
+                chunk.meta_info = {}
+            chunk.meta_info["__agent_loop_dispatch_ts__"] = time.perf_counter()
             rpc_start = time.perf_counter()
             output = await asyncio.to_thread(ray.get, worker.generate_sequences.remote(chunk))
             return output, time.perf_counter() - rpc_start
@@ -85,6 +136,7 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
         manager_metrics_reduce_s = time.perf_counter() - metrics_start
+        timing.update(_merge_worker_timings(outputs))
 
         worker_rpc_times_np = np.array(worker_rpc_times, dtype=np.float64)
         manager_total_s = time.perf_counter() - manager_start
@@ -100,7 +152,7 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
             0.0,
         )
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        output.meta_info = {**outputs[0].meta_info, "timing": timing}
         return output
 
     async def wake_up(self):

@@ -233,6 +233,16 @@ class ToolAgentLoop(AgentLoopBase):
                 image_data=agent_data.image_data,
                 video_data=agent_data.video_data,
             )
+        for src_key, dst_key in (
+            ("server_rpc_roundtrip", "server_rpc_roundtrip"),
+            ("server_total", "server_total"),
+            ("server_rpc_overhead", "server_rpc_overhead"),
+            ("server_first_token", "server_first_token"),
+            ("server_decode_tail", "server_decode_tail"),
+        ):
+            value = output.timing.get(src_key, None)
+            if isinstance(value, int | float):
+                agent_data.metrics[dst_key] = float(value)
         # first time to set num_preempted
         if agent_data.metrics.get("num_preempted") is None:
             agent_data.metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1

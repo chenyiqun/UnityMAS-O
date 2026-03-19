@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from omegaconf import DictConfig
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from ray.actor import ActorHandle
 
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup, ResourcePoolManager
@@ -41,6 +41,8 @@ class TokenOutput(BaseModel):
     """stop reason: 'completed', 'aborted', or None for unknown"""
     num_preempted: Optional[int] = None
     """number of preempted times for metric calculation"""
+    timing: dict[str, float] = Field(default_factory=dict)
+    """best-effort timing breakdown attached by the rollout server"""
 
 
 class RolloutMode(Enum):

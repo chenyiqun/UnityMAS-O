@@ -17,6 +17,7 @@ import dataclasses
 import json
 import logging
 import os
+import time
 from typing import Any, Optional
 
 import ray
@@ -403,6 +404,7 @@ class SGLangHttpServer:
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        server_start = time.perf_counter()
         # TODO(@wuxibin): switch to `/generate` http endpoint once multi-modal support ready.
         max_possible_tokens = self.config.max_model_len - len(prompt_ids)
 
@@ -445,6 +447,7 @@ class SGLangHttpServer:
         generate_request = GenerateReqInput(**request)
 
         output = await self.tokenizer_manager.generate_request(generate_request, None).__anext__()
+        server_total_s = time.perf_counter() - server_start
         if return_logprob:
             output_token_logprobs = output["meta_info"]["output_token_logprobs"]
             log_probs, token_ids = zip(
@@ -472,7 +475,16 @@ class SGLangHttpServer:
                     -1, hf_config.num_hidden_layers, hf_config.num_experts_per_tok
                 )
 
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs, routed_experts=routed_experts)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            routed_experts=routed_experts,
+            timing={
+                "server_total": server_total_s,
+                "server_first_token": server_total_s,
+                "server_decode_tail": 0.0,
+            },
+        )
 
     async def start_profile(self, **kwargs):
         if (

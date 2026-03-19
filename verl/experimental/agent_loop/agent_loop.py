@@ -16,6 +16,7 @@ import heapq
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -111,6 +112,7 @@ class AsyncLLMServerManager:
             TokenOutput: token output
         """
         server = self._choose_server(request_id)
+        rpc_start = time.perf_counter()
         output = await server.generate.remote(
             request_id=uuid4().hex,  # use new request_id for each turn
             prompt_ids=prompt_ids,
@@ -118,6 +120,13 @@ class AsyncLLMServerManager:
             image_data=image_data,
             video_data=video_data,
         )
+        rpc_roundtrip_s = time.perf_counter() - rpc_start
+        timing = dict(getattr(output, "timing", {}) or {})
+        timing["server_rpc_roundtrip"] = rpc_roundtrip_s
+        server_total_s = timing.get("server_total", None)
+        if isinstance(server_total_s, int | float | np.integer | np.floating):
+            timing["server_rpc_overhead"] = max(rpc_roundtrip_s - float(server_total_s), 0.0)
+        output.timing = timing
         return output
 
 
@@ -127,6 +136,11 @@ class AgentLoopMetrics(BaseModel):
     generate_sequences: float = 0.0
     tool_calls: float = 0.0
     num_preempted: int = -1  # -1 means not available
+    server_rpc_roundtrip: float = 0.0
+    server_total: float = 0.0
+    server_rpc_overhead: float = 0.0
+    server_first_token: float = 0.0
+    server_decode_tail: float = 0.0
 
 
 class AgentLoopOutput(BaseModel):
@@ -413,6 +427,13 @@ class AgentLoopWorker:
             responses:     |<- LLM generation ->|<- tool_calls ->|<- LLM generation ->|<- padding ->|
             response_mask: | 1, 1, 1, ..., 1, 1 | 0, 0, .., 0, 0 | 1, 1, 1, ..., 1, 1 | 0, 0, ..., 0|
         """
+        worker_start = time.perf_counter()
+        worker_timing: dict[str, float] = {}
+        if isinstance(batch.meta_info, dict):
+            dispatch_ts = batch.meta_info.pop("__agent_loop_dispatch_ts__", None)
+            if isinstance(dispatch_ts, int | float | np.integer | np.floating):
+                worker_timing["agent_loop/worker/start_lag"] = max(worker_start - float(dispatch_ts), 0.0)
+
         config = self.config.actor_rollout_ref.rollout
         sampling_params = dict(
             temperature=config.temperature,
@@ -467,9 +488,41 @@ class AgentLoopWorker:
                     self._run_agent_loop(sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)
                 )
             )
+        worker_timing["agent_loop/worker/prep"] = time.perf_counter() - worker_start
+        run_loops_start = time.perf_counter()
         outputs = await asyncio.gather(*tasks)
+        worker_timing["agent_loop/worker/run_loops"] = time.perf_counter() - run_loops_start
 
+        postprocess_start = time.perf_counter()
         output = self._postprocess(outputs)
+        worker_timing["agent_loop/worker/postprocess"] = time.perf_counter() - postprocess_start
+        worker_total_s = time.perf_counter() - worker_start
+        worker_timing["agent_loop/worker/total"] = worker_total_s
+        worker_timing["agent_loop/worker/non_loop_overhead"] = max(
+            worker_total_s - float(worker_timing["agent_loop/worker/run_loops"]),
+            0.0,
+        )
+
+        metrics = output.meta_info.get("metrics", [])
+        for metric_key, timing_prefix in (
+            ("server_rpc_roundtrip", "agent_loop/server_rpc_roundtrip"),
+            ("server_total", "agent_loop/server_total"),
+            ("server_rpc_overhead", "agent_loop/server_rpc_overhead"),
+            ("server_first_token", "agent_loop/server_first_token"),
+            ("server_decode_tail", "agent_loop/server_decode_tail"),
+        ):
+            values = [
+                float(metric[metric_key])
+                for metric in metrics
+                if isinstance(metric, dict)
+                and isinstance(metric.get(metric_key, None), int | float | np.integer | np.floating)
+            ]
+            if values:
+                values_np = np.array(values, dtype=np.float64)
+                worker_timing[f"{timing_prefix}/mean"] = float(values_np.mean())
+                worker_timing[f"{timing_prefix}/max"] = float(values_np.max())
+
+        output.meta_info["timing"] = worker_timing
 
         return output
 
@@ -949,7 +1002,7 @@ class AgentLoopManager:
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
 
-        output.meta_info = {"timing": timing, **outputs[0].meta_info}
+        output.meta_info = {**outputs[0].meta_info, "timing": timing}
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
@@ -976,6 +1029,26 @@ class AgentLoopManager:
         timing["agent_loop/slowest/prompt_length"] = attention_mask[:prompt_length].sum().item()
         timing["agent_loop/slowest/response_length"] = attention_mask[prompt_length:].sum().item()
         timing["agent_loop/slowest/num_preempted"] = num_preempted[slowest]
+
+        def _record_metric(metric_key: str, timing_prefix: str):
+            values = [
+                float(metric[metric_key])
+                for chunk in metrics
+                for metric in chunk
+                if isinstance(metric.get(metric_key, None), int | float | np.integer | np.floating)
+            ]
+            if not values:
+                return
+            values_np = np.array(values, dtype=np.float64)
+            timing[f"{timing_prefix}/min"] = values_np.min()
+            timing[f"{timing_prefix}/max"] = values_np.max()
+            timing[f"{timing_prefix}/mean"] = values_np.mean()
+
+        _record_metric("server_rpc_roundtrip", "agent_loop/server_rpc_roundtrip")
+        _record_metric("server_total", "agent_loop/server_total")
+        _record_metric("server_rpc_overhead", "agent_loop/server_rpc_overhead")
+        _record_metric("server_first_token", "agent_loop/server_first_token")
+        _record_metric("server_decode_tail", "agent_loop/server_decode_tail")
 
         return timing
 

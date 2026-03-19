@@ -14,6 +14,7 @@
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Optional
 
 import ray
@@ -180,6 +181,7 @@ class TRTLLMHttpServer:
         video_data: Optional[list[Any]] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out."""
+        server_start = time.perf_counter()
         assert image_data is None and video_data is None, "Multimodality is not yet supported in TRTLLMHttpServer."
 
         from tensorrt_llm.llmapi import SamplingParams
@@ -196,12 +198,21 @@ class TRTLLMHttpServer:
             inputs=prompt_ids,
             sampling_params=trt_llm_sampling_params,
         )
+        server_total_s = time.perf_counter() - server_start
 
         token_ids = outputs.outputs[0].token_ids
         log_probs = None
         if trt_llm_sampling_params.logprobs is not None:
             log_probs = [list(d.values())[0].logprob for d in outputs.outputs[0].logprobs]
-        return TokenOutput(token_ids=token_ids, log_probs=log_probs)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=log_probs,
+            timing={
+                "server_total": server_total_s,
+                "server_first_token": server_total_s,
+                "server_decode_tail": 0.0,
+            },
+        )
 
     async def wake_up(self):
         if self.rollout_mode == RolloutMode.HYBRID:

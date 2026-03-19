@@ -63,6 +63,16 @@ class SingleTurnAgentLoop(AgentLoopBase):
                 image_data=images,
                 video_data=videos,
             )
+        for src_key, dst_key in (
+            ("server_rpc_roundtrip", "server_rpc_roundtrip"),
+            ("server_total", "server_total"),
+            ("server_rpc_overhead", "server_rpc_overhead"),
+            ("server_first_token", "server_first_token"),
+            ("server_decode_tail", "server_decode_tail"),
+        ):
+            value = output.timing.get(src_key, None)
+            if isinstance(value, int | float):
+                metrics[dst_key] = float(value)
         if metrics.get("num_preempted") is None:
             metrics["num_preempted"] = output.num_preempted if output.num_preempted is not None else -1
         response_mask = [1] * len(output.token_ids)
