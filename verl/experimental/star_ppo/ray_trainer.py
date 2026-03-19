@@ -466,14 +466,15 @@ class StarRayTrainer:
 
     @staticmethod
     def _extract_worker_rollout_timing(batch: DataProto) -> dict[str, float]:
-        meta_info = batch.meta_info or {}
-        raw_timing = meta_info.get("star_rollout_timing", None)
-        if not isinstance(raw_timing, dict):
-            return {}
         timing: dict[str, float] = {}
-        for key, value in raw_timing.items():
-            if isinstance(value, int | float | np.integer | np.floating):
-                timing[str(key)] = float(value)
+        for key, value in batch.non_tensor_batch.items():
+            if not str(key).startswith("__star_timing_"):
+                continue
+            if not isinstance(value, np.ndarray) or value.size == 0:
+                continue
+            flat = value.reshape(-1)
+            if np.issubdtype(flat.dtype, np.number):
+                timing[str(key).replace("__star_timing_", "", 1)] = float(np.mean(flat.astype(np.float64)))
         return timing
 
     async def _rollout_model_async(
@@ -1158,6 +1159,8 @@ class StarRayTrainer:
                 continue
             group_name = key[len(group_prefix) : -len(group_suffix)]
             if not group_name:
+                continue
+            if f"{group_prefix}{group_name}_count" not in metrics:
                 continue
             group_pairs.append((group_name, float(value)))
         group_pairs.sort(key=lambda x: x[1], reverse=True)

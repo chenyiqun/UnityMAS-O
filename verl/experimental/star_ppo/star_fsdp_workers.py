@@ -255,26 +255,33 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             if metric_acc.get("tool_calls"):
                 timing["agent_loop_tool_calls_s"] = float(np.mean(metric_acc["tool_calls"]))
 
-        inherited = meta_info.get("star_rollout_timing", None)
-        if isinstance(inherited, dict):
-            for key, value in inherited.items():
-                if isinstance(value, int | float | np.integer | np.floating):
-                    timing[str(key)] = float(value)
+        for key, value in full_batch.non_tensor_batch.items():
+            if not str(key).startswith("__star_timing_"):
+                continue
+            if not isinstance(value, np.ndarray) or value.size == 0:
+                continue
+            flat = value.reshape(-1)
+            if np.issubdtype(flat.dtype, np.number):
+                timing[str(key).replace("__star_timing_", "", 1)] = float(np.mean(flat.astype(np.float64)))
 
         return timing
 
     def _attach_rollout_timing(self, batch: DataProto, timing: dict[str, Any]) -> None:
-        batch.meta_info = dict(batch.meta_info or {})
-        prior = batch.meta_info.get("star_rollout_timing", {})
         merged: dict[str, float] = {}
-        if isinstance(prior, dict):
-            for key, value in prior.items():
-                if isinstance(value, int | float | np.integer | np.floating):
-                    merged[str(key)] = float(value)
+        for key, value in batch.non_tensor_batch.items():
+            if not str(key).startswith("__star_timing_"):
+                continue
+            if not isinstance(value, np.ndarray) or value.size == 0:
+                continue
+            flat = value.reshape(-1)
+            if np.issubdtype(flat.dtype, np.number):
+                merged[str(key).replace("__star_timing_", "", 1)] = float(np.mean(flat.astype(np.float64)))
         for key, value in timing.items():
             if isinstance(value, int | float | np.integer | np.floating):
                 merged[str(key)] = float(value)
-        batch.meta_info["star_rollout_timing"] = merged
+        bsz = len(batch)
+        for key, value in merged.items():
+            batch.non_tensor_batch[f"__star_timing_{key}"] = np.full((bsz,), float(value), dtype=np.float64)
 
     def _build_thin_from_batch(self, full_batch: DataProto) -> DataProto:
         build_start = time.perf_counter()
