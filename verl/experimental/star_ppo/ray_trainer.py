@@ -464,6 +464,18 @@ class StarRayTrainer:
         # Skeleton version: keep all fields for easy routing/reward alignment.
         return batch
 
+    @staticmethod
+    def _extract_worker_rollout_timing(batch: DataProto) -> dict[str, float]:
+        meta_info = batch.meta_info or {}
+        raw_timing = meta_info.get("star_rollout_timing", None)
+        if not isinstance(raw_timing, dict):
+            return {}
+        timing: dict[str, float] = {}
+        for key, value in raw_timing.items():
+            if isinstance(value, int | float | np.integer | np.floating):
+                timing[str(key)] = float(value)
+        return timing
+
     async def _rollout_model_async(
         self,
         model_id: str,
@@ -479,7 +491,9 @@ class StarRayTrainer:
             timing_state["queue_wait_s"] = 0.0
             timing_state["rollout_exec_s"] = 0.0
             timing_state["rollout_total_s"] = 0.0
+            timing_state["rpc_roundtrip_s"] = 0.0
             timing_state["queue_acquired"] = False
+        worker_timing: dict[str, float] = {}
         async with self._rollout_semaphore_by_model[model_id]:
             exec_start = time.perf_counter()
             queue_wait_s = float(exec_start - request_start)
@@ -510,6 +524,7 @@ class StarRayTrainer:
                             thin = thin_padded.select_idxs(list(range(bsz)))
                     else:
                         thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
+                    worker_timing = self._extract_worker_rollout_timing(thin)
                 else:
                     fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
                     # Avoid DataProto.union() conflicts on object-typed non-tensor fields
@@ -542,17 +557,32 @@ class StarRayTrainer:
                             thin = thin_padded.select_idxs(list(range(bsz)))
                     else:
                         thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
+                    worker_timing = self._extract_worker_rollout_timing(thin)
             finally:
                 exec_elapsed_s = float(time.perf_counter() - exec_start)
                 total_elapsed_s = float(time.perf_counter() - request_start)
                 if timing_state is not None:
                     timing_state["rollout_exec_s"] = exec_elapsed_s
                     timing_state["rollout_total_s"] = total_elapsed_s
-        return model_id, thin, batch, {
+                    timing_state["rpc_roundtrip_s"] = exec_elapsed_s
+                    for key, value in worker_timing.items():
+                        timing_state[key] = float(value)
+                    worker_total_s = worker_timing.get("worker_total_s", None)
+                    if isinstance(worker_total_s, int | float | np.integer | np.floating):
+                        timing_state["rpc_overhead_s"] = float(max(exec_elapsed_s - float(worker_total_s), 0.0))
+        timing_info = {
             "queue_wait_s": float(timing_state["queue_wait_s"]) if timing_state is not None else queue_wait_s,
             "rollout_exec_s": float(timing_state["rollout_exec_s"]) if timing_state is not None else exec_elapsed_s,
             "rollout_total_s": float(timing_state["rollout_total_s"]) if timing_state is not None else total_elapsed_s,
+            "rpc_roundtrip_s": float(timing_state["rpc_roundtrip_s"]) if timing_state is not None else exec_elapsed_s,
         }
+        if timing_state is not None:
+            for key, value in timing_state.items():
+                if key in timing_info or key == "queue_acquired":
+                    continue
+                if isinstance(value, int | float | np.integer | np.floating):
+                    timing_info[key] = float(value)
+        return model_id, thin, batch, timing_info
 
     @staticmethod
     def _extract_first_json_object(text: str) -> Optional[dict]:
@@ -1114,6 +1144,8 @@ class StarRayTrainer:
         llm_mean = self._pick_metric(metrics, "workflow/timing/llm_node_s_mean")
         llm_queue_mean = self._pick_metric(metrics, "workflow/timing/llm_queue_wait_s_mean")
         llm_exec_mean = self._pick_metric(metrics, "workflow/timing/llm_rollout_exec_s_mean")
+        llm_rpc_overhead_mean = self._pick_metric(metrics, "workflow/timing/llm_rpc_overhead_s_mean")
+        llm_engine_mean = self._pick_metric(metrics, "workflow/timing/llm_engine_generate_s_mean")
         tool_mean = self._pick_metric(metrics, "workflow/timing/tool_node_s_mean")
         node_calls = int(self._pick_metric(metrics, "workflow/timing/node_invocations"))
         group_pairs: list[tuple[str, float]] = []
@@ -1145,7 +1177,8 @@ class StarRayTrainer:
             f"stage={stage} batch={batch_idx} size={batch_size} "
             f"workflow={workflow_total:.3f}s query_mean={query_mean:.3f}s "
             f"llm_mean={llm_mean:.3f}s llm_queue_mean={llm_queue_mean:.3f}s "
-            f"llm_exec_mean={llm_exec_mean:.3f}s tool_mean={tool_mean:.3f}s "
+            f"llm_exec_mean={llm_exec_mean:.3f}s llm_rpc_ovh_mean={llm_rpc_overhead_mean:.3f}s "
+            f"llm_engine_mean={llm_engine_mean:.3f}s tool_mean={tool_mean:.3f}s "
             f"node_calls={node_calls}{group_text}{extra_text}"
         )
 

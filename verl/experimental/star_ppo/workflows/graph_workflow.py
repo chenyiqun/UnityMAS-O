@@ -680,6 +680,11 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "queue_wait_s": float(rollout_timing.get("queue_wait_s", 0.0)),
                 "rollout_exec_s": float(rollout_timing.get("rollout_exec_s", 0.0)),
                 "rollout_total_s": float(rollout_timing.get("rollout_total_s", 0.0)),
+                "timing_metrics": {
+                    str(key): float(value)
+                    for key, value in rollout_timing.items()
+                    if isinstance(value, int | float | np.integer | np.floating)
+                },
                 "timing_group": timing_group,
                 "duration_s": float(time.perf_counter() - node_start),
             }
@@ -836,6 +841,11 @@ class GraphWorkflowRunner(WorkflowRunner):
                             "queue_wait_s": float(result.get("queue_wait_s", 0.0)),
                             "rollout_exec_s": float(result.get("rollout_exec_s", 0.0)),
                             "rollout_total_s": float(result.get("rollout_total_s", 0.0)),
+                            **{
+                                str(key): float(value)
+                                for key, value in dict(result.get("timing_metrics", {})).items()
+                                if isinstance(value, int | float | np.integer | np.floating)
+                            },
                         }
                     )
                     if node_id in self.end_nodes:
@@ -961,15 +971,25 @@ class GraphWorkflowRunner(WorkflowRunner):
         node_timing_by_type = defaultdict(list)
         node_timing_by_group = defaultdict(list)
         node_timing_all: list[float] = []
-        llm_queue_wait_all: list[float] = []
-        llm_rollout_exec_all: list[float] = []
-        llm_rollout_total_all: list[float] = []
-        llm_queue_wait_by_id = defaultdict(list)
-        llm_rollout_exec_by_id = defaultdict(list)
-        llm_rollout_total_by_id = defaultdict(list)
-        llm_queue_wait_by_group = defaultdict(list)
-        llm_rollout_exec_by_group = defaultdict(list)
-        llm_rollout_total_by_group = defaultdict(list)
+        llm_timing_fields = (
+            "queue_wait_s",
+            "rollout_exec_s",
+            "rollout_total_s",
+            "rpc_roundtrip_s",
+            "rpc_overhead_s",
+            "worker_total_s",
+            "worker_generate_call_s",
+            "worker_generate_overhead_s",
+            "worker_thin_build_s",
+            "worker_decode_action_text_s",
+            "worker_buffer_put_s",
+            "worker_build_overhead_s",
+            "engine_generate_s",
+            "agent_loop_tool_calls_s",
+        )
+        llm_timing_all = {field: [] for field in llm_timing_fields}
+        llm_timing_by_id = {field: defaultdict(list) for field in llm_timing_fields}
+        llm_timing_by_group = {field: defaultdict(list) for field in llm_timing_fields}
         for item in query_results:
             reward_parts.extend(item["reward_parts"])
             outcome_rewards.append(item["outcome_reward"])
@@ -1002,20 +1022,16 @@ class GraphWorkflowRunner(WorkflowRunner):
                     node_timing_by_group[timing_group].append(duration_s)
                 node_timing_by_type[node_type].append(duration_s)
                 if node_type == "llm":
-                    queue_wait_s = float(timing_rec.get("queue_wait_s", 0.0))
-                    rollout_exec_s = float(timing_rec.get("rollout_exec_s", 0.0))
-                    rollout_total_s = float(timing_rec.get("rollout_total_s", 0.0))
-                    llm_queue_wait_all.append(queue_wait_s)
-                    llm_rollout_exec_all.append(rollout_exec_s)
-                    llm_rollout_total_all.append(rollout_total_s)
-                    if node_id:
-                        llm_queue_wait_by_id[node_id].append(queue_wait_s)
-                        llm_rollout_exec_by_id[node_id].append(rollout_exec_s)
-                        llm_rollout_total_by_id[node_id].append(rollout_total_s)
-                    if timing_group:
-                        llm_queue_wait_by_group[timing_group].append(queue_wait_s)
-                        llm_rollout_exec_by_group[timing_group].append(rollout_exec_s)
-                        llm_rollout_total_by_group[timing_group].append(rollout_total_s)
+                    for field in llm_timing_fields:
+                        raw_value = timing_rec.get(field, None)
+                        if not isinstance(raw_value, int | float | np.integer | np.floating):
+                            continue
+                        value = float(raw_value)
+                        llm_timing_all[field].append(value)
+                        if node_id:
+                            llm_timing_by_id[field][node_id].append(value)
+                        if timing_group:
+                            llm_timing_by_group[field][timing_group].append(value)
 
         if len(reward_parts) == 0:
             rewards = self.trainer._empty_rewards()
@@ -1058,48 +1074,29 @@ class GraphWorkflowRunner(WorkflowRunner):
             metrics["workflow/timing/node_invocations"] = float(len(node_timing_all))
         if node_timing_by_type.get("llm"):
             metrics["workflow/timing/llm_node_s_mean"] = float(np.mean(node_timing_by_type["llm"]))
-        if llm_queue_wait_all:
-            metrics["workflow/timing/llm_queue_wait_s_mean"] = float(np.mean(llm_queue_wait_all))
-            metrics["workflow/timing/llm_queue_wait_s_max"] = float(np.max(llm_queue_wait_all))
-        if llm_rollout_exec_all:
-            metrics["workflow/timing/llm_rollout_exec_s_mean"] = float(np.mean(llm_rollout_exec_all))
-            metrics["workflow/timing/llm_rollout_exec_s_max"] = float(np.max(llm_rollout_exec_all))
-        if llm_rollout_total_all:
-            metrics["workflow/timing/llm_rollout_total_s_mean"] = float(np.mean(llm_rollout_total_all))
-            metrics["workflow/timing/llm_rollout_total_s_max"] = float(np.max(llm_rollout_total_all))
+        for field, values in llm_timing_all.items():
+            if values:
+                metrics[f"workflow/timing/llm_{field}_mean"] = float(np.mean(values))
+                metrics[f"workflow/timing/llm_{field}_max"] = float(np.max(values))
         if node_timing_by_type.get("tool"):
             metrics["workflow/timing/tool_node_s_mean"] = float(np.mean(node_timing_by_type["tool"]))
         for node_id, values in node_timing_by_id.items():
             if values:
                 metrics[f"workflow/timing/node/{node_id}_s_mean"] = float(np.mean(values))
-        for node_id, values in llm_queue_wait_by_id.items():
-            if values:
-                metrics[f"workflow/timing/node/{node_id}_queue_wait_s_mean"] = float(np.mean(values))
-                metrics[f"workflow/timing/node/{node_id}_queue_wait_s_max"] = float(np.max(values))
-        for node_id, values in llm_rollout_exec_by_id.items():
-            if values:
-                metrics[f"workflow/timing/node/{node_id}_rollout_exec_s_mean"] = float(np.mean(values))
-                metrics[f"workflow/timing/node/{node_id}_rollout_exec_s_max"] = float(np.max(values))
-        for node_id, values in llm_rollout_total_by_id.items():
-            if values:
-                metrics[f"workflow/timing/node/{node_id}_rollout_total_s_mean"] = float(np.mean(values))
-                metrics[f"workflow/timing/node/{node_id}_rollout_total_s_max"] = float(np.max(values))
+        for field, per_node in llm_timing_by_id.items():
+            for node_id, values in per_node.items():
+                if values:
+                    metrics[f"workflow/timing/node/{node_id}_{field}_mean"] = float(np.mean(values))
+                    metrics[f"workflow/timing/node/{node_id}_{field}_max"] = float(np.max(values))
         for group, values in node_timing_by_group.items():
             if values:
                 metrics[f"workflow/timing/group/{group}_s_mean"] = float(np.mean(values))
                 metrics[f"workflow/timing/group/{group}_s_max"] = float(np.max(values))
                 metrics[f"workflow/timing/group/{group}_count"] = float(len(values))
-        for group, values in llm_queue_wait_by_group.items():
-            if values:
-                metrics[f"workflow/timing/group/{group}_queue_wait_s_mean"] = float(np.mean(values))
-                metrics[f"workflow/timing/group/{group}_queue_wait_s_max"] = float(np.max(values))
-        for group, values in llm_rollout_exec_by_group.items():
-            if values:
-                metrics[f"workflow/timing/group/{group}_rollout_exec_s_mean"] = float(np.mean(values))
-                metrics[f"workflow/timing/group/{group}_rollout_exec_s_max"] = float(np.max(values))
-        for group, values in llm_rollout_total_by_group.items():
-            if values:
-                metrics[f"workflow/timing/group/{group}_rollout_total_s_mean"] = float(np.mean(values))
-                metrics[f"workflow/timing/group/{group}_rollout_total_s_max"] = float(np.max(values))
+        for field, per_group in llm_timing_by_group.items():
+            for group, values in per_group.items():
+                if values:
+                    metrics[f"workflow/timing/group/{group}_{field}_mean"] = float(np.mean(values))
+                    metrics[f"workflow/timing/group/{group}_{field}_max"] = float(np.max(values))
         metrics["workflow/timing/batch_total_s"] = float(time.perf_counter() - batch_start)
         return rewards, metrics

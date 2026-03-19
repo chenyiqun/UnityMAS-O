@@ -2,6 +2,7 @@ import os
 import threading
 import time
 import uuid
+from typing import Any
 
 import numpy as np
 import torch
@@ -229,7 +230,54 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         except Exception:
             return ""
 
+    def _extract_inner_rollout_timing(self, full_batch: DataProto) -> dict[str, float]:
+        timing: dict[str, float] = {}
+        meta_info = full_batch.meta_info or {}
+
+        inner_timing = meta_info.get("timing", None)
+        if isinstance(inner_timing, dict):
+            generate_s = inner_timing.get("generate_sequences", None)
+            if isinstance(generate_s, int | float | np.integer | np.floating):
+                timing["engine_generate_s"] = float(generate_s)
+
+        metric_list = meta_info.get("metrics", None)
+        if isinstance(metric_list, list):
+            metric_acc: dict[str, list[float]] = {}
+            for item in metric_list:
+                if not isinstance(item, dict):
+                    continue
+                for key, value in item.items():
+                    if not isinstance(value, int | float | np.integer | np.floating):
+                        continue
+                    metric_acc.setdefault(str(key), []).append(float(value))
+            if metric_acc.get("generate_sequences") and "engine_generate_s" not in timing:
+                timing["engine_generate_s"] = float(np.mean(metric_acc["generate_sequences"]))
+            if metric_acc.get("tool_calls"):
+                timing["agent_loop_tool_calls_s"] = float(np.mean(metric_acc["tool_calls"]))
+
+        inherited = meta_info.get("star_rollout_timing", None)
+        if isinstance(inherited, dict):
+            for key, value in inherited.items():
+                if isinstance(value, int | float | np.integer | np.floating):
+                    timing[str(key)] = float(value)
+
+        return timing
+
+    def _attach_rollout_timing(self, batch: DataProto, timing: dict[str, Any]) -> None:
+        batch.meta_info = dict(batch.meta_info or {})
+        prior = batch.meta_info.get("star_rollout_timing", {})
+        merged: dict[str, float] = {}
+        if isinstance(prior, dict):
+            for key, value in prior.items():
+                if isinstance(value, int | float | np.integer | np.floating):
+                    merged[str(key)] = float(value)
+        for key, value in timing.items():
+            if isinstance(value, int | float | np.integer | np.floating):
+                merged[str(key)] = float(value)
+        batch.meta_info["star_rollout_timing"] = merged
+
     def _build_thin_from_batch(self, full_batch: DataProto) -> DataProto:
+        build_start = time.perf_counter()
         bsz = len(full_batch)
         query_ids = full_batch.non_tensor_batch.get("query_id", np.array(["unknown"] * bsz, dtype=object))
         agent_ids = full_batch.non_tensor_batch.get("agent_id", np.array(["agent_0"] * bsz, dtype=object))
@@ -249,6 +297,8 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
 
         responses = full_batch.batch.get("responses", None)
         now = time.time()
+        decode_action_text_s = 0.0
+        buffer_put_s = 0.0
         for i in range(bsz):
             traj_id = uuid.uuid4().hex if bool(keep_mask[i]) else ""
             traj_ids[i] = traj_id
@@ -256,10 +306,13 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             created_ts[i] = now
 
             response_tokens = responses[i] if responses is not None else None
+            decode_start = time.perf_counter()
             action_text[i] = self._decode_action_text(response_tokens)
+            decode_action_text_s += float(time.perf_counter() - decode_start)
 
             if bool(keep_mask[i]):
                 fat_item = full_batch[i : i + 1]
+                put_start = time.perf_counter()
                 self._traj_buffer.put(
                     TrajectoryEntry(
                         traj_id=traj_id,
@@ -269,8 +322,9 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                         fat_data=fat_item,
                     )
                 )
+                buffer_put_s += float(time.perf_counter() - put_start)
 
-        return DataProto.from_dict(
+        thin = DataProto.from_dict(
             non_tensors={
                 "traj_id": traj_ids,
                 "query_id": query_ids.astype(object),
@@ -281,20 +335,55 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             },
             meta_info={"thin_only": True},
         )
+        thin_build_s = float(time.perf_counter() - build_start)
+        inherited_timing = self._extract_inner_rollout_timing(full_batch)
+        inherited_timing.update(
+            {
+                "worker_thin_build_s": thin_build_s,
+                "worker_decode_action_text_s": float(decode_action_text_s),
+                "worker_buffer_put_s": float(buffer_put_s),
+                "worker_build_overhead_s": float(max(thin_build_s - decode_action_text_s - buffer_put_s, 0.0)),
+            }
+        )
+        self._attach_rollout_timing(thin, inherited_timing)
+        return thin
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     def generate_sequences_thin(self, prompts: DataProto) -> DataProto:
+        worker_start = time.perf_counter()
+        generate_start = time.perf_counter()
         fat_output = self.generate_sequences(prompts)
+        worker_generate_call_s = float(time.perf_counter() - generate_start)
         # Avoid DataProto.union() conflicts on object-typed fields (e.g. raw_prompt).
         full_batch = fat_output
         for key in ("query_id", "agent_id"):
             if key not in full_batch.non_tensor_batch and key in prompts.non_tensor_batch:
                 full_batch.non_tensor_batch[key] = prompts.non_tensor_batch[key]
-        return self._build_thin_from_batch(full_batch)
+        thin = self._build_thin_from_batch(full_batch)
+        timing = self._extract_inner_rollout_timing(full_batch)
+        timing.update(
+            {
+                "worker_generate_call_s": worker_generate_call_s,
+                "worker_total_s": float(time.perf_counter() - worker_start),
+            }
+        )
+        engine_generate_s = timing.get("engine_generate_s", None)
+        if isinstance(engine_generate_s, int | float | np.integer | np.floating):
+            timing["worker_generate_overhead_s"] = float(max(worker_generate_call_s - float(engine_generate_s), 0.0))
+        self._attach_rollout_timing(thin, timing)
+        return thin
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     def build_thin_from_generated(self, full_batch: DataProto) -> DataProto:
-        return self._build_thin_from_batch(full_batch)
+        worker_start = time.perf_counter()
+        thin = self._build_thin_from_batch(full_batch)
+        self._attach_rollout_timing(
+            thin,
+            {
+                "worker_total_s": float(time.perf_counter() - worker_start),
+            },
+        )
+        return thin
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def commit_rewards(self, rewards: DataProto) -> dict:
