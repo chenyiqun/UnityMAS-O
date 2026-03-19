@@ -464,68 +464,95 @@ class StarRayTrainer:
         # Skeleton version: keep all fields for easy routing/reward alignment.
         return batch
 
-    async def _rollout_model_async(self, model_id: str, batch: DataProto):
+    async def _rollout_model_async(
+        self,
+        model_id: str,
+        batch: DataProto,
+        timing_state: Optional[dict[str, Any]] = None,
+    ):
         ctx = self.model_contexts[model_id]
         if model_id not in self._rollout_semaphore_by_model:
             self._rollout_semaphore_by_model[model_id] = asyncio.Semaphore(max(1, self._max_parallel_rollouts_per_model))
         gen_batch = self._get_gen_batch(batch)
+        request_start = time.perf_counter()
+        if timing_state is not None:
+            timing_state["queue_wait_s"] = 0.0
+            timing_state["rollout_exec_s"] = 0.0
+            timing_state["rollout_total_s"] = 0.0
+            timing_state["queue_acquired"] = False
         async with self._rollout_semaphore_by_model[model_id]:
+            exec_start = time.perf_counter()
+            queue_wait_s = float(exec_start - request_start)
+            if timing_state is not None:
+                timing_state["queue_wait_s"] = queue_wait_s
+                timing_state["queue_acquired"] = True
             rollout_dp_size = self._get_dp_size(ctx.rollout_wg, "rollout")
-            if ctx.rollout_manager is None:
-                bsz = len(gen_batch)
-                if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
-                    pad = rollout_dp_size - (bsz % rollout_dp_size)
-                    padded_indices = list(range(bsz)) + [bsz - 1] * pad
-                    padded_batch = gen_batch.select_idxs(padded_indices)
-                    keep_mask = np.zeros((len(padded_indices),), dtype=bool)
-                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
-                        pick = int(self._thin_pick_cursor_by_model[model_id] % rollout_dp_size)
-                        self._thin_pick_cursor_by_model[model_id] += 1
-                        keep_mask[pick] = True
+            try:
+                if ctx.rollout_manager is None:
+                    bsz = len(gen_batch)
+                    if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
+                        pad = rollout_dp_size - (bsz % rollout_dp_size)
+                        padded_indices = list(range(bsz)) + [bsz - 1] * pad
+                        padded_batch = gen_batch.select_idxs(padded_indices)
+                        keep_mask = np.zeros((len(padded_indices),), dtype=bool)
+                        if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                            pick = int(self._thin_pick_cursor_by_model[model_id] % rollout_dp_size)
+                            self._thin_pick_cursor_by_model[model_id] += 1
+                            keep_mask[pick] = True
+                        else:
+                            keep_mask[:bsz] = True
+                        padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
+                        thin_padded = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, padded_batch)
+                        if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                            pick_idx = int(np.argmax(keep_mask))
+                            thin = thin_padded.select_idxs([pick_idx])
+                        else:
+                            thin = thin_padded.select_idxs(list(range(bsz)))
                     else:
-                        keep_mask[:bsz] = True
-                    padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
-                    thin_padded = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, padded_batch)
-                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
-                        pick_idx = int(np.argmax(keep_mask))
-                        thin = thin_padded.select_idxs([pick_idx])
-                    else:
-                        thin = thin_padded.select_idxs(list(range(bsz)))
+                        thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
                 else:
-                    thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
-            else:
-                fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
-                # Avoid DataProto.union() conflicts on object-typed non-tensor fields
-                # (e.g. raw_prompt) that may be semantically equivalent but not deeply equal.
-                # The async agent-loop output already carries the required rollout tensors.
-                full_batch = fat
-                for key in ("query_id", "agent_id"):
-                    if key not in full_batch.non_tensor_batch and key in gen_batch.non_tensor_batch:
-                        full_batch.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
-                bsz = len(full_batch)
-                if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
-                    # ND dispatch requires equal chunks. For tiny validation/workflow batches,
-                    # pad by repeating the last sample, then trim back after conversion.
-                    pad = rollout_dp_size - (bsz % rollout_dp_size)
-                    padded_indices = list(range(bsz)) + [bsz - 1] * pad
-                    padded_batch = full_batch.select_idxs(padded_indices)
-                    keep_mask = np.zeros((len(padded_indices),), dtype=bool)
-                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
-                        pick = int(self._thin_pick_cursor_by_model[model_id] % rollout_dp_size)
-                        self._thin_pick_cursor_by_model[model_id] += 1
-                        keep_mask[pick] = True
+                    fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
+                    # Avoid DataProto.union() conflicts on object-typed non-tensor fields
+                    # (e.g. raw_prompt) that may be semantically equivalent but not deeply equal.
+                    # The async agent-loop output already carries the required rollout tensors.
+                    full_batch = fat
+                    for key in ("query_id", "agent_id"):
+                        if key not in full_batch.non_tensor_batch and key in gen_batch.non_tensor_batch:
+                            full_batch.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
+                    bsz = len(full_batch)
+                    if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
+                        # ND dispatch requires equal chunks. For tiny validation/workflow batches,
+                        # pad by repeating the last sample, then trim back after conversion.
+                        pad = rollout_dp_size - (bsz % rollout_dp_size)
+                        padded_indices = list(range(bsz)) + [bsz - 1] * pad
+                        padded_batch = full_batch.select_idxs(padded_indices)
+                        keep_mask = np.zeros((len(padded_indices),), dtype=bool)
+                        if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                            pick = int(self._thin_pick_cursor_by_model[model_id] % rollout_dp_size)
+                            self._thin_pick_cursor_by_model[model_id] += 1
+                            keep_mask[pick] = True
+                        else:
+                            keep_mask[:bsz] = True
+                        padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
+                        thin_padded = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, padded_batch)
+                        if bsz == 1 and len(padded_indices) >= rollout_dp_size:
+                            pick_idx = int(np.argmax(keep_mask))
+                            thin = thin_padded.select_idxs([pick_idx])
+                        else:
+                            thin = thin_padded.select_idxs(list(range(bsz)))
                     else:
-                        keep_mask[:bsz] = True
-                    padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
-                    thin_padded = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, padded_batch)
-                    if bsz == 1 and len(padded_indices) >= rollout_dp_size:
-                        pick_idx = int(np.argmax(keep_mask))
-                        thin = thin_padded.select_idxs([pick_idx])
-                    else:
-                        thin = thin_padded.select_idxs(list(range(bsz)))
-                else:
-                    thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
-        return model_id, thin, batch
+                        thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
+            finally:
+                exec_elapsed_s = float(time.perf_counter() - exec_start)
+                total_elapsed_s = float(time.perf_counter() - request_start)
+                if timing_state is not None:
+                    timing_state["rollout_exec_s"] = exec_elapsed_s
+                    timing_state["rollout_total_s"] = total_elapsed_s
+        return model_id, thin, batch, {
+            "queue_wait_s": float(timing_state["queue_wait_s"]) if timing_state is not None else queue_wait_s,
+            "rollout_exec_s": float(timing_state["rollout_exec_s"]) if timing_state is not None else exec_elapsed_s,
+            "rollout_total_s": float(timing_state["rollout_total_s"]) if timing_state is not None else total_elapsed_s,
+        }
 
     @staticmethod
     def _extract_first_json_object(text: str) -> Optional[dict]:
@@ -652,7 +679,7 @@ class StarRayTrainer:
         rollout_results = await asyncio.gather(*tasks)
 
         reward_parts = []
-        for _, thin_output, source_sub_batch in rollout_results:
+        for _, thin_output, source_sub_batch, _ in rollout_results:
             if len(thin_output) == 0:
                 continue
             reward_parts.append(self._assemble_rewards(thin_output, source_batch=source_sub_batch))
@@ -1085,6 +1112,8 @@ class StarRayTrainer:
         workflow_total = self._pick_metric(metrics, "workflow/timing/batch_total_s")
         query_mean = self._pick_metric(metrics, "workflow/timing/query_s_mean")
         llm_mean = self._pick_metric(metrics, "workflow/timing/llm_node_s_mean")
+        llm_queue_mean = self._pick_metric(metrics, "workflow/timing/llm_queue_wait_s_mean")
+        llm_exec_mean = self._pick_metric(metrics, "workflow/timing/llm_rollout_exec_s_mean")
         tool_mean = self._pick_metric(metrics, "workflow/timing/tool_node_s_mean")
         node_calls = int(self._pick_metric(metrics, "workflow/timing/node_invocations"))
         group_pairs: list[tuple[str, float]] = []
@@ -1115,7 +1144,8 @@ class StarRayTrainer:
             "[star-timing] "
             f"stage={stage} batch={batch_idx} size={batch_size} "
             f"workflow={workflow_total:.3f}s query_mean={query_mean:.3f}s "
-            f"llm_mean={llm_mean:.3f}s tool_mean={tool_mean:.3f}s "
+            f"llm_mean={llm_mean:.3f}s llm_queue_mean={llm_queue_mean:.3f}s "
+            f"llm_exec_mean={llm_exec_mean:.3f}s tool_mean={tool_mean:.3f}s "
             f"node_calls={node_calls}{group_text}{extra_text}"
         )
 
