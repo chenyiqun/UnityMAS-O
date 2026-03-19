@@ -14,6 +14,9 @@ class RetrieverToolInterface(ABC):
     def retrieve(self, query: str, top_k: int) -> list[str]:
         raise NotImplementedError
 
+    def retrieve_many(self, queries: list[str], top_k: int) -> list[list[str]]:
+        return [self.retrieve(query=q, top_k=top_k) for q in queries]
+
 
 class HttpRetrieverTool(RetrieverToolInterface):
     """HTTP retrieval adapter for query(question, N) style APIs."""
@@ -123,10 +126,43 @@ class HttpRetrieverTool(RetrieverToolInterface):
 
         raise ValueError("Unexpected API response format: expecting list[{'top_k_docs': list}]")
 
+    @classmethod
+    def _extract_top_k_docs_batch(cls, resp_obj: Any) -> list[list[dict[str, Any]]]:
+        if isinstance(resp_obj, list):
+            return [cls._extract_top_k_docs([item]) for item in resp_obj]
+
+        if isinstance(resp_obj, dict):
+            result = resp_obj.get("result", None)
+            if isinstance(result, list) and all(isinstance(item, list) for item in result):
+                out: list[list[dict[str, Any]]] = []
+                for row in result:
+                    row_docs: list[dict[str, Any]] = []
+                    for item in row:
+                        if isinstance(item, dict):
+                            text = item.get("text", item.get("document", item.get("content", None)))
+                            if text is not None:
+                                row_docs.append({"text": str(text)})
+                            else:
+                                row_docs.append({"text": json.dumps(item, ensure_ascii=False)})
+                        else:
+                            row_docs.append({"text": str(item)})
+                    out.append(row_docs)
+                return out
+
+        return [cls._extract_top_k_docs(resp_obj)]
+
     def query(self, question: str, N: int, max_attempts: int = 5) -> list[dict[str, Any]]:
+        batch = self.query_many(questions=[question], N=N, max_attempts=max_attempts)
+        return batch[0] if batch else []
+
+    def query_many(self, questions: list[str], N: int, max_attempts: int = 5) -> list[list[dict[str, Any]]]:
+        normalized_questions = [str(q) for q in questions if str(q).strip()]
+        if len(normalized_questions) == 0:
+            return []
+
         payload_candidates = [
-            {"questions": [str(question)], "N": int(N)},
-            {"queries": [str(question)], "topk": int(N), "return_scores": False},
+            {"questions": normalized_questions, "N": int(N)},
+            {"queries": normalized_questions, "topk": int(N), "return_scores": False},
         ]
         last_error = ""
         attempts = 0
@@ -153,7 +189,7 @@ class HttpRetrieverTool(RetrieverToolInterface):
                 for payload in payload_candidates:
                     try:
                         data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
-                        docs = self._extract_top_k_docs(data)
+                        docs = self._extract_top_k_docs_batch(data)
                         with self._state_lock:
                             self._preferred_url = api_url
                         return docs
@@ -180,6 +216,10 @@ class HttpRetrieverTool(RetrieverToolInterface):
 
     def retrieve(self, query: str, top_k: int) -> list[str]:
         docs = self.query(question=query, N=top_k)
+        return self._docs_to_texts(docs)
+
+    @staticmethod
+    def _docs_to_texts(docs: list[dict[str, Any]]) -> list[str]:
         out: list[str] = []
         for doc in docs:
             if not isinstance(doc, dict):
@@ -190,6 +230,9 @@ class HttpRetrieverTool(RetrieverToolInterface):
                 text = doc.get("document", doc.get("content", json.dumps(doc, ensure_ascii=False)))
             out.append(str(text))
         return out
+
+    def retrieve_many(self, queries: list[str], top_k: int) -> list[list[str]]:
+        return [self._docs_to_texts(docs) for docs in self.query_many(questions=queries, N=top_k)]
 
 
 class SimpleKeywordRetrieverTool(RetrieverToolInterface):
@@ -217,6 +260,9 @@ class SimpleKeywordRetrieverTool(RetrieverToolInterface):
             scored.append((score, -idx, doc))
         scored.sort(reverse=True)
         return [doc for _, _, doc in scored[:top_k]]
+
+    def retrieve_many(self, queries: list[str], top_k: int) -> list[list[str]]:
+        return [self.retrieve(query=q, top_k=top_k) for q in queries]
 
 
 def _load_docs_from_path(path: str) -> list[str]:

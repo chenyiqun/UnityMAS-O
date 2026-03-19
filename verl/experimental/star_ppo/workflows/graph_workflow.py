@@ -694,9 +694,40 @@ class GraphWorkflowRunner(WorkflowRunner):
             if tool_name not in self.tools:
                 raise ValueError(f"tool node {node_id} references missing tool alias={tool_name}")
             tool = self.tools[tool_name]
-            input_text = self._render_template(str(node_cfg.get("input_template", "{question}")), context)
+            input_source = str(node_cfg.get("input_source", "") or "").strip()
+            batch_queries = bool(node_cfg.get("batch_queries", False))
+            if input_source:
+                input_value = self._lookup_path(context, input_source, default=[])
+            else:
+                input_value = self._render_template(str(node_cfg.get("input_template", "{question}")), context)
             top_k = int(node_cfg.get("top_k", 3))
-            if hasattr(tool, "query"):
+            if batch_queries:
+                if isinstance(input_value, np.ndarray):
+                    raw_queries = input_value.tolist()
+                elif isinstance(input_value, list | tuple):
+                    raw_queries = list(input_value)
+                else:
+                    raw_queries = [input_value]
+                queries = [str(item).strip() for item in raw_queries if str(item).strip()]
+                max_attempts = int(node_cfg.get("max_attempts", 5))
+                if hasattr(tool, "retrieve_many"):
+                    output = await asyncio.to_thread(tool.retrieve_many, queries, top_k)
+                elif hasattr(tool, "query_many"):
+                    try:
+                        output = await asyncio.to_thread(
+                            tool.query_many,
+                            questions=queries,
+                            N=top_k,
+                            max_attempts=max_attempts,
+                        )
+                    except TypeError:
+                        output = await asyncio.to_thread(tool.query_many, queries, top_k, max_attempts)
+                else:
+                    output = await asyncio.to_thread(
+                        lambda: [tool.retrieve(query=q, top_k=top_k) for q in queries]
+                    )
+            elif hasattr(tool, "query"):
+                input_text = str(input_value)
                 max_attempts = int(node_cfg.get("max_attempts", 5))
                 # Prefer legacy named args used by RetrievalTool(question, N, max_attempts),
                 # then fallback to positional for custom tool implementations.
@@ -710,14 +741,15 @@ class GraphWorkflowRunner(WorkflowRunner):
                 except TypeError:
                     output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
             elif hasattr(tool, "retrieve"):
+                input_text = str(input_value)
                 output = await asyncio.to_thread(tool.retrieve, input_text, top_k)
             elif callable(tool):
-                output = await asyncio.to_thread(tool, input_text)
+                output = await asyncio.to_thread(tool, input_value)
             else:
                 raise TypeError(f"tool {tool_name} is not callable and has no query()/retrieve()")
             output_key = str(node_cfg.get("output_key", "output"))
             context["nodes"][node_id] = {
-                "input": input_text,
+                "input": input_value,
                 output_key: output,
             }
             context[node_id] = context["nodes"][node_id]

@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 trainer:
-  experiment_name: star_qd_retrieve_summarize_answer_f1
+  experiment_name: star_qd_retrieve_answer_f1
   # Validation control:
   # 1) run one validation pass before training starts
   val_before_train: false
@@ -23,19 +23,13 @@ trainer:
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: ${oc.env:DECOMPOSE_MODEL_PATH,null}
-    - model_id: summary_agent_7b
-      nnodes: 1
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+    - model_id: answer_agent_14b
+      nnodes: 2
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: ${oc.env:SUMMARY_MODEL_PATH,null}
-    - model_id: answer_agent_7b
-      nnodes: 1
-      n_gpus_per_node: 8
-      accelerator_type: null
-      strategy: fsdp2
-      model_path: ${oc.env:ANSWER_MODEL_PATH,null}
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-14B-Instruct
   routing:
     policy: epoch_dynamic
     refresh_every_epoch: true
@@ -43,6 +37,9 @@ trainer:
 actor_rollout_ref:
   # Star detached actor/rollout workers require hybrid_engine to be disabled.
   hybrid_engine: false
+  model:
+    path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+    tokenizer_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
   actor:
     ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
     ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
@@ -83,7 +80,7 @@ ray_kwargs:
 
 star:
   workflow:
-    name: graph_query_decompose_retrieve_summarize_answer
+    name: graph_query_decompose_retrieve_answer
     llm_timeout_seconds: ${oc.decode:${oc.env:STAR_LLM_TIMEOUT_SECONDS,0}}
     # split: share final outcome reward equally across llm nodes with share_outcome=true
     # full: each shared node gets full final outcome reward
@@ -126,7 +123,8 @@ star:
             type: json_key
             key: sub_queries
             default: []
-            max_items: 5
+            # Keep only first 4 sub-queries for downstream retrieval.
+            max_items: 4
             valid_reward: 0.0
             invalid_reward: -1.0
           reward:
@@ -164,72 +162,11 @@ star:
           max_attempts: 5
           output_key: retrieved_docs
           next:
-            - to: summarize
-              when: "len(nodes.get('retrieve', {}).get('retrieved_docs', []) or []) >= 1"
-        summarize:
-          type: llm
-          model_id: summary_agent_7b
-          agent_id: summary_agent
-          output_key: sub_answers
-          parser:
-            type: json_key
-            key: sub_answers
-            default: []
-            max_items: 5
-            valid_reward: 0.0
-            invalid_reward: -1.0
-          reward:
-            format_weight: 1.0
-            share_outcome: true
-          prompt_template: |
-            You are a sub-question summarization assistant.
-
-            Read the retrieved passages and produce one concise answer for each sub-question.
-            If evidence is insufficient for a sub-question, output Unknown for that item.
-
-            Requirements:
-            1. Keep the number of answers aligned with the number of available sub-questions.
-            2. Preserve the original sub-question order.
-            3. Each answer must be concise and directly answer its sub-question.
-            4. Return strictly valid JSON.
-
-            Output format (strict):
-            {{"sub_answers":["answer for sub-question 1","answer for sub-question 2"]}}
-
-            Original query:
-            {question}
-
-            Sub-question 1:
-            {decompose.sub_queries.0}
-
-            Retrieved top-5 passages:
-            {retrieve.retrieved_docs.0}
-
-            Sub-question 2:
-            {decompose.sub_queries.1}
-            Retrieved top-5 passages:
-            {retrieve.retrieved_docs.1}
-
-            Sub-question 3:
-            {decompose.sub_queries.2}
-            Retrieved top-5 passages:
-            {retrieve.retrieved_docs.2}
-
-            Sub-question 4:
-            {decompose.sub_queries.3}
-            Retrieved top-5 passages:
-            {retrieve.retrieved_docs.3}
-
-            Sub-question 5:
-            {decompose.sub_queries.4}
-            Retrieved top-5 passages:
-            {retrieve.retrieved_docs.4}
-          next:
             - to: answer
 
         answer:
           type: llm
-          model_id: answer_agent_7b
+          model_id: answer_agent_14b
           agent_id: answer_agent
           output_key: final_answer
           parser:
@@ -247,11 +184,11 @@ star:
             Input:
             - Original query
             - Decomposed sub-questions
-            - Corresponding sub-answers
+            - Retrieved top-5 passages for each sub-question
 
             Task:
-            1. Synthesize a final answer for the original query based on sub-answers.
-            2. Keep the answer concise and direct.
+            1. Use the provided retrieved evidence to answer the original query directly.
+            2. Keep the answer concise and factual.
             3. If evidence is insufficient, output Unknown.
 
             Output format (strict):
@@ -262,26 +199,21 @@ star:
 
             Sub-question 1:
             {decompose.sub_queries.0}
-            Sub-answer 1:
-            {summarize.sub_answers.0}
+            Retrieved top-5 passages:
+            {retrieve.retrieved_docs.0}
 
             Sub-question 2:
             {decompose.sub_queries.1}
-            Sub-answer 2:
-            {summarize.sub_answers.1}
+            Retrieved top-5 passages:
+            {retrieve.retrieved_docs.1}
 
             Sub-question 3:
             {decompose.sub_queries.2}
-            Sub-answer 3:
-            {summarize.sub_answers.2}
+            Retrieved top-5 passages:
+            {retrieve.retrieved_docs.2}
 
             Sub-question 4:
             {decompose.sub_queries.3}
-            Sub-answer 4:
-            {summarize.sub_answers.3}
-
-            Sub-question 5:
-            {decompose.sub_queries.4}
-            Sub-answer 5:
-            {summarize.sub_answers.4}
+            Retrieved top-5 passages:
+            {retrieve.retrieved_docs.3}
           next: []
