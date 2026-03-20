@@ -123,8 +123,8 @@ star:
             type: json_key
             key: sub_queries
             default: []
-            # Keep only first 4 sub-queries for downstream retrieval.
-            max_items: 4
+            # Keep only first 3 sub-queries for downstream retrieval.
+            max_items: 3
             valid_reward: 0.0
             invalid_reward: -1.0
           reward:
@@ -133,11 +133,11 @@ star:
           prompt_template: |
             You are a query decomposition assistant.
 
-            Given one original user query, decompose it into 1 to 5 searchable sub-questions.
+            Given one original user query, decompose it into 1 to 3 searchable sub-questions.
 
             Requirements:
             1. Return at least 1 sub-question.
-            2. Return at most 5 sub-questions.
+            2. Return at most 3 sub-questions.
             3. Each sub-question must be concise and independently searchable.
             4. Keep key entities, relations, and time constraints from the original query.
             5. Do not answer the query.
@@ -159,7 +159,7 @@ star:
           fail_open: true
           input_source: "decompose.sub_queries"
           batch_queries: true
-          top_k: 5
+          top_k: 4
           max_attempts: 5
           output_key: retrieved_docs
           next:
@@ -185,7 +185,7 @@ star:
             Input:
             - Original query
             - Decomposed sub-questions
-            - Retrieved top-5 passages for each sub-question
+            - Retrieved top-4 passages for each sub-question
 
             Task:
             1. Use the provided retrieved evidence to answer the original query directly.
@@ -200,21 +200,16 @@ star:
 
             Sub-question 1:
             {decompose.sub_queries.0}
-            Retrieved top-5 passages:
+            Retrieved top-4 passages:
             {retrieve.retrieved_docs.0}
 
             Sub-question 2:
             {decompose.sub_queries.1}
-            Retrieved top-5 passages:
+            Retrieved top-4 passages:
             {retrieve.retrieved_docs.1}
 
             Sub-question 3:
             {decompose.sub_queries.2}
-            Retrieved top-5 passages:
+            Retrieved top-4 passages:
             {retrieve.retrieved_docs.2}
-
-            Sub-question 4:
-            {decompose.sub_queries.3}
-            Retrieved top-5 passages:
-            {retrieve.retrieved_docs.3}
           next: []
