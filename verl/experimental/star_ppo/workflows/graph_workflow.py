@@ -41,6 +41,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         - `type: tool`
         - `tool`: tool alias in `star.workflow.tools`
         - optional `timing_group` (for reusable timing aggregation labels)
+        - optional `fail_open`: bool (on tool error, return empty output instead of raising)
         - `input_template`: str
         - `top_k`: int (for retriever-like tools)
         - `output_key`: str
@@ -694,6 +695,7 @@ class GraphWorkflowRunner(WorkflowRunner):
             if tool_name not in self.tools:
                 raise ValueError(f"tool node {node_id} references missing tool alias={tool_name}")
             tool = self.tools[tool_name]
+            fail_open = bool(node_cfg.get("fail_open", False))
             input_source = str(node_cfg.get("input_source", "") or "").strip()
             batch_queries = bool(node_cfg.get("batch_queries", False))
             if input_source:
@@ -701,52 +703,66 @@ class GraphWorkflowRunner(WorkflowRunner):
             else:
                 input_value = self._render_template(str(node_cfg.get("input_template", "{question}")), context)
             top_k = int(node_cfg.get("top_k", 3))
-            if batch_queries:
-                if isinstance(input_value, np.ndarray):
-                    raw_queries = input_value.tolist()
-                elif isinstance(input_value, list | tuple):
-                    raw_queries = list(input_value)
-                else:
-                    raw_queries = [input_value]
-                queries = [str(item).strip() for item in raw_queries if str(item).strip()]
-                max_attempts = int(node_cfg.get("max_attempts", 5))
-                if hasattr(tool, "retrieve_many"):
-                    output = await asyncio.to_thread(tool.retrieve_many, queries, top_k)
-                elif hasattr(tool, "query_many"):
+            queries: list[str] = []
+            try:
+                if batch_queries:
+                    if isinstance(input_value, np.ndarray):
+                        raw_queries = input_value.tolist()
+                    elif isinstance(input_value, list | tuple):
+                        raw_queries = list(input_value)
+                    else:
+                        raw_queries = [input_value]
+                    queries = [str(item).strip() for item in raw_queries if str(item).strip()]
+                    max_attempts = int(node_cfg.get("max_attempts", 5))
+                    if hasattr(tool, "retrieve_many"):
+                        output = await asyncio.to_thread(tool.retrieve_many, queries, top_k)
+                    elif hasattr(tool, "query_many"):
+                        try:
+                            output = await asyncio.to_thread(
+                                tool.query_many,
+                                questions=queries,
+                                N=top_k,
+                                max_attempts=max_attempts,
+                            )
+                        except TypeError:
+                            output = await asyncio.to_thread(tool.query_many, queries, top_k, max_attempts)
+                    else:
+                        output = await asyncio.to_thread(
+                            lambda: [tool.retrieve(query=q, top_k=top_k) for q in queries]
+                        )
+                elif hasattr(tool, "query"):
+                    input_text = str(input_value)
+                    max_attempts = int(node_cfg.get("max_attempts", 5))
+                    # Prefer legacy named args used by RetrievalTool(question, N, max_attempts),
+                    # then fallback to positional for custom tool implementations.
                     try:
                         output = await asyncio.to_thread(
-                            tool.query_many,
-                            questions=queries,
+                            tool.query,
+                            question=input_text,
                             N=top_k,
                             max_attempts=max_attempts,
                         )
                     except TypeError:
-                        output = await asyncio.to_thread(tool.query_many, queries, top_k, max_attempts)
+                        output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
+                elif hasattr(tool, "retrieve"):
+                    input_text = str(input_value)
+                    output = await asyncio.to_thread(tool.retrieve, input_text, top_k)
+                elif callable(tool):
+                    output = await asyncio.to_thread(tool, input_value)
                 else:
-                    output = await asyncio.to_thread(
-                        lambda: [tool.retrieve(query=q, top_k=top_k) for q in queries]
-                    )
-            elif hasattr(tool, "query"):
-                input_text = str(input_value)
-                max_attempts = int(node_cfg.get("max_attempts", 5))
-                # Prefer legacy named args used by RetrievalTool(question, N, max_attempts),
-                # then fallback to positional for custom tool implementations.
-                try:
-                    output = await asyncio.to_thread(
-                        tool.query,
-                        question=input_text,
-                        N=top_k,
-                        max_attempts=max_attempts,
-                    )
-                except TypeError:
-                    output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
-            elif hasattr(tool, "retrieve"):
-                input_text = str(input_value)
-                output = await asyncio.to_thread(tool.retrieve, input_text, top_k)
-            elif callable(tool):
-                output = await asyncio.to_thread(tool, input_value)
-            else:
-                raise TypeError(f"tool {tool_name} is not callable and has no query()/retrieve()")
+                    raise TypeError(f"tool {tool_name} is not callable and has no query()/retrieve()")
+            except Exception as exc:
+                if not fail_open:
+                    raise
+                query_id = self._extract_from_batch(query_batch, "query_id")
+                output = [[] for _ in queries] if batch_queries else []
+                logger.warning(
+                    "[star-tool-fail-open] tool failure ignored: node=%s tool=%s query_id=%s err=%s",
+                    node_id,
+                    tool_name,
+                    query_id,
+                    repr(exc),
+                )
             output_key = str(node_cfg.get("output_key", "output"))
             context["nodes"][node_id] = {
                 "input": input_value,

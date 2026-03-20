@@ -156,6 +156,7 @@ star:
         retrieve:
           type: tool
           tool: retriever
+          fail_open: true
           input_source: "decompose.sub_queries"
           batch_queries: true
           top_k: 5
