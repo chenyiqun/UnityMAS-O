@@ -1,0 +1,32 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - star_query_decompose_retrieve_answer_f1_trainer
+  - _self_
+
+trainer:
+  experiment_name: star_qd_retrieve_answer_f1_7b_2node
+  llm_engines:
+    - model_id: decompose_agent_7b
+      nnodes: 2
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+    - model_id: answer_agent_7b
+      nnodes: 2
+      n_gpus_per_node: 8
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+
+star:
+  workflow:
+    graph:
+      nodes:
+        decompose:
+          model_id: decompose_agent_7b
+        answer:
+          model_id: answer_agent_7b
