@@ -19,13 +19,13 @@ trainer:
   save_freq: 50
   llm_engines:
     - model_id: decompose_agent_7b
-      nnodes: 2
+      nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
       model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
     - model_id: answer_agent_7b
-      nnodes: 2
+      nnodes: 3
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
