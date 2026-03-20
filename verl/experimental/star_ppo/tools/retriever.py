@@ -1,4 +1,6 @@
 import json
+import os
+import random
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -32,6 +34,8 @@ class HttpRetrieverTool(RetrieverToolInterface):
         if len(self.api_urls) == 0:
             raise ValueError("api_urls must contain at least one valid URL")
         self.timeout_seconds = float(timeout_seconds)
+        random_endpoint_flag = str(os.environ.get("STAR_RETRIEVER_RANDOM_ENDPOINT", "false")).strip().lower()
+        self.randomize_api_urls = random_endpoint_flag in {"1", "true", "yes", "on"}
         # Sticky endpoint routing:
         # - cache the last successful endpoint
         # - permanently skip endpoints that return 404
@@ -172,18 +176,25 @@ class HttpRetrieverTool(RetrieverToolInterface):
                 preferred = self._preferred_url
                 bad_404 = set(self._bad_urls_404)
 
-            candidate_urls: list[str] = []
-            if preferred and preferred not in bad_404:
-                candidate_urls.append(preferred)
-            for url in self.api_urls:
-                if url in bad_404:
-                    continue
-                if url not in candidate_urls:
-                    candidate_urls.append(url)
+            if self.randomize_api_urls:
+                candidate_urls = [url for url in self.api_urls if url not in bad_404]
+                # If all urls were marked bad (e.g. service updated), allow re-probing.
+                if len(candidate_urls) == 0:
+                    candidate_urls = list(self.api_urls)
+                random.shuffle(candidate_urls)
+            else:
+                candidate_urls = []
+                if preferred and preferred not in bad_404:
+                    candidate_urls.append(preferred)
+                for url in self.api_urls:
+                    if url in bad_404:
+                        continue
+                    if url not in candidate_urls:
+                        candidate_urls.append(url)
 
-            # If all urls were marked bad (e.g. service updated), allow re-probing.
-            if len(candidate_urls) == 0:
-                candidate_urls = list(self.api_urls)
+                # If all urls were marked bad (e.g. service updated), allow re-probing.
+                if len(candidate_urls) == 0:
+                    candidate_urls = list(self.api_urls)
 
             for api_url in candidate_urls:
                 for payload in payload_candidates:
