@@ -38,7 +38,7 @@ VAL_MAX_BATCHES="${VAL_MAX_BATCHES:-5}"
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
 ROLLOUT_FREE_CACHE_ENGINE="${ROLLOUT_FREE_CACHE_ENGINE:-true}"
-ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.35}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.20}"
 ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE="${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE:-2}"
 ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-2048}"
 ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
@@ -48,6 +48,13 @@ VERL_VLLM_FORCE_SHM_WEIGHT_SYNC="${VERL_VLLM_FORCE_SHM_WEIGHT_SYNC:-1}"
 STAR_LLM_TIMEOUT_SECONDS="${STAR_LLM_TIMEOUT_SECONDS:-0}"
 ACTOR_PARAM_OFFLOAD="${ACTOR_PARAM_OFFLOAD:-false}"
 ACTOR_OPTIMIZER_OFFLOAD="${ACTOR_OPTIMIZER_OFFLOAD:-false}"
+
+if [[ -z "${TRAIN_PARQUET}" ]]; then
+  unset TRAIN_PARQUET
+fi
+if [[ -z "${VAL_PARQUET}" ]]; then
+  unset VAL_PARQUET
+fi
 
 ray stop -f >/dev/null 2>&1 || true
 
@@ -156,10 +163,10 @@ PY
     actor_rollout_ref.actor.fsdp_config.param_offload="${ACTOR_PARAM_OFFLOAD}"
     actor_rollout_ref.actor.fsdp_config.optimizer_offload="${ACTOR_OPTIMIZER_OFFLOAD}"
   )
-  if [[ -n "${TRAIN_PARQUET}" ]]; then
+  if [[ -n "${TRAIN_PARQUET:-}" ]]; then
     hydra_overrides+=(data.train_files="${TRAIN_PARQUET}")
   fi
-  if [[ -n "${VAL_PARQUET}" ]]; then
+  if [[ -n "${VAL_PARQUET:-}" ]]; then
     hydra_overrides+=(data.val_files="${VAL_PARQUET}")
   fi
   if [[ -n "${PROJECT_NAME}" ]]; then
