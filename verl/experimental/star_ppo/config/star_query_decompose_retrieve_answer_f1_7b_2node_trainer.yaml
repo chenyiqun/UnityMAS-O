@@ -16,7 +16,7 @@ trainer:
   # 4) validation uses at most N batches each run (-1 means full val set)
   val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,5}}
   # 3) save checkpoint every N training steps
-  save_freq: 50
+  save_freq: 500
   llm_engines:
     - model_id: decompose_agent_7b
       nnodes: 1
@@ -67,8 +67,10 @@ critic:
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
 
 data:
-  train_files: ${oc.env:TRAIN_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}
-  val_files: ${oc.env:VAL_PARQUET,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}
+  dataset_root: ${oc.env:DATASET_ROOT,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data}
+  dataset_name: ${oc.env:DATASET_NAME,hotpotqa}
+  train_files: ${oc.env:TRAIN_PARQUET,${data.dataset_root}/${data.dataset_name}/train_verl.parquet}
+  val_files: ${oc.env:VAL_PARQUET,${data.dataset_root}/${data.dataset_name}/test_verl.parquet}
   train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
   gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
   val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,128}}

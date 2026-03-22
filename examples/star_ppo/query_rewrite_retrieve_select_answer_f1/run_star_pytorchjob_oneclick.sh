@@ -15,9 +15,10 @@ FORCE_ENV_SETUP="${FORCE_ENV_SETUP:-false}"
 HEAD_IP="${HEAD_IP:-}"
 CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
 
-# Your defaults (can still be overridden by env vars from job config).
-TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}"
-VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}"
+# Data paths are resolved by Hydra config via DATASET_NAME by default.
+# Keep TRAIN_PARQUET / VAL_PARQUET optional for explicit one-off overrides.
+TRAIN_PARQUET="${TRAIN_PARQUET:-}"
+VAL_PARQUET="${VAL_PARQUET:-}"
 AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-}"
 REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-${AGENT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}"
 SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
@@ -30,7 +31,7 @@ RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000
 
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
-SAVE_FREQ="${SAVE_FREQ:-50}"
+SAVE_FREQ="${SAVE_FREQ:-500}"
 VAL_MAX_BATCHES="${VAL_MAX_BATCHES:-5}"
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"

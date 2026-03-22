@@ -15,8 +15,8 @@ CPUS_PER_NODE="${CPUS_PER_NODE:-64}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 MASTER_ADDR_FILE="${MASTER_ADDR_FILE:-}"
 
-TRAIN_PARQUET="${TRAIN_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/train_verl.parquet}"
-VAL_PARQUET="${VAL_PARQUET:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data/hotpotqa/test_verl.parquet}"
+TRAIN_PARQUET="${TRAIN_PARQUET:-}"
+VAL_PARQUET="${VAL_PARQUET:-}"
 CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
 PROJECT_NAME="${PROJECT_NAME:-}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
@@ -33,7 +33,7 @@ WANDB_API_KEY="${WANDB_API_KEY:-5235f681e1a2a0ef6fe3a1f4686280daad738532}"
 
 VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
 TEST_FREQ="${TEST_FREQ:-50}"
-SAVE_FREQ="${SAVE_FREQ:-50}"
+SAVE_FREQ="${SAVE_FREQ:-500}"
 VAL_MAX_BATCHES="${VAL_MAX_BATCHES:-5}"
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
@@ -140,8 +140,6 @@ PY
 
   echo "[star-pytorchjob] launching training on rank0"
   hydra_overrides=(
-    data.train_files="${TRAIN_PARQUET}"
-    data.val_files="${VAL_PARQUET}"
     trainer.nnodes="${WORLD_SIZE}"
     trainer.n_gpus_per_node="${GPUS_PER_NODE}"
     actor_rollout_ref.model.path="/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct"
@@ -158,6 +156,12 @@ PY
     actor_rollout_ref.actor.fsdp_config.param_offload="${ACTOR_PARAM_OFFLOAD}"
     actor_rollout_ref.actor.fsdp_config.optimizer_offload="${ACTOR_OPTIMIZER_OFFLOAD}"
   )
+  if [[ -n "${TRAIN_PARQUET}" ]]; then
+    hydra_overrides+=(data.train_files="${TRAIN_PARQUET}")
+  fi
+  if [[ -n "${VAL_PARQUET}" ]]; then
+    hydra_overrides+=(data.val_files="${VAL_PARQUET}")
+  fi
   if [[ -n "${PROJECT_NAME}" ]]; then
     hydra_overrides+=(trainer.project_name="${PROJECT_NAME}")
   fi

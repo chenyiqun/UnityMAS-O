@@ -20,7 +20,7 @@ import socket
 
 import hydra
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from verl.experimental.dataset.sampler import AbstractSampler
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
@@ -45,6 +45,62 @@ def main(config):
     run_ppo(config)
 
 
+def _infer_dataset_name(train_files) -> str:
+    if isinstance(train_files, (list, tuple)):
+        candidates = [str(x).strip() for x in train_files]
+    else:
+        candidates = [str(train_files).strip()]
+
+    for raw in candidates:
+        if not raw:
+            continue
+        # Support comma-separated path strings.
+        path = raw.split(",")[0].strip().rstrip("/")
+        if not path:
+            continue
+
+        basename = os.path.basename(path)
+        parent = os.path.basename(os.path.dirname(path))
+        stem, ext = os.path.splitext(basename)
+        # File-like path: prefer parent folder as dataset name, e.g. hotpotqa/train.parquet -> hotpotqa.
+        if ext:
+            if parent:
+                return parent
+            if stem:
+                return stem
+        # Directory-like path.
+        if basename:
+            return basename
+
+    return "unknown_dataset"
+
+
+def _resolve_dataset_name(config) -> str:
+    configured_name = str(OmegaConf.select(config, "data.dataset_name") or "").strip()
+    if configured_name:
+        return configured_name
+    return _infer_dataset_name(OmegaConf.select(config, "data.train_files"))
+
+
+def _maybe_rewrite_default_ckpt_dir(config) -> None:
+    project = str(OmegaConf.select(config, "trainer.project_name") or "").strip()
+    experiment = str(OmegaConf.select(config, "trainer.experiment_name") or "").strip()
+    current_dir = str(OmegaConf.select(config, "trainer.default_local_dir") or "").strip()
+    if not project or not experiment or not current_dir:
+        return
+
+    legacy_default = os.path.join("checkpoints", project, experiment)
+    if os.path.normpath(current_dir) != os.path.normpath(legacy_default):
+        # Respect explicitly customized checkpoint dirs.
+        return
+
+    dataset_name = _resolve_dataset_name(config)
+    rewritten = os.path.join("checkpoints", project, dataset_name, experiment)
+    with open_dict(config):
+        config.trainer.default_local_dir = rewritten
+    print(f"[trainer] default_local_dir={rewritten}")
+
+
 # Define a function to run the PPO-like training process
 def run_ppo(config, task_runner_class=None) -> None:
     """Initialize Ray cluster and run distributed PPO training process.
@@ -55,6 +111,8 @@ def run_ppo(config, task_runner_class=None) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    _maybe_rewrite_default_ckpt_dir(config)
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         # Initialize Ray with a local cluster configuration
