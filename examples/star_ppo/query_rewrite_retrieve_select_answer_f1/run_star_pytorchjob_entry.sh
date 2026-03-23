@@ -21,11 +21,13 @@ CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer
 PROJECT_NAME="${PROJECT_NAME:-}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
 AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-}"
-REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-${AGENT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}"
-SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
-ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
-DECOMPOSE_MODEL_PATH="${DECOMPOSE_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
-SUMMARY_MODEL_PATH="${SUMMARY_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
+ACTOR_MODEL_PATH="${ACTOR_MODEL_PATH:-}"
+REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:-}"
+SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH:-}}"
+ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-${REWRITE_MODEL_PATH:-}}"
+DECOMPOSE_MODEL_PATH="${DECOMPOSE_MODEL_PATH:-${REWRITE_MODEL_PATH:-}}"
+SUMMARY_MODEL_PATH="${SUMMARY_MODEL_PATH:-${REWRITE_MODEL_PATH:-}}"
+ALLOW_ACTOR_MODEL_OVERRIDE="${ALLOW_ACTOR_MODEL_OVERRIDE:-false}"
 RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
 ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 VLLM_USE_V1="${VLLM_USE_V1:-1}"
@@ -107,6 +109,7 @@ export VERL_VLLM_FORCE_SHM_WEIGHT_SYNC
 export STAR_LLM_TIMEOUT_SECONDS
 export ACTOR_PARAM_OFFLOAD
 export ACTOR_OPTIMIZER_OFFLOAD
+export ALLOW_ACTOR_MODEL_OVERRIDE
 
 if [[ "${RANK}" == "0" ]]; then
   echo "[star-pytorchjob] rank0 starts Ray head at ${MASTER_ADDR}:${MASTER_PORT}"
@@ -149,7 +152,6 @@ PY
   hydra_overrides=(
     trainer.nnodes="${WORLD_SIZE}"
     trainer.n_gpus_per_node="${GPUS_PER_NODE}"
-    actor_rollout_ref.model.path="/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct"
     actor_rollout_ref.rollout.name="${ROLLOUT_NAME}"
     star.workflow.tools.retriever.api_urls="${RETRIEVAL_API_URLS_JSON}"
     data.gen_batch_size="${GEN_BATCH_SIZE}"
@@ -168,6 +170,12 @@ PY
   fi
   if [[ -n "${VAL_PARQUET:-}" ]]; then
     hydra_overrides+=(data.val_files="${VAL_PARQUET}")
+  fi
+  if [[ "${ALLOW_ACTOR_MODEL_OVERRIDE}" == "true" && -n "${ACTOR_MODEL_PATH:-}" ]]; then
+    hydra_overrides+=(actor_rollout_ref.model.path="${ACTOR_MODEL_PATH}")
+    hydra_overrides+=(actor_rollout_ref.model.tokenizer_path="${ACTOR_MODEL_PATH}")
+  elif [[ -n "${ACTOR_MODEL_PATH:-}" ]]; then
+    echo "[star-pytorchjob] ACTOR_MODEL_PATH is set but ignored (ALLOW_ACTOR_MODEL_OVERRIDE=false)."
   fi
   if [[ -n "${PROJECT_NAME}" ]]; then
     hydra_overrides+=(trainer.project_name="${PROJECT_NAME}")

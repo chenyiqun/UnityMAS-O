@@ -460,6 +460,114 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
     def _empty_batch(self) -> DataProto:
         return DataProto.from_dict(non_tensors={"traj_id": np.array([], dtype=object)})
 
+    @staticmethod
+    def _pad_fill_value_for_key(key: str, tensor: torch.Tensor):
+        key_lower = str(key).lower()
+        if tensor.dtype == torch.bool:
+            return False
+        if "label" in key_lower:
+            return -100
+        if tensor.is_floating_point():
+            return 0.0
+        return 0
+
+    @classmethod
+    def _pad_tensor_to_shape(cls, key: str, tensor: torch.Tensor, target_shape: tuple[int, ...]) -> torch.Tensor:
+        fill_value = cls._pad_fill_value_for_key(key, tensor)
+        padded = torch.full(target_shape, fill_value=fill_value, dtype=tensor.dtype, device=tensor.device)
+        copy_slices = tuple(slice(0, min(src, dst)) for src, dst in zip(tensor.shape, target_shape))
+        padded[copy_slices] = tensor[copy_slices]
+        return padded
+
+    def _align_fat_batch_shapes_for_concat(self, fat_list: list[DataProto]) -> list[DataProto]:
+        if len(fat_list) <= 1:
+            return fat_list
+
+        target_shapes: dict[str, tuple[int, ...]] = {}
+        prototypes: dict[str, torch.Tensor] = {}
+        for fat in fat_list:
+            if fat.batch is None:
+                continue
+            for key in fat.batch.keys():
+                tensor = fat.batch[key]
+                if not isinstance(tensor, torch.Tensor):
+                    continue
+                key = str(key)
+                shape = tuple(int(x) for x in tensor.shape)
+                if key not in target_shapes:
+                    target_shapes[key] = shape
+                    prototypes[key] = tensor
+                    continue
+                prev = target_shapes[key]
+                if len(prev) != len(shape):
+                    raise RuntimeError(
+                        f"Inconsistent tensor rank for key={key}: shape={shape} vs prev_shape={prev}"
+                    )
+                target_shapes[key] = tuple(max(a, b) for a, b in zip(prev, shape))
+
+        if not target_shapes:
+            return fat_list
+
+        aligned: list[DataProto] = []
+        for fat in fat_list:
+            if fat.batch is None:
+                aligned.append(fat)
+                continue
+
+            tensors: dict[str, torch.Tensor] = {}
+            changed = False
+            bsz = int(fat.batch.batch_size[0])
+
+            for key, target_shape in target_shapes.items():
+                if key in fat.batch.keys():
+                    tensor = fat.batch[key]
+                    if not isinstance(tensor, torch.Tensor):
+                        continue
+                else:
+                    proto = prototypes[key]
+                    cur_shape = list(target_shape)
+                    cur_shape[0] = bsz
+                    tensors[key] = torch.full(
+                        tuple(cur_shape),
+                        fill_value=self._pad_fill_value_for_key(key, proto),
+                        dtype=proto.dtype,
+                        device=proto.device,
+                    )
+                    changed = True
+                    continue
+
+                cur_target = list(target_shape)
+                cur_target[0] = int(tensor.shape[0])
+                cur_target_t = tuple(cur_target)
+                if tuple(int(x) for x in tensor.shape) != cur_target_t:
+                    tensors[key] = self._pad_tensor_to_shape(key, tensor, cur_target_t)
+                    changed = True
+                else:
+                    tensors[key] = tensor
+
+            if changed:
+                aligned.append(DataProto.from_dict(tensors=tensors, non_tensors=fat.non_tensor_batch, meta_info=fat.meta_info))
+            else:
+                aligned.append(fat)
+
+        return aligned
+
+    @staticmethod
+    def _summarize_fat_shapes(fat_list: list[DataProto], max_items: int = 8) -> str:
+        items = []
+        for i, fat in enumerate(fat_list[:max_items]):
+            if fat.batch is None:
+                items.append(f"{i}:<none>")
+                continue
+            key_shapes = []
+            for key in sorted(fat.batch.keys()):
+                tensor = fat.batch[key]
+                if isinstance(tensor, torch.Tensor):
+                    key_shapes.append(f"{key}:{tuple(int(x) for x in tensor.shape)}")
+            items.append(f"{i}:{{{', '.join(key_shapes[:6])}}}")
+        suffix = f", ...+{len(fat_list) - max_items}" if len(fat_list) > max_items else ""
+        return "[" + "; ".join(items) + suffix + "]"
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def build_ready_train_batch(self, max_items: int = 0) -> DataProto:
         entries = self._traj_buffer.pop_ready(max_items=max_items if max_items and max_items > 0 else None)
@@ -478,7 +586,12 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                 fat.meta_info.pop("timing", None)
                 fat.meta_info.pop("metrics", None)
             fat_list.append(fat)
-        batch = DataProto.concat(fat_list)
+        fat_list = self._align_fat_batch_shapes_for_concat(fat_list)
+        try:
+            batch = DataProto.concat(fat_list)
+        except RuntimeError as exc:
+            shape_summary = self._summarize_fat_shapes(fat_list)
+            raise RuntimeError(f"Failed to concat ready fat batches. shapes={shape_summary}") from exc
         # Keep rollout-ready batch meta deterministic for downstream consumers.
         batch.meta_info = {}
 

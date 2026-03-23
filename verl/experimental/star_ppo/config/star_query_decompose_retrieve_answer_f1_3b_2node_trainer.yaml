@@ -18,13 +18,13 @@ trainer:
   # 3) save checkpoint every N training steps
   save_freq: 500
   llm_engines:
-    - model_id: decompose_agent_7b
+    - model_id: decompose_agent_3b
       nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
       model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-3B-Instruct
-    - model_id: answer_agent_7b
+    - model_id: answer_agent_3b
       nnodes: 3
       n_gpus_per_node: 8
       accelerator_type: null
@@ -118,7 +118,7 @@ star:
       nodes:
         decompose:
           type: llm
-          model_id: decompose_agent_7b
+          model_id: decompose_agent_3b
           agent_id: decompose_agent
           output_key: sub_queries
           parser:
@@ -169,7 +169,7 @@ star:
 
         answer:
           type: llm
-          model_id: answer_agent_7b
+          model_id: answer_agent_3b
           agent_id: answer_agent
           output_key: final_answer
           parser:
