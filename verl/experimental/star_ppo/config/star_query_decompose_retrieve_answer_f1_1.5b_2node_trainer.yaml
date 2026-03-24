@@ -16,7 +16,7 @@ trainer:
   # 4) validation uses at most N batches each run (-1 means full val set)
   val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,5}}
   # 3) save checkpoint every N training steps
-  save_freq: 500
+  save_freq: 300
   llm_engines:
     - model_id: decompose_agent_1_5b
       nnodes: 1
