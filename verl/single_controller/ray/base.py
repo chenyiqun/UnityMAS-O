@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
+from ray.exceptions import GetTimeoutError
 from ray.experimental.state.api import get_actor
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
@@ -52,7 +53,16 @@ def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, block
             padding_count = kwargs.pop(_padding_size_key, 0)
             output = execute_fn(method_name, *args, **kwargs)
             if blocking:
-                output = ray.get(output)
+                timeout_s = float(os.environ.get("STAR_WORKER_CALL_TIMEOUT_SECONDS", "0"))
+                try:
+                    if timeout_s > 0:
+                        output = ray.get(output, timeout=timeout_s)
+                    else:
+                        output = ray.get(output)
+                except GetTimeoutError as exc:
+                    raise TimeoutError(
+                        f"WorkerGroup call timed out: method={method_name} timeout_s={timeout_s}"
+                    ) from exc
             output = collect_fn(self, output)
             if padding_count > 0:
                 if isinstance(output, DataProto):

@@ -98,6 +98,9 @@ class StarRayTrainer:
         wandb_timing_filter_flag = str(os.environ.get("STAR_WANDB_FILTER_FINE_TIMING", "true")).strip().lower()
         self._wandb_filter_fine_timing = wandb_timing_filter_flag in {"1", "true", "yes", "on"}
         self._ray_get_timeout_seconds = float(os.environ.get("STAR_RAY_GET_TIMEOUT_SECONDS", "0"))
+        self._worker_call_timeout_seconds = float(
+            os.environ.get("STAR_WORKER_CALL_TIMEOUT_SECONDS", self._ray_get_timeout_seconds)
+        )
         self._weight_sync_timeout_seconds = float(
             os.environ.get("STAR_WEIGHT_SYNC_TIMEOUT_SECONDS", self._ray_get_timeout_seconds)
         )
@@ -908,6 +911,54 @@ class StarRayTrainer:
                 metrics[f"agent/{agent_id}/samples"] = float(np.sum(mask))
         return metrics
 
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        return isinstance(exc, (TimeoutError, asyncio.TimeoutError, GetTimeoutError))
+
+    def _commit_rewards_safe(self, rewards: DataProto, stage: str, step: int) -> tuple[dict[str, float], bool]:
+        try:
+            return self._commit_rewards(rewards), True
+        except Exception as exc:
+            timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+            print(
+                f"[star] commit_rewards failed: stage={stage} step={step} "
+                f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+            )
+            return {
+                f"{stage}/commit_failed": 1.0,
+                f"{stage}/commit_failed_timeout": timeout_flag,
+            }, False
+
+    def _drain_rollout_ready_queues_safe(self, stage: str, step: int) -> dict[str, float]:
+        try:
+            self._drain_rollout_ready_queues()
+            return {}
+        except Exception as exc:
+            timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+            print(
+                f"[star] drain_rollout_ready_queues failed: stage={stage} step={step} "
+                f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+            )
+            return {
+                f"{stage}/drain_failed": 1.0,
+                f"{stage}/drain_failed_timeout": timeout_flag,
+            }
+
+    def _run_model_ppo_update_safe(self, model_id: str, ctx: ModelWorkerContext, batch: DataProto, global_step: int):
+        try:
+            return self._run_model_ppo_update(model_id, ctx, batch, global_step)
+        except Exception as exc:
+            timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+            print(
+                f"[star] model ppo update failed: model={model_id} step={global_step} "
+                f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+            )
+            return {
+                f"model/{model_id}/star/update_failed": 1.0,
+                f"model/{model_id}/star/update_failed_timeout": timeout_flag,
+                f"model/{model_id}/star/consumed": 0.0,
+            }
+
     def _collect_workflow_dropped_query_ids(self) -> list[str]:
         getter = getattr(self.workflow_runner, "pop_dropped_query_ids", None)
         if not callable(getter):
@@ -929,10 +980,19 @@ class StarRayTrainer:
             "workflow/query_dropped_cleanup": float(len(unique_ids)),
         }
         for model_id, ctx in self.model_contexts.items():
-            outputs = ctx.rollout_wg.drop_queries(unique_ids)
-            reduced = self._reduce_worker_metrics(outputs)
-            for key, val in reduced.items():
-                metrics[f"model/{model_id}/{key}"] = float(val)
+            try:
+                outputs = ctx.rollout_wg.drop_queries(unique_ids)
+                reduced = self._reduce_worker_metrics(outputs)
+                for key, val in reduced.items():
+                    metrics[f"model/{model_id}/{key}"] = float(val)
+            except Exception as exc:
+                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+                print(
+                    f"[star] drop_queries cleanup failed: model={model_id} "
+                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                )
+                metrics[f"model/{model_id}/star/drop_cleanup_failed"] = 1.0
+                metrics[f"model/{model_id}/star/drop_cleanup_failed_timeout"] = timeout_flag
         return metrics
 
     async def _run_workflow_batch(self, batch: DataProto, epoch: int, stage: str) -> tuple[DataProto, dict[str, float]]:
@@ -961,6 +1021,25 @@ class StarRayTrainer:
             }
             timeout_metrics.update(cleanup_metrics)
             return self._empty_rewards(), timeout_metrics
+        except Exception as exc:
+            query_ids = []
+            if "query_id" in batch.non_tensor_batch:
+                query_ids = [str(q).strip() for q in batch.non_tensor_batch["query_id"] if str(q).strip()]
+            timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+            print(
+                f"[star] workflow batch failed: stage={stage} timeout={bool(timeout_flag)} "
+                f"batch_size={len(batch)} dropped_queries={len(query_ids)} "
+                f"err={type(exc).__name__}: {exc}"
+            )
+            cleanup_metrics = self._drop_queries_from_rollout_buffers(query_ids)
+            fail_metrics: dict[str, float] = {
+                "workflow/query_dropped": float(len(query_ids)),
+                "workflow/query_drop_ratio": float(len(query_ids) / max(1, len(batch))),
+                "workflow/batch_failed": 1.0,
+                "workflow/batch_failed_timeout": timeout_flag,
+            }
+            fail_metrics.update(cleanup_metrics)
+            return self._empty_rewards(), fail_metrics
 
         dropped_query_ids = self._collect_workflow_dropped_query_ids()
         drop_cleanup_metrics = self._drop_queries_from_rollout_buffers(dropped_query_ids)
@@ -1097,18 +1176,26 @@ class StarRayTrainer:
         update_jobs: list[tuple[str, ModelWorkerContext, DataProto]] = []
 
         for model_id, ctx in self.model_contexts.items():
-            ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
-            ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
-            if ready_batch is None:
-                metrics[f"model/{model_id}/star/consumed"] = 0.0
-                metrics[f"model/{model_id}/star/dropped"] = 0.0
-                continue
+            try:
+                ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
+                ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
+                if ready_batch is None:
+                    metrics[f"model/{model_id}/star/consumed"] = 0.0
+                    metrics[f"model/{model_id}/star/dropped"] = 0.0
+                    continue
 
-            actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
-            metrics[f"model/{model_id}/star/drop_divisor"] = float(actor_dp_size)
-            ready_batch, dropped = self._maybe_drop_last(ready_batch, actor_dp_size)
-            metrics[f"model/{model_id}/star/dropped"] = float(dropped)
-            if len(ready_batch) == 0:
+                actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
+                metrics[f"model/{model_id}/star/drop_divisor"] = float(actor_dp_size)
+                ready_batch, dropped = self._maybe_drop_last(ready_batch, actor_dp_size)
+                metrics[f"model/{model_id}/star/dropped"] = float(dropped)
+            except Exception as exc:
+                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+                print(
+                    f"[star] build_ready_train_batch failed: model={model_id} step={self._global_step} "
+                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                )
+                metrics[f"model/{model_id}/star/build_ready_failed"] = 1.0
+                metrics[f"model/{model_id}/star/build_ready_failed_timeout"] = timeout_flag
                 metrics[f"model/{model_id}/star/consumed"] = 0.0
                 continue
 
@@ -1120,7 +1207,7 @@ class StarRayTrainer:
             ppo_results = await asyncio.gather(
                 *[
                     asyncio.to_thread(
-                        self._run_model_ppo_update,
+                        self._run_model_ppo_update_safe,
                         model_id,
                         ctx,
                         ready_batch,
@@ -1401,11 +1488,23 @@ class StarRayTrainer:
                     reward_count += int(reward_vec.shape[0])
                     # Commit to local buffers so worker-side trajectory states are consistent.
                     commit_t0 = time.time()
-                    self._commit_rewards(rewards)
+                    commit_metrics, commit_ok = self._commit_rewards_safe(
+                        rewards,
+                        stage="validation",
+                        step=global_step,
+                    )
                     commit_s = time.time() - commit_t0
-                    drain_t0 = time.time()
-                    self._drain_rollout_ready_queues()
-                    drain_s = time.time() - drain_t0
+                    for key, val in commit_metrics.items():
+                        workflow_metrics[f"workflow/{key}"] = float(val)
+                    if commit_ok:
+                        drain_t0 = time.time()
+                        drain_metrics = self._drain_rollout_ready_queues_safe(
+                            stage="validation",
+                            step=global_step,
+                        )
+                        drain_s = time.time() - drain_t0
+                        for key, val in drain_metrics.items():
+                            workflow_metrics[f"workflow/{key}"] = float(val)
                 workflow_metrics["workflow/timing/validation_commit_s"] = float(commit_s)
                 workflow_metrics["workflow/timing/validation_drain_s"] = float(drain_s)
 
@@ -1452,6 +1551,22 @@ class StarRayTrainer:
             print(f"[star] validation end metrics={metrics}")
         return metrics
 
+    async def _run_validation_safe(self, epoch: int, global_step: int) -> dict[str, float]:
+        try:
+            return await self._run_validation(epoch=epoch, global_step=global_step)
+        except Exception as exc:
+            timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+            print(
+                f"[star] validation failed: epoch={epoch} step={global_step} "
+                f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+            )
+            return {
+                "validation/global_step": float(global_step),
+                "validation/epoch": float(epoch),
+                "validation/failed": 1.0,
+                "validation/failed_timeout": timeout_flag,
+            }
+
     async def fit(self):
         logger = Tracking(
             project_name=self.config.trainer.project_name,
@@ -1468,6 +1583,9 @@ class StarRayTrainer:
         watchdog_task = None
         if self._stall_detect_seconds > 0:
             watchdog_task = asyncio.create_task(self._stall_watchdog(watchdog_stop))
+        old_worker_call_timeout = os.environ.get("STAR_WORKER_CALL_TIMEOUT_SECONDS")
+        if self._worker_call_timeout_seconds > 0:
+            os.environ["STAR_WORKER_CALL_TIMEOUT_SECONDS"] = str(self._worker_call_timeout_seconds)
         try:
             global_step = self._load_checkpoint()
             self._global_step = global_step
@@ -1478,7 +1596,7 @@ class StarRayTrainer:
 
             if val_before_train:
                 print(f"[star] pre-train validation start epoch={start_epoch} global_step={global_step}")
-                val_metrics = await self._run_validation(epoch=start_epoch, global_step=global_step)
+                val_metrics = await self._run_validation_safe(epoch=start_epoch, global_step=global_step)
                 self._log_metrics(logger, val_metrics, global_step)
                 print(f"[star] pre-train validation={val_metrics}")
                 self._mark_progress(stage="pre_train_validation_done", step=global_step)
@@ -1543,11 +1661,31 @@ class StarRayTrainer:
                         empty_reward_streak = 0
 
                         commit_t0 = time.time()
-                        commit_metrics = self._commit_rewards(rewards)
+                        commit_metrics, commit_ok = self._commit_rewards_safe(
+                            rewards,
+                            stage="training",
+                            step=global_step,
+                        )
                         commit_s = time.time() - commit_t0
                         self._mark_progress(stage="train_commit_done", step=global_step)
                         sync_t0 = time.time()
-                        sync_metrics = await self._global_sync_and_update()
+                        if commit_ok:
+                            try:
+                                sync_metrics = await self._global_sync_and_update()
+                            except Exception as exc:
+                                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+                                print(
+                                    f"[star] global_sync_and_update failed: step={global_step} "
+                                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                                )
+                                sync_metrics = {
+                                    "training/sync_failed": 1.0,
+                                    "training/sync_failed_timeout": timeout_flag,
+                                }
+                        else:
+                            sync_metrics = {
+                                "training/sync_skipped_due_to_commit_failed": 1.0,
+                            }
                         sync_update_s = time.time() - sync_t0
                         self._mark_progress(stage="train_sync_update_done", step=global_step)
 
@@ -1588,7 +1726,7 @@ class StarRayTrainer:
 
                         is_last_step = global_step >= self.total_training_steps
                         if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
-                            val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
+                            val_metrics = await self._run_validation_safe(epoch=epoch, global_step=global_step)
                             self._log_metrics(logger, val_metrics, global_step)
                             print(f"[star] step={global_step} validation={val_metrics}")
                             self._mark_progress(stage="train_periodic_validation_done", step=global_step)
@@ -1596,14 +1734,33 @@ class StarRayTrainer:
                         if self.config.trainer.save_freq > 0 and (
                             is_last_step or global_step % self.config.trainer.save_freq == 0
                         ):
-                            self._save_checkpoint(global_step)
-                            self._mark_progress(stage="train_checkpoint_saved", step=global_step)
+                            try:
+                                self._save_checkpoint(global_step)
+                                self._mark_progress(stage="train_checkpoint_saved", step=global_step)
+                            except Exception as exc:
+                                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+                                print(
+                                    f"[star] checkpoint save failed: step={global_step} "
+                                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                                )
+                                self._log_metrics(
+                                    logger,
+                                    {
+                                        "training/checkpoint_failed": 1.0,
+                                        "training/checkpoint_failed_timeout": timeout_flag,
+                                    },
+                                    global_step,
+                                )
                 finally:
                     train_iter.close()
 
                 if global_step >= self.total_training_steps:
                     break
         finally:
+            if old_worker_call_timeout is None:
+                os.environ.pop("STAR_WORKER_CALL_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["STAR_WORKER_CALL_TIMEOUT_SECONDS"] = old_worker_call_timeout
             if watchdog_task is not None:
                 watchdog_stop.set()
                 await watchdog_task
