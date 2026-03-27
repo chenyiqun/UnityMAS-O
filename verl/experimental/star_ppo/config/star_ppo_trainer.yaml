@@ -26,9 +26,12 @@ star:
     name: single_agent
     max_inflight_queries: 64
     max_parallel_rollouts_per_model: 32
+    query_timeout_seconds: 0
+    tool_timeout_seconds: 0
   buffer:
     max_items: 100000
     ttl_seconds: 7200
+    dropped_query_ttl_seconds: 120
   reward:
     mode: streaming
     emit_intermediate_format: true

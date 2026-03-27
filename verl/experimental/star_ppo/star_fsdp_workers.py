@@ -217,7 +217,12 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         buffer_cfg = config.get("star_buffer", {})
         max_items = int(buffer_cfg.get("max_items", 100000))
         ttl_seconds = int(buffer_cfg.get("ttl_seconds", 7200))
-        self._traj_buffer = TrajectoryBuffer(max_items=max_items, ttl_seconds=ttl_seconds)
+        dropped_query_ttl_seconds = int(buffer_cfg.get("dropped_query_ttl_seconds", 120))
+        self._traj_buffer = TrajectoryBuffer(
+            max_items=max_items,
+            ttl_seconds=ttl_seconds,
+            dropped_query_ttl_seconds=dropped_query_ttl_seconds,
+        )
         self._weight_sync_group_name = "actor_rollout"
         self._weight_sync_mode = "collective"
 
@@ -456,6 +461,20 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             committed += int(ok)
 
         return {"star/committed": committed, "star/reward_in": len(traj_ids), **self._traj_buffer.stats()}
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def drop_queries(self, query_ids: list[str]) -> dict:
+        if not isinstance(query_ids, list | tuple) or len(query_ids) == 0:
+            return {"star/dropped_queries": 0, "star/purged_traj": 0, **self._traj_buffer.stats()}
+        normalized = [str(q).strip() for q in query_ids if str(q).strip()]
+        if len(normalized) == 0:
+            return {"star/dropped_queries": 0, "star/purged_traj": 0, **self._traj_buffer.stats()}
+        purged = self._traj_buffer.mark_queries_dropped(normalized)
+        return {
+            "star/dropped_queries": len(set(normalized)),
+            "star/purged_traj": int(purged),
+            **self._traj_buffer.stats(),
+        }
 
     def _empty_batch(self) -> DataProto:
         return DataProto.from_dict(non_tensors={"traj_id": np.array([], dtype=object)})

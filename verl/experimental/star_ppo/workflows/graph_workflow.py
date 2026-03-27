@@ -21,6 +21,10 @@ from verl.utils.reward_score.search_r1_like_qa_em import em_check
 logger = logging.getLogger(__name__)
 
 
+class ToolNodeTimeoutError(TimeoutError):
+    """Raised when a tool node exceeds configured timeout."""
+
+
 class GraphWorkflowRunner(WorkflowRunner):
     """Configurable query-level workflow graph runner.
 
@@ -65,6 +69,12 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.llm_timeout_seconds = float(
             self.workflow_cfg.get("llm_timeout_seconds", os.environ.get("STAR_LLM_TIMEOUT_SECONDS", 0))
         )
+        self.query_timeout_seconds = float(
+            self.workflow_cfg.get("query_timeout_seconds", os.environ.get("STAR_QUERY_TIMEOUT_SECONDS", 0))
+        )
+        self.tool_timeout_seconds = float(
+            self.workflow_cfg.get("tool_timeout_seconds", os.environ.get("STAR_TOOL_TIMEOUT_SECONDS", 0))
+        )
         self.question_candidates = list(
             self.workflow_cfg.get("question_candidates", ["question", "query", "problem", "extra_info.question"])
         )
@@ -103,6 +113,12 @@ class GraphWorkflowRunner(WorkflowRunner):
             1, int(debug_cfg.get("every_n_batches", os.environ.get("STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES", 20)))
         )
         self._debug_batch_counter = 0
+        self._last_dropped_query_ids: list[str] = []
+
+    def pop_dropped_query_ids(self) -> list[str]:
+        dropped = self._last_dropped_query_ids
+        self._last_dropped_query_ids = []
+        return dropped
 
     def _build_tools(self) -> dict[str, Any]:
         tools = {}
@@ -704,6 +720,18 @@ class GraphWorkflowRunner(WorkflowRunner):
                 input_value = self._render_template(str(node_cfg.get("input_template", "{question}")), context)
             top_k = int(node_cfg.get("top_k", 3))
             queries: list[str] = []
+            async def _run_tool_call(func, *args, **kwargs):
+                if self.tool_timeout_seconds > 0:
+                    try:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(func, *args, **kwargs),
+                            timeout=self.tool_timeout_seconds,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise ToolNodeTimeoutError(
+                            f"tool node timeout: node={node_id} tool={tool_name} timeout_s={self.tool_timeout_seconds}"
+                        ) from exc
+                return await asyncio.to_thread(func, *args, **kwargs)
             try:
                 if batch_queries:
                     if isinstance(input_value, np.ndarray):
@@ -715,19 +743,19 @@ class GraphWorkflowRunner(WorkflowRunner):
                     queries = [str(item).strip() for item in raw_queries if str(item).strip()]
                     max_attempts = int(node_cfg.get("max_attempts", 5))
                     if hasattr(tool, "retrieve_many"):
-                        output = await asyncio.to_thread(tool.retrieve_many, queries, top_k)
+                        output = await _run_tool_call(tool.retrieve_many, queries, top_k)
                     elif hasattr(tool, "query_many"):
                         try:
-                            output = await asyncio.to_thread(
+                            output = await _run_tool_call(
                                 tool.query_many,
                                 questions=queries,
                                 N=top_k,
                                 max_attempts=max_attempts,
                             )
                         except TypeError:
-                            output = await asyncio.to_thread(tool.query_many, queries, top_k, max_attempts)
+                            output = await _run_tool_call(tool.query_many, queries, top_k, max_attempts)
                     else:
-                        output = await asyncio.to_thread(
+                        output = await _run_tool_call(
                             lambda: [tool.retrieve(query=q, top_k=top_k) for q in queries]
                         )
                 elif hasattr(tool, "query"):
@@ -736,22 +764,25 @@ class GraphWorkflowRunner(WorkflowRunner):
                     # Prefer legacy named args used by RetrievalTool(question, N, max_attempts),
                     # then fallback to positional for custom tool implementations.
                     try:
-                        output = await asyncio.to_thread(
+                        output = await _run_tool_call(
                             tool.query,
                             question=input_text,
                             N=top_k,
                             max_attempts=max_attempts,
                         )
                     except TypeError:
-                        output = await asyncio.to_thread(tool.query, input_text, top_k, max_attempts)
+                        output = await _run_tool_call(tool.query, input_text, top_k, max_attempts)
                 elif hasattr(tool, "retrieve"):
                     input_text = str(input_value)
-                    output = await asyncio.to_thread(tool.retrieve, input_text, top_k)
+                    output = await _run_tool_call(tool.retrieve, input_text, top_k)
                 elif callable(tool):
-                    output = await asyncio.to_thread(tool, input_value)
+                    output = await _run_tool_call(tool, input_value)
                 else:
                     raise TypeError(f"tool {tool_name} is not callable and has no query()/retrieve()")
             except Exception as exc:
+                drop_on_timeout = bool(node_cfg.get("drop_on_timeout", True))
+                if isinstance(exc, ToolNodeTimeoutError) and drop_on_timeout:
+                    raise
                 if not fail_open:
                     raise
                 query_id = self._extract_from_batch(query_batch, "query_id")
@@ -975,6 +1006,99 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "query_elapsed_s": float(time.perf_counter() - query_start),
             }
 
+    async def _run_one_query_safe(
+        self,
+        query_batch: DataProto,
+        query_sem: asyncio.Semaphore,
+        query_local_idx: int,
+        debug_query_idx: int | None,
+        debug_batch_idx: int,
+    ) -> dict[str, Any]:
+        query_id = str(self._extract_from_batch(query_batch, "query_id") or "")
+        query_start = time.perf_counter()
+        try:
+            if self.query_timeout_seconds > 0:
+                return await asyncio.wait_for(
+                    self._run_one_query(
+                        query_batch,
+                        query_sem,
+                        query_local_idx=query_local_idx,
+                        debug_query_idx=debug_query_idx,
+                        debug_batch_idx=debug_batch_idx,
+                    ),
+                    timeout=self.query_timeout_seconds,
+                )
+            return await self._run_one_query(
+                query_batch,
+                query_sem,
+                query_local_idx=query_local_idx,
+                debug_query_idx=debug_query_idx,
+                debug_batch_idx=debug_batch_idx,
+            )
+        except asyncio.TimeoutError as exc:
+            if isinstance(exc, ToolNodeTimeoutError):
+                logger.warning(
+                    "[star-query-drop] node timeout dropped: query_id=%s idx=%s err=%r",
+                    query_id,
+                    query_local_idx,
+                    exc,
+                )
+                return {
+                    "reward_parts": [],
+                    "outcome_reward": 0.0,
+                    "node_format": {},
+                    "llm_node_count": 0.0,
+                    "debug_dump": None,
+                    "llm_length_records": [],
+                    "node_timing_records": [],
+                    "query_elapsed_s": float(time.perf_counter() - query_start),
+                    "dropped": True,
+                    "drop_reason": "node_timeout",
+                    "drop_error": str(exc),
+                    "drop_query_id": query_id,
+                }
+            logger.warning(
+                "[star-query-drop] query timeout dropped: query_id=%s idx=%s timeout_s=%.1f",
+                query_id,
+                query_local_idx,
+                float(self.query_timeout_seconds),
+            )
+            return {
+                "reward_parts": [],
+                "outcome_reward": 0.0,
+                "node_format": {},
+                "llm_node_count": 0.0,
+                "debug_dump": None,
+                "llm_length_records": [],
+                "node_timing_records": [],
+                "query_elapsed_s": float(time.perf_counter() - query_start),
+                "dropped": True,
+                "drop_reason": "query_timeout",
+                "drop_error": str(exc),
+                "drop_query_id": query_id,
+            }
+        except Exception as exc:
+            logger.warning(
+                "[star-query-drop] query error dropped: query_id=%s idx=%s err=%r",
+                query_id,
+                query_local_idx,
+                exc,
+            )
+            return {
+                "reward_parts": [],
+                "outcome_reward": 0.0,
+                "node_format": {},
+                "llm_node_count": 0.0,
+                "debug_dump": None,
+                "llm_length_records": [],
+                "node_timing_records": [],
+                "query_elapsed_s": float(time.perf_counter() - query_start),
+                "dropped": True,
+                "drop_reason": "query_error",
+                "drop_error": f"{type(exc).__name__}: {exc}",
+                "drop_query_id": query_id,
+            }
+
     async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
         del epoch
         batch_start = time.perf_counter()
@@ -988,7 +1112,7 @@ class GraphWorkflowRunner(WorkflowRunner):
 
         query_sem = asyncio.Semaphore(max(1, self.max_inflight_queries))
         tasks = [
-            self._run_one_query(
+            self._run_one_query_safe(
                 batch.select_idxs([i]),
                 query_sem,
                 query_local_idx=i,
@@ -1009,6 +1133,8 @@ class GraphWorkflowRunner(WorkflowRunner):
         reward_parts = []
         outcome_rewards = []
         llm_node_counts = []
+        dropped_query_ids: list[str] = []
+        drop_reason_acc = defaultdict(int)
         node_format_acc = defaultdict(list)
         node_prompt_len_acc = defaultdict(list)
         node_output_len_acc = defaultdict(list)
@@ -1071,6 +1197,14 @@ class GraphWorkflowRunner(WorkflowRunner):
         llm_timing_by_id = {field: defaultdict(list) for field in llm_timing_fields}
         llm_timing_by_group = {field: defaultdict(list) for field in llm_timing_fields}
         for item in query_results:
+            if bool(item.get("dropped", False)):
+                query_id = str(item.get("drop_query_id", "") or "")
+                if query_id:
+                    dropped_query_ids.append(query_id)
+                reason = str(item.get("drop_reason", "unknown") or "unknown")
+                drop_reason_acc[reason] += 1
+                query_elapsed_acc.append(float(item.get("query_elapsed_s", 0.0)))
+                continue
             reward_parts.extend(item["reward_parts"])
             outcome_rewards.append(item["outcome_reward"])
             llm_node_counts.append(item["llm_node_count"])
@@ -1120,9 +1254,14 @@ class GraphWorkflowRunner(WorkflowRunner):
 
         metrics = {
             "workflow/samples": float(len(query_results)),
+            "workflow/query_dropped": float(len(dropped_query_ids)),
+            "workflow/query_drop_ratio": float(len(dropped_query_ids) / max(1, len(query_results))),
             "workflow/outcome_reward_mean": float(np.mean(outcome_rewards)) if outcome_rewards else 0.0,
             "workflow/llm_nodes_per_query_mean": float(np.mean(llm_node_counts)) if llm_node_counts else 0.0,
         }
+        for reason, count in drop_reason_acc.items():
+            safe_reason = self._sanitize_metric_key(reason)
+            metrics[f"workflow/query_drop/{safe_reason}"] = float(count)
         for node_id, values in node_format_acc.items():
             metrics[f"workflow/node/{node_id}/format_reward_mean"] = float(np.mean(values)) if values else 0.0
         for node_id, values in node_prompt_len_acc.items():
@@ -1179,4 +1318,5 @@ class GraphWorkflowRunner(WorkflowRunner):
                     metrics[f"workflow/timing/group/{group}_{field}_mean"] = float(np.mean(values))
                     metrics[f"workflow/timing/group/{group}_{field}_max"] = float(np.max(values))
         metrics["workflow/timing/batch_total_s"] = float(time.perf_counter() - batch_start)
+        self._last_dropped_query_ids = dropped_query_ids
         return rewards, metrics

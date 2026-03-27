@@ -12,6 +12,7 @@ import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf, open_dict
+from ray.exceptions import GetTimeoutError
 from ray.util.collective import collective
 from torch.utils.data import DataLoader, Dataset, Sampler
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -96,6 +97,16 @@ class StarRayTrainer:
         self._timing_group_topk = max(1, int(os.environ.get("STAR_TIMING_GROUP_TOPK", "8")))
         wandb_timing_filter_flag = str(os.environ.get("STAR_WANDB_FILTER_FINE_TIMING", "true")).strip().lower()
         self._wandb_filter_fine_timing = wandb_timing_filter_flag in {"1", "true", "yes", "on"}
+        self._ray_get_timeout_seconds = float(os.environ.get("STAR_RAY_GET_TIMEOUT_SECONDS", "0"))
+        self._weight_sync_timeout_seconds = float(
+            os.environ.get("STAR_WEIGHT_SYNC_TIMEOUT_SECONDS", self._ray_get_timeout_seconds)
+        )
+        self._workflow_batch_timeout_seconds = float(os.environ.get("STAR_WORKFLOW_BATCH_TIMEOUT_SECONDS", "0"))
+        self._stall_detect_seconds = float(os.environ.get("STAR_STALL_DETECT_SECONDS", "0"))
+        self._stall_heartbeat_seconds = float(os.environ.get("STAR_STALL_HEARTBEAT_SECONDS", "30"))
+        self._last_progress_ts = time.time()
+        self._last_progress_stage = "init"
+        self._last_progress_step = 0
         self.workflow_runner = self._create_workflow_runner()
         if self.config.algorithm.use_kl_in_reward:
             for model_id in self.model_ids:
@@ -160,6 +171,55 @@ class StarRayTrainer:
                     self.config.critic.optim.total_training_steps = total_training_steps
         except Exception:
             pass
+
+    def _mark_progress(self, stage: str, step: Optional[int] = None) -> None:
+        self._last_progress_ts = time.time()
+        self._last_progress_stage = str(stage)
+        if step is not None:
+            self._last_progress_step = int(step)
+
+    async def _stall_watchdog(self, stop_event: asyncio.Event) -> None:
+        if self._stall_detect_seconds <= 0:
+            return
+        interval = max(5.0, min(self._stall_heartbeat_seconds, self._stall_detect_seconds))
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+                break
+            except asyncio.TimeoutError:
+                pass
+            stalled_for = time.time() - self._last_progress_ts
+            if stalled_for < self._stall_detect_seconds:
+                continue
+            print(
+                f"[star-watchdog] no progress for {stalled_for:.1f}s "
+                f"(stage={self._last_progress_stage}, step={self._last_progress_step}, "
+                f"inflight={int(self.config.star.workflow.get('max_inflight_queries', 32))})"
+            )
+
+    @staticmethod
+    def _flatten_object_refs(value) -> list[ray.ObjectRef]:
+        if isinstance(value, ray.ObjectRef):
+            return [value]
+        if isinstance(value, list | tuple):
+            out: list[ray.ObjectRef] = []
+            for item in value:
+                out.extend(StarRayTrainer._flatten_object_refs(item))
+            return out
+        return []
+
+    def _ray_get_with_timeout(self, refs, timeout_s: float, op_name: str):
+        obj_refs = self._flatten_object_refs(refs)
+        if not obj_refs:
+            return refs
+        try:
+            if timeout_s > 0:
+                return ray.get(obj_refs, timeout=timeout_s)
+            return ray.get(obj_refs)
+        except GetTimeoutError as exc:
+            raise TimeoutError(
+                f"Ray get timeout: op={op_name} timeout_s={timeout_s} refs={len(obj_refs)}"
+            ) from exc
 
     def _clone_actor_rollout_cfg_for_model(self, model_id: str):
         cfg = OmegaConf.create(OmegaConf.to_container(self.config.actor_rollout_ref, resolve=True))
@@ -425,7 +485,11 @@ class StarRayTrainer:
                     master_address, master_port, len(ctx.actor_wg.workers), n_workers
                 )
                 try:
-                    ray.get(_to_ref_list(actor_refs) + _to_ref_list(rollout_refs))
+                    self._ray_get_with_timeout(
+                        _to_ref_list(actor_refs) + _to_ref_list(rollout_refs),
+                        timeout_s=self._weight_sync_timeout_seconds,
+                        op_name=f"create_weight_sync_group(model={model_id},attempt={attempt + 1})",
+                    )
                     last_err = None
                     print(f"[star] stateless weight sync ready model={model_id}")
                     break
@@ -436,10 +500,14 @@ class StarRayTrainer:
             if last_err is not None:
                 raise last_err
 
-    @staticmethod
-    def _sync_rollout_weights(model_id: str, ctx: ModelWorkerContext):
-        ctx.actor_wg.sync_rollout_weights()
-        ray.get(ctx.rollout_wg.sync_rollout_weights())
+    def _sync_rollout_weights(self, model_id: str, ctx: ModelWorkerContext):
+        actor_refs = ctx.actor_wg.sync_rollout_weights()
+        rollout_refs = ctx.rollout_wg.sync_rollout_weights()
+        self._ray_get_with_timeout(
+            [actor_refs, rollout_refs],
+            timeout_s=self._weight_sync_timeout_seconds,
+            op_name=f"sync_rollout_weights(model={model_id})",
+        )
 
     def _ensure_routing_fields(self, batch: DataProto):
         bsz = len(batch)
@@ -839,6 +907,66 @@ class StarRayTrainer:
                 metrics[f"agent/{agent_id}/reward_mean"] = float(np.mean(reward_vec[mask]))
                 metrics[f"agent/{agent_id}/samples"] = float(np.sum(mask))
         return metrics
+
+    def _collect_workflow_dropped_query_ids(self) -> list[str]:
+        getter = getattr(self.workflow_runner, "pop_dropped_query_ids", None)
+        if not callable(getter):
+            return []
+        try:
+            query_ids = getter()
+        except Exception as exc:
+            print(f"[star] failed to collect dropped query ids from workflow runner: {exc}")
+            return []
+        if not isinstance(query_ids, list | tuple):
+            return []
+        return [str(q).strip() for q in query_ids if str(q).strip()]
+
+    def _drop_queries_from_rollout_buffers(self, query_ids: list[str]) -> dict[str, float]:
+        if not query_ids:
+            return {}
+        unique_ids = list(dict.fromkeys(query_ids))
+        metrics: dict[str, float] = {
+            "workflow/query_dropped_cleanup": float(len(unique_ids)),
+        }
+        for model_id, ctx in self.model_contexts.items():
+            outputs = ctx.rollout_wg.drop_queries(unique_ids)
+            reduced = self._reduce_worker_metrics(outputs)
+            for key, val in reduced.items():
+                metrics[f"model/{model_id}/{key}"] = float(val)
+        return metrics
+
+    async def _run_workflow_batch(self, batch: DataProto, epoch: int, stage: str) -> tuple[DataProto, dict[str, float]]:
+        timeout_s = float(self._workflow_batch_timeout_seconds)
+        try:
+            if timeout_s > 0:
+                rewards, workflow_metrics = await asyncio.wait_for(
+                    self.workflow_runner.run_batch(batch, epoch),
+                    timeout=timeout_s,
+                )
+            else:
+                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+        except asyncio.TimeoutError:
+            query_ids = []
+            if "query_id" in batch.non_tensor_batch:
+                query_ids = [str(q).strip() for q in batch.non_tensor_batch["query_id"] if str(q).strip()]
+            print(
+                f"[star] workflow batch timeout: stage={stage} timeout_s={timeout_s} "
+                f"batch_size={len(batch)} dropped_queries={len(query_ids)}"
+            )
+            cleanup_metrics = self._drop_queries_from_rollout_buffers(query_ids)
+            timeout_metrics: dict[str, float] = {
+                "workflow/query_dropped": float(len(query_ids)),
+                "workflow/query_drop_ratio": float(len(query_ids) / max(1, len(batch))),
+                "workflow/query_drop/workflow_batch_timeout": float(len(query_ids)),
+            }
+            timeout_metrics.update(cleanup_metrics)
+            return self._empty_rewards(), timeout_metrics
+
+        dropped_query_ids = self._collect_workflow_dropped_query_ids()
+        drop_cleanup_metrics = self._drop_queries_from_rollout_buffers(dropped_query_ids)
+        if drop_cleanup_metrics:
+            workflow_metrics.update(drop_cleanup_metrics)
+        return rewards, workflow_metrics
 
     @staticmethod
     def _reduce_worker_metrics(worker_outputs) -> dict[str, float]:
@@ -1245,6 +1373,7 @@ class StarRayTrainer:
             for batch_idx, batch_dict in val_iter:
                 if max_batches > 0 and batch_idx >= max_batches:
                     break
+                self._mark_progress(stage=f"val_batch_start_{batch_idx}", step=global_step)
                 batch_start = time.time()
                 batch_count += 1
                 batch = DataProto.from_single_dict(batch_dict)
@@ -1255,7 +1384,7 @@ class StarRayTrainer:
                     )
                 self._ensure_routing_fields(batch)
                 workflow_t0 = time.time()
-                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+                rewards, workflow_metrics = await self._run_workflow_batch(batch, epoch, stage="validation")
                 workflow_wall_s = time.time() - workflow_t0
                 workflow_metrics["workflow/timing/validation_workflow_wall_s"] = float(workflow_wall_s)
                 commit_s = 0.0
@@ -1305,6 +1434,7 @@ class StarRayTrainer:
                     },
                     refresh=False,
                 )
+                self._mark_progress(stage=f"val_batch_done_{batch_idx}", step=global_step)
         finally:
             val_iter.close()
 
@@ -1334,129 +1464,146 @@ class StarRayTrainer:
             f"[star] tracking_backends={list(logger.logger.keys())} "
             f"wandb_fine_timing_filter={self._wandb_filter_fine_timing}"
         )
+        watchdog_stop = asyncio.Event()
+        watchdog_task = None
+        if self._stall_detect_seconds > 0:
+            watchdog_task = asyncio.create_task(self._stall_watchdog(watchdog_stop))
+        try:
+            global_step = self._load_checkpoint()
+            self._global_step = global_step
+            self._mark_progress(stage="fit_start", step=global_step)
+            start_epoch = global_step // max(1, len(self.train_dataloader))
+            val_before_train = bool(self.config.trainer.get("val_before_train", False))
+            test_freq = int(self.config.trainer.get("test_freq", -1))
 
-        global_step = self._load_checkpoint()
-        self._global_step = global_step
-        start_epoch = global_step // max(1, len(self.train_dataloader))
-        val_before_train = bool(self.config.trainer.get("val_before_train", False))
-        test_freq = int(self.config.trainer.get("test_freq", -1))
+            if val_before_train:
+                print(f"[star] pre-train validation start epoch={start_epoch} global_step={global_step}")
+                val_metrics = await self._run_validation(epoch=start_epoch, global_step=global_step)
+                self._log_metrics(logger, val_metrics, global_step)
+                print(f"[star] pre-train validation={val_metrics}")
+                self._mark_progress(stage="pre_train_validation_done", step=global_step)
 
-        if val_before_train:
-            print(f"[star] pre-train validation start epoch={start_epoch} global_step={global_step}")
-            val_metrics = await self._run_validation(epoch=start_epoch, global_step=global_step)
-            self._log_metrics(logger, val_metrics, global_step)
-            print(f"[star] pre-train validation={val_metrics}")
+            if bool(self.config.trainer.get("val_only", False)):
+                return
 
-        if bool(self.config.trainer.get("val_only", False)):
-            return
+            for epoch in range(start_epoch, self.config.trainer.total_epochs):
+                empty_reward_streak = 0
+                resume_batch_offset = 0
+                if self._train_loader_state_loaded and epoch == start_epoch and len(self.train_dataloader) > 0:
+                    resume_batch_offset = int(global_step % len(self.train_dataloader))
+                train_iter = tqdm(
+                    enumerate(self.train_dataloader),
+                    total=len(self.train_dataloader),
+                    desc=f"[star-train] e{epoch}",
+                    initial=resume_batch_offset,
+                    leave=True,
+                    dynamic_ncols=True,
+                    disable=tqdm_disable,
+                )
+                try:
+                    for _, batch_dict in train_iter:
+                        global_step += 1
+                        self._global_step = global_step
+                        self._mark_progress(stage="train_step_start", step=global_step)
+                        if global_step > self.total_training_steps:
+                            break
 
-        for epoch in range(start_epoch, self.config.trainer.total_epochs):
-            empty_reward_streak = 0
-            resume_batch_offset = 0
-            if self._train_loader_state_loaded and epoch == start_epoch and len(self.train_dataloader) > 0:
-                resume_batch_offset = int(global_step % len(self.train_dataloader))
-            train_iter = tqdm(
-                enumerate(self.train_dataloader),
-                total=len(self.train_dataloader),
-                desc=f"[star-train] e{epoch}",
-                initial=resume_batch_offset,
-                leave=True,
-                dynamic_ncols=True,
-                disable=tqdm_disable,
-            )
-            try:
-                for _, batch_dict in train_iter:
-                    global_step += 1
-                    self._global_step = global_step
-                    if global_step > self.total_training_steps:
-                        break
+                        batch = DataProto.from_single_dict(batch_dict)
+                        self._ensure_routing_fields(batch)
+                        workflow_t0 = time.time()
+                        rewards, workflow_metrics = await self._run_workflow_batch(batch, epoch, stage="train")
+                        workflow_wall_s = time.time() - workflow_t0
+                        workflow_metrics["workflow/timing/train_workflow_wall_s"] = float(workflow_wall_s)
+                        self._mark_progress(stage="train_workflow_done", step=global_step)
+                        if len(rewards) == 0:
+                            empty_reward_streak += 1
+                            empty_metrics = {
+                                "training/global_step": float(global_step),
+                                "training/epoch": float(epoch),
+                                "training/timing/workflow_wall_s": float(workflow_wall_s),
+                                **workflow_metrics,
+                                "workflow/empty_reward_batch": 1.0,
+                                "workflow/empty_reward_streak": float(empty_reward_streak),
+                            }
+                            self._print_batch_timing(
+                                stage="train",
+                                batch_idx=global_step,
+                                batch_size=len(batch),
+                                metrics=empty_metrics,
+                                extra_timings={
+                                    "workflow_wall_s": workflow_wall_s,
+                                },
+                            )
+                            self._log_metrics(logger, empty_metrics, global_step)
+                            if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
+                                print(f"[star] step={global_step} empty_reward_batch streak={empty_reward_streak}")
+                            train_iter.set_postfix({"gstep": int(global_step), "samples": 0}, refresh=False)
+                            self._mark_progress(stage="train_empty_batch_done", step=global_step)
+                            continue
+                        empty_reward_streak = 0
 
-                    batch = DataProto.from_single_dict(batch_dict)
-                    self._ensure_routing_fields(batch)
-                    workflow_t0 = time.time()
-                    rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
-                    workflow_wall_s = time.time() - workflow_t0
-                    workflow_metrics["workflow/timing/train_workflow_wall_s"] = float(workflow_wall_s)
-                    if len(rewards) == 0:
-                        empty_reward_streak += 1
-                        empty_metrics = {
+                        commit_t0 = time.time()
+                        commit_metrics = self._commit_rewards(rewards)
+                        commit_s = time.time() - commit_t0
+                        self._mark_progress(stage="train_commit_done", step=global_step)
+                        sync_t0 = time.time()
+                        sync_metrics = await self._global_sync_and_update()
+                        sync_update_s = time.time() - sync_t0
+                        self._mark_progress(stage="train_sync_update_done", step=global_step)
+
+                        step_metrics = {
                             "training/global_step": float(global_step),
                             "training/epoch": float(epoch),
                             "training/timing/workflow_wall_s": float(workflow_wall_s),
+                            "training/timing/commit_s": float(commit_s),
+                            "training/timing/sync_update_s": float(sync_update_s),
                             **workflow_metrics,
-                            "workflow/empty_reward_batch": 1.0,
-                            "workflow/empty_reward_streak": float(empty_reward_streak),
+                            **commit_metrics,
+                            **sync_metrics,
                         }
                         self._print_batch_timing(
                             stage="train",
                             batch_idx=global_step,
                             batch_size=len(batch),
-                            metrics=empty_metrics,
+                            metrics=step_metrics,
                             extra_timings={
                                 "workflow_wall_s": workflow_wall_s,
+                                "commit_s": commit_s,
+                                "sync_update_s": sync_update_s,
                             },
                         )
-                        self._log_metrics(logger, empty_metrics, global_step)
+                        self._log_metrics(logger, step_metrics, global_step)
                         if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
-                            print(f"[star] step={global_step} empty_reward_batch streak={empty_reward_streak}")
-                        train_iter.set_postfix({"gstep": int(global_step), "samples": 0}, refresh=False)
-                        continue
-                    empty_reward_streak = 0
+                            print(f"[star] step={global_step} batch_update={step_metrics}")
 
-                    commit_t0 = time.time()
-                    commit_metrics = self._commit_rewards(rewards)
-                    commit_s = time.time() - commit_t0
-                    sync_t0 = time.time()
-                    sync_metrics = await self._global_sync_and_update()
-                    sync_update_s = time.time() - sync_t0
+                        train_iter.set_postfix(
+                            {
+                                "gstep": int(global_step),
+                                "inflight": int(self.config.star.workflow.get("max_inflight_queries", 32)),
+                                "samples": int(workflow_metrics.get("workflow/samples", 0)),
+                                "reward": float(workflow_metrics.get("workflow/outcome_reward_mean", 0.0)),
+                            },
+                            refresh=False,
+                        )
 
-                    step_metrics = {
-                        "training/global_step": float(global_step),
-                        "training/epoch": float(epoch),
-                        "training/timing/workflow_wall_s": float(workflow_wall_s),
-                        "training/timing/commit_s": float(commit_s),
-                        "training/timing/sync_update_s": float(sync_update_s),
-                        **workflow_metrics,
-                        **commit_metrics,
-                        **sync_metrics,
-                    }
-                    self._print_batch_timing(
-                        stage="train",
-                        batch_idx=global_step,
-                        batch_size=len(batch),
-                        metrics=step_metrics,
-                        extra_timings={
-                            "workflow_wall_s": workflow_wall_s,
-                            "commit_s": commit_s,
-                            "sync_update_s": sync_update_s,
-                        },
-                    )
-                    self._log_metrics(logger, step_metrics, global_step)
-                    if global_step % max(1, self.config.trainer.get("log_freq", 1)) == 0:
-                        print(f"[star] step={global_step} batch_update={step_metrics}")
+                        is_last_step = global_step >= self.total_training_steps
+                        if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
+                            val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
+                            self._log_metrics(logger, val_metrics, global_step)
+                            print(f"[star] step={global_step} validation={val_metrics}")
+                            self._mark_progress(stage="train_periodic_validation_done", step=global_step)
 
-                    train_iter.set_postfix(
-                        {
-                            "gstep": int(global_step),
-                            "inflight": int(self.config.star.workflow.get("max_inflight_queries", 32)),
-                            "samples": int(workflow_metrics.get("workflow/samples", 0)),
-                            "reward": float(workflow_metrics.get("workflow/outcome_reward_mean", 0.0)),
-                        },
-                        refresh=False,
-                    )
+                        if self.config.trainer.save_freq > 0 and (
+                            is_last_step or global_step % self.config.trainer.save_freq == 0
+                        ):
+                            self._save_checkpoint(global_step)
+                            self._mark_progress(stage="train_checkpoint_saved", step=global_step)
+                finally:
+                    train_iter.close()
 
-                    is_last_step = global_step >= self.total_training_steps
-                    if test_freq > 0 and (is_last_step or global_step % test_freq == 0):
-                        val_metrics = await self._run_validation(epoch=epoch, global_step=global_step)
-                        self._log_metrics(logger, val_metrics, global_step)
-                        print(f"[star] step={global_step} validation={val_metrics}")
-
-                    if self.config.trainer.save_freq > 0 and (
-                        is_last_step or global_step % self.config.trainer.save_freq == 0
-                    ):
-                        self._save_checkpoint(global_step)
-            finally:
-                train_iter.close()
-
-            if global_step >= self.total_training_steps:
-                break
+                if global_step >= self.total_training_steps:
+                    break
+        finally:
+            if watchdog_task is not None:
+                watchdog_stop.set()
+                await watchdog_task
