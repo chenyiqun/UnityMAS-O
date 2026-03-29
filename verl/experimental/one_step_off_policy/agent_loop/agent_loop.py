@@ -19,6 +19,7 @@ import time
 
 import numpy as np
 import ray
+from ray.exceptions import GetTimeoutError
 
 from verl.experimental.agent_loop.agent_loop import AgentLoopManager
 from verl.protocol import DataProto
@@ -111,12 +112,40 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
 
             return merged
 
+        rpc_timeout_s = float(
+            os.environ.get(
+                "STAR_WORKER_CALL_TIMEOUT_SECONDS",
+                os.environ.get("STAR_RAY_GET_TIMEOUT_SECONDS", "0"),
+            )
+        )
+
         async def _run_chunk(worker, chunk):
             if chunk.meta_info is None:
                 chunk.meta_info = {}
             chunk.meta_info["__agent_loop_dispatch_ts__"] = time.perf_counter()
             rpc_start = time.perf_counter()
-            output = await asyncio.to_thread(ray.get, worker.generate_sequences.remote(chunk))
+            obj_ref = worker.generate_sequences.remote(chunk)
+            try:
+                if rpc_timeout_s > 0:
+                    output = await asyncio.to_thread(ray.get, obj_ref, timeout=rpc_timeout_s)
+                else:
+                    output = await asyncio.to_thread(ray.get, obj_ref)
+            except GetTimeoutError as exc:
+                # Best-effort cancellation to avoid zombie RPC/task accumulation.
+                try:
+                    ray.cancel(obj_ref, force=False, recursive=False)
+                except Exception:
+                    pass
+                raise TimeoutError(
+                    f"AgentLoop worker RPC timed out: method=generate_sequences timeout_s={rpc_timeout_s}"
+                ) from exc
+            except asyncio.CancelledError:
+                # Upstream timeout/cancel should also try to release backend pressure.
+                try:
+                    ray.cancel(obj_ref, force=False, recursive=False)
+                except Exception:
+                    pass
+                raise
             return output, time.perf_counter() - rpc_start
 
         worker_rpc_start = time.perf_counter()
