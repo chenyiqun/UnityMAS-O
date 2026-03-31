@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 trainer:
-  experiment_name: star_qd_retrieve_evidence_answer_f1_7b_4node
+  experiment_name: star_qd_retrieve_evidence_answer_f1_3b_4node
   # Validation control:
   # 1) run one validation pass before training starts
   val_before_train: false
@@ -18,24 +18,24 @@ trainer:
   # 3) save checkpoint every N training steps
   save_freq: 300
   llm_engines:
-    - model_id: decompose_agent_7b
+    - model_id: decompose_agent_3b
       nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
-    - model_id: evidence_agent_7b
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-3B-Instruct
+    - model_id: evidence_agent_3b
       nnodes: 2
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
-    - model_id: answer_agent_7b
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-3B-Instruct
+    - model_id: answer_agent_3b
       nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
       strategy: fsdp2
-      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+      model_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-3B-Instruct
   routing:
     policy: epoch_dynamic
     refresh_every_epoch: true
@@ -44,8 +44,8 @@ actor_rollout_ref:
   # Star detached actor/rollout workers require hybrid_engine to be disabled.
   hybrid_engine: false
   model:
-    path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
-    tokenizer_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+    path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-3B-Instruct
+    tokenizer_path: /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-3B-Instruct
   actor:
     ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
     ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
@@ -128,7 +128,7 @@ star:
       nodes:
         decompose:
           type: llm
-          model_id: decompose_agent_7b
+          model_id: decompose_agent_3b
           agent_id: decompose_agent
           output_key: sub_queries
           parser:
@@ -186,7 +186,7 @@ star:
 
         evidence_1:
           type: llm
-          model_id: evidence_agent_7b
+          model_id: evidence_agent_3b
           agent_id: evidence_agent
           output_key: sub_evidence
           parser:
@@ -227,7 +227,7 @@ star:
 
         evidence_2:
           type: llm
-          model_id: evidence_agent_7b
+          model_id: evidence_agent_3b
           agent_id: evidence_agent
           output_key: sub_evidence
           parser:
@@ -268,7 +268,7 @@ star:
 
         evidence_3:
           type: llm
-          model_id: evidence_agent_7b
+          model_id: evidence_agent_3b
           agent_id: evidence_agent
           output_key: sub_evidence
           parser:
@@ -318,7 +318,7 @@ star:
 
         answer:
           type: llm
-          model_id: answer_agent_7b
+          model_id: answer_agent_3b
           agent_id: answer_agent
           output_key: final_answer
           parser:
