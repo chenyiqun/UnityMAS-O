@@ -30,9 +30,9 @@ class SubQEvidenceContextBuilder:
         for idx, sub_q in enumerate(sub_queries, start=1):
             if not sub_q:
                 continue
-            evidence_node = nodes.get(f"evidence_{idx}", {})
-            if isinstance(evidence_node, dict):
-                sub_ev = self._to_clean_text(evidence_node.get("sub_evidence", ""))
+            evidence_item_node = nodes.get(f"evidence_{idx}", {})
+            if isinstance(evidence_item_node, dict):
+                sub_ev = self._to_clean_text(evidence_item_node.get("sub_evidence", ""))
             else:
                 sub_ev = ""
             if not sub_ev:
