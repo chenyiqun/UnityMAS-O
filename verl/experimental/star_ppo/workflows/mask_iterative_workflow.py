@@ -532,6 +532,15 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
         else:
             final_answer_value = str(current_state.get("predicted_answer", "Unknown")).strip() or "Unknown"
 
+        used_turns = len([rec for rec in records if rec.node_id.startswith("search_")])
+        completed_turns = len(
+            [
+                rec
+                for rec in records
+                if rec.node_id.startswith("answer_") and rec.node_id not in {"answer_0"}
+            ]
+        )
+
         trace = WorkflowTrace(
             query_id=query_id,
             question=question,
@@ -543,9 +552,9 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
                 "final_answer": final_answer_value,
             },
             metrics={
-                "workflow/mask/query_elapsed_turns": float(
-                    len([rec for rec in records if rec.node_id.startswith("search_")])
-                ),
+                "workflow/mask/used_turns": float(used_turns),
+                "workflow/mask/query_elapsed_turns": float(used_turns),
+                "workflow/mask/completed_turns": float(completed_turns),
                 "workflow/mask/stopped_by_search_end": float(1.0 if terminated_by_search_end else 0.0),
             },
         )

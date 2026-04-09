@@ -188,10 +188,15 @@ class MAskTurnLevelRewardAllocator(RewardAllocator):
                 assignments.append(assignment)
                 _track_agent_components(assignment)
 
+        used_turns = float(trace.metrics.get("workflow/mask/used_turns", max_turn))
+        completed_turns = float(trace.metrics.get("workflow/mask/completed_turns", len(iter_deltas)))
+
         metrics["workflow/mask/plan_f1"] = float(plan_f1)
         metrics["workflow/mask/final_f1"] = float(final_f1)
         metrics["workflow/mask/f1_gain_over_plan"] = float(final_f1 - plan_f1)
-        metrics["workflow/mask/turns"] = float(max_turn)
+        metrics["workflow/mask/used_turns"] = float(used_turns)
+        metrics["workflow/mask/turns"] = float(used_turns)
+        metrics["workflow/mask/completed_turns"] = float(completed_turns)
         metrics["workflow/mask/search_end_count"] = float(search_end_count)
         metrics["workflow/mask/iter_delta_mean"] = float(sum(iter_deltas) / max(1, len(iter_deltas))) if iter_deltas else 0.0
         metrics["workflow/mask/reward_assignments"] = float(len(assignments))
