@@ -44,8 +44,8 @@ trainer:
 actor_rollout_ref:
   hybrid_engine: false
   model:
-    path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}
-    tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}
+    path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:REASONING_MODEL_PATH,${oc.env:PLANNING_MODEL_PATH,${oc.env:ANSWER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}}}
+    tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:REASONING_MODEL_PATH,${oc.env:PLANNING_MODEL_PATH,${oc.env:ANSWER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}}}}
   actor:
     ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
     ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
