@@ -16,7 +16,8 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 CONFIG_NAME="${CONFIG_NAME:?CONFIG_NAME is required}"
 PROJECT_NAME="${PROJECT_NAME:-}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
-WANDB_ENTITY_VALUE="${WANDB_ENTITY:-}"
+WANDB_API_KEY_VALUE="${WANDB_API_KEY:-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}"
+WANDB_ENTITY_VALUE="${WANDB_ENTITY:-1046605207-renmin-university-of-china}"
 
 if [[ -z "${HEAD_IP}" ]]; then
   echo "[common/run_per_node] ERROR: HEAD_IP is required"
@@ -44,6 +45,12 @@ export STAR_STALL_DETECT_SECONDS="${STAR_STALL_DETECT_SECONDS:-180}"
 export STAR_STALL_HEARTBEAT_SECONDS="${STAR_STALL_HEARTBEAT_SECONDS:-30}"
 export VERL_VLLM_FORCE_SHM_WEIGHT_SYNC="${VERL_VLLM_FORCE_SHM_WEIGHT_SYNC:-1}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
+if [[ -n "${WANDB_API_KEY_VALUE}" ]]; then
+  export WANDB_API_KEY="${WANDB_API_KEY_VALUE}"
+fi
+if [[ -n "${WANDB_ENTITY_VALUE}" ]]; then
+  export WANDB_ENTITY="${WANDB_ENTITY_VALUE}"
+fi
 
 if command -v gcc-12 >/dev/null 2>&1 && command -v g++-12 >/dev/null 2>&1; then
   export CC="${CC:-$(command -v gcc-12)}"
@@ -65,6 +72,10 @@ echo "[common/run_per_node] RANK=${RANK} WORLD_SIZE=${WORLD_SIZE} HEAD_IP=${HEAD
 echo "[common/run_per_node] wandb entity=${WANDB_ENTITY_VALUE:-<default>} project=${PROJECT_NAME:-<config>} experiment=${EXPERIMENT_NAME:-<config>}"
 
 if [[ "${RANK}" == "0" ]]; then
+  if [[ -n "${WANDB_API_KEY_VALUE}" ]] && command -v wandb >/dev/null 2>&1; then
+    echo "[common/run_per_node] refreshing wandb login from WANDB_API_KEY"
+    wandb login --relogin "${WANDB_API_KEY_VALUE}" >/dev/null 2>&1 || true
+  fi
   echo "[common/run_per_node] starting ray head at ${HEAD_IP}:${RAY_PORT}"
   ray start --head \
     --node-ip-address="${HEAD_IP}" \
