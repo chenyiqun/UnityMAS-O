@@ -111,7 +111,7 @@ star:
     tools:
       retriever:
         type: query_api_pool
-        api_urls: ${oc.decode:${oc.env:RETRIEVAL_API_URLS_JSON,'["http://10.158.147.72:8000/retrieve"]'}}
+        api_urls: ${oc.create:${oc.env:RETRIEVAL_API_URLS_JSON,'["http://10.158.147.72:8000/retrieve"]'}}
         timeout_seconds: ${oc.decode:${oc.env:RETRIEVAL_TIMEOUT_SECONDS,5}}
     mask:
       max_turns: ${oc.decode:${oc.env:MASK_MAX_TURNS,5}}
