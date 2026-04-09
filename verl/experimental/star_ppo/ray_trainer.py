@@ -1590,6 +1590,14 @@ class StarRayTrainer:
             global_step = self._load_checkpoint()
             self._global_step = global_step
             self._mark_progress(stage="fit_start", step=global_step)
+            self._log_metrics(
+                logger,
+                {
+                    "system/run_initialized": 1.0,
+                    "system/global_step_at_start": float(global_step),
+                },
+                global_step,
+            )
             start_epoch = global_step // max(1, len(self.train_dataloader))
             val_before_train = bool(self.config.trainer.get("val_before_train", False))
             test_freq = int(self.config.trainer.get("test_freq", -1))

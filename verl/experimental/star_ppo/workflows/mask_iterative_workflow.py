@@ -540,6 +540,11 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
                 if rec.node_id.startswith("answer_") and rec.node_id not in {"answer_0"}
             ]
         )
+        agent_call_counts: dict[str, int] = {}
+        for record in records:
+            if not record.agent_id or not record.trainable:
+                continue
+            agent_call_counts[record.agent_id] = agent_call_counts.get(record.agent_id, 0) + 1
 
         trace = WorkflowTrace(
             query_id=query_id,
@@ -556,6 +561,11 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
                 "workflow/mask/query_elapsed_turns": float(used_turns),
                 "workflow/mask/completed_turns": float(completed_turns),
                 "workflow/mask/stopped_by_search_end": float(1.0 if terminated_by_search_end else 0.0),
+                "workflow/mask/agent/planning_agent/call_count": float(agent_call_counts.get("planning_agent", 0)),
+                "workflow/mask/agent/search_agent/call_count": float(agent_call_counts.get("search_agent", 0)),
+                "workflow/mask/agent/summary_agent/call_count": float(agent_call_counts.get("summary_agent", 0)),
+                "workflow/mask/agent/update_agent/call_count": float(agent_call_counts.get("update_agent", 0)),
+                "workflow/mask/agent/answer_agent/call_count": float(agent_call_counts.get("answer_agent", 0)),
             },
         )
         if debug:

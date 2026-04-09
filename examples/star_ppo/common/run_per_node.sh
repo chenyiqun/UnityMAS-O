@@ -14,6 +14,9 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
 CPUS_PER_NODE="${CPUS_PER_NODE:-64}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 CONFIG_NAME="${CONFIG_NAME:?CONFIG_NAME is required}"
+PROJECT_NAME="${PROJECT_NAME:-}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
+WANDB_ENTITY_VALUE="${WANDB_ENTITY:-}"
 
 if [[ -z "${HEAD_IP}" ]]; then
   echo "[common/run_per_node] ERROR: HEAD_IP is required"
@@ -59,6 +62,7 @@ fi
 ray stop -f >/dev/null 2>&1 || true
 
 echo "[common/run_per_node] RANK=${RANK} WORLD_SIZE=${WORLD_SIZE} HEAD_IP=${HEAD_IP} CONFIG_NAME=${CONFIG_NAME}"
+echo "[common/run_per_node] wandb entity=${WANDB_ENTITY_VALUE:-<default>} project=${PROJECT_NAME:-<config>} experiment=${EXPERIMENT_NAME:-<config>}"
 
 if [[ "${RANK}" == "0" ]]; then
   echo "[common/run_per_node] starting ray head at ${HEAD_IP}:${RAY_PORT}"
@@ -93,11 +97,19 @@ PY
   fi
 
   echo "[common/run_per_node] launching training"
+  EXTRA_OVERRIDES=()
+  if [[ -n "${PROJECT_NAME}" ]]; then
+    EXTRA_OVERRIDES+=("trainer.project_name=${PROJECT_NAME}")
+  fi
+  if [[ -n "${EXPERIMENT_NAME}" ]]; then
+    EXTRA_OVERRIDES+=("trainer.experiment_name=${EXPERIMENT_NAME}")
+  fi
   python3 -m verl.experimental.star_ppo.main_ppo \
     --config-name "${CONFIG_NAME}" \
     trainer.nnodes="${WORLD_SIZE}" \
     trainer.n_gpus_per_node="${GPUS_PER_NODE}" \
     trainer.logger='["console","wandb"]' \
+    "${EXTRA_OVERRIDES[@]}" \
     "$@"
 else
   echo "[common/run_per_node] starting ray worker at ${HEAD_IP}:${RAY_PORT}"
