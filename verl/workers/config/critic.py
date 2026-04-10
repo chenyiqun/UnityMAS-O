@@ -86,6 +86,7 @@ class CriticConfig(BaseConfig):
     model_config: HFModelConfig = None
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
+    nccl_timeout: int = 600
 
     def __post_init__(self):
         """Validate critic configuration parameters."""
