@@ -278,7 +278,9 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             "turn_id": int(turn_id),
             "current_state": current_state,
             "knowledge_state_text": context.get("knowledge_state_text", ""),
+            "thinking_trajectory_text": context.get("thinking_trajectory_text", ""),
             "search_history_text": context.get("search_history_text", ""),
+            "search_history_queries_text": context.get("search_history_queries_text", ""),
             "latest_predicted_answer": context.get("latest_predicted_answer", "Unknown"),
         }
         out.update(extra)

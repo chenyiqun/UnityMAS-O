@@ -115,7 +115,7 @@ star:
         api_urls: ${oc.create:${oc.env:RETRIEVAL_API_URLS_JSON,'["http://10.158.147.72:8000/retrieve"]'}}
         timeout_seconds: ${oc.decode:${oc.env:RETRIEVAL_TIMEOUT_SECONDS,5}}
     mask:
-      max_turns: ${oc.decode:${oc.env:MASK_MAX_TURNS,5}}
+      max_turns: ${oc.decode:${oc.env:MASK_MAX_TURNS,3}}
       stop_on_search_end: ${oc.decode:${oc.env:MASK_STOP_ON_SEARCH_END,true}}
       reward:
         reward_final_answer: ${oc.decode:${oc.env:MASK_REWARD_FINAL_ANSWER,true}}
@@ -166,7 +166,7 @@ star:
           Input:
           - The original question
           - The current thinking trajectory
-          - The previous search history
+          - The previous search queries
 
           Task:
           1. If any sub-question still has answer 'unkown' or is still unclear, generate one new searchable query.
@@ -181,11 +181,11 @@ star:
           Original question:
           {question}
 
-          Current knowledge state:
-          {knowledge_state_text}
+          Thinking trajectory:
+          {thinking_trajectory_text}
 
-          Previous search history:
-          {search_history_text}
+          Previous search queries:
+          {search_history_queries_text}
       summary:
         model_id: summary_agent
         agent_id: summary_agent
@@ -208,12 +208,6 @@ star:
           Output exactly in one of these two formats:
           <evidence>your key evidence here</evidence>
           No useful information
-
-          Original question:
-          {question}
-
-          Current knowledge state:
-          {knowledge_state_text}
 
           Search query:
           {search_query}

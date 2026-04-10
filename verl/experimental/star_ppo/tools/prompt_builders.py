@@ -51,8 +51,6 @@ class MAskIterativeContextBuilder:
 
     _UPDATE_NODE_RE = re.compile(r"^update_(\d+)$")
     _SEARCH_NODE_RE = re.compile(r"^search_(\d+)$")
-    _SUMMARY_NODE_RE = re.compile(r"^summarize_(\d+)$")
-
     @staticmethod
     def _clean_text(value: Any, default: str = "") -> str:
         if value is None:
@@ -154,6 +152,20 @@ class MAskIterativeContextBuilder:
         return "\n".join(lines)
 
     @classmethod
+    def _format_thinking_trajectory(cls, state: dict[str, Any]) -> str:
+        if not isinstance(state, dict) or len(state) == 0:
+            return "(No trajectory yet)"
+
+        trajectory = cls._iter_trajectory_steps(state.get("thinking_trajectory", []))
+        if not trajectory:
+            return "(No trajectory yet)"
+
+        lines = []
+        for step_id, sub_question, sub_answer in trajectory:
+            lines.append(f"{step_id}: Q: {sub_question} | A: {sub_answer}")
+        return "\n".join(lines)
+
+    @classmethod
     def _extract_summary_text(cls, node_value: Any) -> str:
         if not isinstance(node_value, dict):
             return ""
@@ -201,12 +213,37 @@ class MAskIterativeContextBuilder:
                 lines.append(f"Turn {turn}: Summary: (No summary yet)")
         return "\n".join(lines)
 
+    @classmethod
+    def _format_search_history_queries(cls, nodes: dict[str, Any]) -> str:
+        query_rows: list[tuple[int, str]] = []
+        for node_id, node_value in nodes.items():
+            match = cls._SEARCH_NODE_RE.match(str(node_id))
+            if match is None or not isinstance(node_value, dict):
+                continue
+            turn = int(match.group(1))
+            decision = node_value.get("search_decision")
+            if not isinstance(decision, dict):
+                continue
+            if cls._clean_text(decision.get("action")).lower() != "search":
+                continue
+            query = cls._clean_text(decision.get("query"))
+            if query:
+                query_rows.append((turn, query))
+
+        if not query_rows:
+            return "(No previous searches)"
+
+        query_rows.sort(key=lambda item: item[0])
+        return "\n".join(f"{turn}. Query: {query}" for turn, query in query_rows)
+
     def __call__(self, value: Any) -> dict[str, str]:
         nodes = value if isinstance(value, dict) else {}
         latest_state = self._latest_knowledge_state(nodes)
         predicted_answer = self._clean_text(latest_state.get("predicted_answer"), default="Unknown")
         return {
             "knowledge_state_text": self._format_knowledge_state(latest_state),
+            "thinking_trajectory_text": self._format_thinking_trajectory(latest_state),
             "search_history_text": self._format_search_history(nodes),
+            "search_history_queries_text": self._format_search_history_queries(nodes),
             "latest_predicted_answer": predicted_answer,
         }
