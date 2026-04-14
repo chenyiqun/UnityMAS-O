@@ -102,7 +102,12 @@ star:
       enabled: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG,false}}
       sample_index: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_SAMPLE_INDEX,0}}
       max_chars: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_MAX_CHARS,200}}
+      sample_count: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_SAMPLE_COUNT,1}}
       every_n_batches: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES,20}}
+      validation_enabled: ${oc.decode:${oc.env:STAR_VAL_DEBUG,true}}
+      validation_sample_count: ${oc.decode:${oc.env:STAR_VAL_DEBUG_SAMPLE_COUNT,1}}
+      validation_every_n_batches: ${oc.decode:${oc.env:STAR_VAL_DEBUG_EVERY_N_BATCHES,1}}
+      validation_max_chars: ${oc.decode:${oc.env:STAR_VAL_DEBUG_MAX_CHARS,0}}
     runner:
       path: pkg://verl.experimental.star_ppo.workflows.mask_iterative_workflow
       name: MAskIterativeWorkflowRunner
@@ -119,8 +124,6 @@ star:
     mask:
       max_turns: ${oc.decode:${oc.env:MASK_MAX_TURNS,3}}
       stop_on_search_end: ${oc.decode:${oc.env:MASK_STOP_ON_SEARCH_END,true}}
-      reward:
-        reward_final_answer: ${oc.decode:${oc.env:MASK_REWARD_FINAL_ANSWER,true}}
       retriever:
         tool: retriever
         top_k: ${oc.decode:${oc.env:STAR_RETRIEVE_TOP_K,5}}
@@ -230,7 +233,7 @@ star:
           Input:
           - The original question
           - The current thinking trajectory
-          - The current final answer derived from the thinking trajectory
+          - The current predicted answer derived from the thinking trajectory
           - One new query and its evidence
 
           Task:
@@ -243,6 +246,9 @@ star:
 
           Current knowledge state:
           {knowledge_state_text}
+
+          New query:
+          {search_query}
 
           New evidence:
           {evidence_summary}
@@ -262,28 +268,39 @@ star:
           <final_answer>your answer here</final_answer>
           No explanation. No reasoning.
 
+          Example:
+          Question: When did the simpsons first air on television?
+          Answer: <final_answer>December 17, 1989</final_answer>
+
+          Question: When did the lightning thief book come out?
+          Answer: <final_answer>2005</final_answer>
+
+          Question: Who said i'm late i'm late for a very important date?
+          Answer: <final_answer>The White Rabbit</final_answer>
+
+          Question: Where does the short happy life of francis macomber take place?
+          Answer: <final_answer>Africa</final_answer>
+
+          Question: What was the fourth expansion pack for sims 2?
+          Answer: <final_answer>Pets</final_answer>
+
+          Question: Voice of the snake in the jungle book?
+          Answer: <final_answer>The Jungle Book (2016 film)</final_answer>
+
+          Question: How many seasons are there of star wars the clone wars?
+          Answer: <final_answer>6</final_answer>
+
+          Question: Which us president appears as a character in the play annie?
+          Answer: <final_answer>Franklin D. Roosevelt</final_answer>
+
+          Question: Are Calochone and Adlumia both plants?
+          Answer: <final_answer>yes</final_answer>
+
+          Question: Yukio Mishima and Roberto Bolaño, are Chilean?
+          Answer: <final_answer>no</final_answer>
+
           Original question:
           {question}
 
-          Current knowledge state:
-          {knowledge_state_text}
-      final_answer:
-        model_id: reasoning_agent_llm
-        agent_id: answer_agent
-        output_key: final_answer
-        parser:
-          type: raw
-        reward:
-          format_weight: ${oc.decode:${oc.env:MASK_FINAL_ANSWER_FORMAT_WEIGHT,1.0}}
-        prompt_template: |
-          You are a final answer generation assistant.
-
-          Read the final thinking trajectory and output only:
-          <final_answer>your answer here</final_answer>
-          No explanation. No reasoning.
-
-          Original question:
-          {question}
-
-          Final knowledge state:
-          {knowledge_state_text}
+          Current thinking trajectory:
+          {thinking_trajectory_text}

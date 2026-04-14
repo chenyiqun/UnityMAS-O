@@ -68,10 +68,29 @@ class TraceWorkflowRunner(WorkflowRunner):
             debug_cfg.get("sample_index", os.environ.get("STAR_WORKFLOW_DEBUG_SAMPLE_INDEX", 0))
         )
         self.debug_max_chars = int(debug_cfg.get("max_chars", os.environ.get("STAR_WORKFLOW_DEBUG_MAX_CHARS", 160)))
+        self.debug_sample_count = max(
+            1, int(debug_cfg.get("sample_count", os.environ.get("STAR_WORKFLOW_DEBUG_SAMPLE_COUNT", 1)))
+        )
         self.debug_every_n_batches = max(
             1, int(debug_cfg.get("every_n_batches", os.environ.get("STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES", 20)))
         )
-        self._debug_batch_counter = 0
+        self.validation_debug_enabled = bool(
+            debug_cfg.get(
+                "validation_enabled",
+                str(os.environ.get("STAR_VAL_DEBUG", "true")).strip().lower() in {"1", "true", "yes", "on"},
+            )
+        )
+        self.validation_debug_sample_count = max(
+            1, int(debug_cfg.get("validation_sample_count", os.environ.get("STAR_VAL_DEBUG_SAMPLE_COUNT", 1)))
+        )
+        self.validation_debug_every_n_batches = max(
+            1,
+            int(debug_cfg.get("validation_every_n_batches", os.environ.get("STAR_VAL_DEBUG_EVERY_N_BATCHES", 1))),
+        )
+        self.validation_debug_max_chars = int(
+            debug_cfg.get("validation_max_chars", os.environ.get("STAR_VAL_DEBUG_MAX_CHARS", 0))
+        )
+        self._debug_batch_counter_by_stage: dict[str, int] = defaultdict(int)
         self._last_dropped_query_ids: list[str] = []
         self.tools = self._build_tools()
         self.reward_allocator = self._create_reward_allocator()
@@ -507,18 +526,41 @@ class TraceWorkflowRunner(WorkflowRunner):
                 metric_acc[str(key)].append(float(value))
 
     @abstractmethod
-    async def run_query(self, query_batch: DataProto, query_local_idx: int, debug: bool) -> WorkflowTrace:
+    async def run_query(
+        self,
+        query_batch: DataProto,
+        query_local_idx: int,
+        debug: bool,
+        debug_max_chars: int | None = None,
+    ) -> WorkflowTrace:
         raise NotImplementedError
 
-    async def _run_one_query_safe(self, query_batch: DataProto, query_sem: asyncio.Semaphore, query_local_idx: int, debug: bool) -> WorkflowTrace:
+    async def _run_one_query_safe(
+        self,
+        query_batch: DataProto,
+        query_sem: asyncio.Semaphore,
+        query_local_idx: int,
+        debug: bool,
+        debug_max_chars: int | None = None,
+    ) -> WorkflowTrace:
         async with query_sem:
             try:
                 if self.query_timeout_seconds > 0:
                     return await asyncio.wait_for(
-                        self.run_query(query_batch, query_local_idx=query_local_idx, debug=debug),
+                        self.run_query(
+                            query_batch,
+                            query_local_idx=query_local_idx,
+                            debug=debug,
+                            debug_max_chars=debug_max_chars,
+                        ),
                         timeout=self.query_timeout_seconds,
                     )
-                return await self.run_query(query_batch, query_local_idx=query_local_idx, debug=debug)
+                return await self.run_query(
+                    query_batch,
+                    query_local_idx=query_local_idx,
+                    debug=debug,
+                    debug_max_chars=debug_max_chars,
+                )
             except asyncio.TimeoutError as exc:
                 logger.warning("[trace-workflow] query timeout dropped idx=%s err=%r", query_local_idx, exc)
                 return self._empty_trace(query_batch, reason="query_timeout", error=str(exc))
@@ -526,16 +568,30 @@ class TraceWorkflowRunner(WorkflowRunner):
                 logger.warning("[trace-workflow] query error dropped idx=%s err=%r", query_local_idx, exc)
                 return self._empty_trace(query_batch, reason="query_error", error=f"{type(exc).__name__}: {exc}")
 
-    async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
+    async def run_batch(self, batch: DataProto, epoch: int, stage: str = "train") -> tuple[DataProto, dict[str, float]]:
         del epoch
         batch_start = time.perf_counter()
-        self._debug_batch_counter += 1
-        debug_this_batch = self.debug_enabled and (
-            self._debug_batch_counter % max(1, self.debug_every_n_batches) == 0
+        stage = str(stage or "train")
+        self._debug_batch_counter_by_stage[stage] += 1
+        if stage == "validation":
+            debug_enabled = self.validation_debug_enabled
+            debug_every_n_batches = self.validation_debug_every_n_batches
+            debug_sample_count = self.validation_debug_sample_count
+            debug_max_chars = self.validation_debug_max_chars
+        else:
+            debug_enabled = self.debug_enabled
+            debug_every_n_batches = self.debug_every_n_batches
+            debug_sample_count = self.debug_sample_count
+            debug_max_chars = self.debug_max_chars
+
+        debug_this_batch = debug_enabled and (
+            self._debug_batch_counter_by_stage[stage] % max(1, debug_every_n_batches) == 0
         )
-        debug_query_idx = None
+        debug_query_indices: set[int] = set()
         if debug_this_batch and len(batch) > 0:
-            debug_query_idx = int(self.debug_sample_index) % len(batch)
+            start_idx = int(self.debug_sample_index) % len(batch)
+            sample_count = min(len(batch), max(1, int(debug_sample_count)))
+            debug_query_indices = {(start_idx + offset) % len(batch) for offset in range(sample_count)}
 
         query_sem = asyncio.Semaphore(max(1, self.max_inflight_queries))
         traces = await asyncio.gather(
@@ -544,7 +600,8 @@ class TraceWorkflowRunner(WorkflowRunner):
                     batch.select_idxs([i]),
                     query_sem,
                     query_local_idx=i,
-                    debug=bool(debug_this_batch and i == debug_query_idx),
+                    debug=bool(i in debug_query_indices),
+                    debug_max_chars=debug_max_chars,
                 )
                 for i in range(len(batch))
             ]

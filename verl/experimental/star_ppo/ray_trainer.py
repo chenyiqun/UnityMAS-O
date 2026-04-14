@@ -1000,11 +1000,11 @@ class StarRayTrainer:
         try:
             if timeout_s > 0:
                 rewards, workflow_metrics = await asyncio.wait_for(
-                    self.workflow_runner.run_batch(batch, epoch),
+                    self.workflow_runner.run_batch(batch, epoch, stage=stage),
                     timeout=timeout_s,
                 )
             else:
-                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch)
+                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch, stage=stage)
         except asyncio.TimeoutError:
             query_ids = []
             if "query_id" in batch.non_tensor_batch:

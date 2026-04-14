@@ -17,14 +17,12 @@ class MAskTurnLevelRewardAllocator(RewardAllocator):
         super().__init__(trainer=trainer, config=config, runner=runner)
         self.workflow_cfg = self.config.star.get("workflow", {})
         self.mask_cfg = dict(self.workflow_cfg.get("mask", {}))
-        self.reward_cfg = dict(self.mask_cfg.get("reward", {}))
-        self.reward_final_answer = bool(self.reward_cfg.get("reward_final_answer", True))
 
     @staticmethod
     def _record_predicted_answer(record: WorkflowExecutionRecord) -> str:
         parsed = record.parsed_output
         if isinstance(parsed, dict):
-            for key in ("predicted_answer", "final_answer", "answer"):
+            for key in ("predicted_answer", "answer"):
                 if key in parsed:
                     return str(parsed.get(key, "")).strip()
         if record.node_id == "plan" and isinstance(parsed, dict):
@@ -73,7 +71,6 @@ class MAskTurnLevelRewardAllocator(RewardAllocator):
     def allocate(self, trace: WorkflowTrace) -> tuple[list[RewardAssignment], dict[str, float]]:
         records = trace.records
         plan_record = next((rec for rec in records if rec.node_id == "plan"), None)
-        final_record = next((rec for rec in records if rec.node_id == "final_answer"), None)
 
         answers_by_turn: dict[int, WorkflowExecutionRecord] = {}
         search_by_turn: dict[int, WorkflowExecutionRecord] = {}
@@ -181,12 +178,6 @@ class MAskTurnLevelRewardAllocator(RewardAllocator):
             prev_answer_f1 = answer_f1
 
         final_f1 = float(prev_answer_f1) if prev_answer_f1 is not None else 0.0
-        if final_record is not None:
-            final_f1 = self.max_f1_score(self._record_predicted_answer(final_record), trace.ground_truth)
-            if self.reward_final_answer:
-                assignment = self._build_assignment(final_record, final_f1, "final_answer_f1")
-                assignments.append(assignment)
-                _track_agent_components(assignment)
 
         used_turns = float(trace.metrics.get("workflow/mask/used_turns", max_turn))
         completed_turns = float(trace.metrics.get("workflow/mask/completed_turns", len(iter_deltas)))

@@ -24,7 +24,6 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
         self.summary_cfg = dict(self.mask_cfg.get("summary", {}))
         self.update_cfg = dict(self.mask_cfg.get("update", {}))
         self.answer_cfg = dict(self.mask_cfg.get("answer", {}))
-        self.final_answer_cfg = dict(self.mask_cfg.get("final_answer", self.answer_cfg))
         self.retriever_cfg = dict(self.mask_cfg.get("retriever", {}))
         self.context_builder = MAskIterativeContextBuilder()
 
@@ -325,7 +324,21 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             meta={},
         )
 
-    def _build_debug_dump(self, query_local_idx: int, question: str, records: list[WorkflowExecutionRecord], final_state: dict[str, Any]) -> str:
+    def _build_debug_dump(
+        self,
+        query_local_idx: int,
+        question: str,
+        records: list[WorkflowExecutionRecord],
+        final_state: dict[str, Any],
+        debug_max_chars: int | None = None,
+    ) -> str:
+        max_chars = self.debug_max_chars if debug_max_chars is None else int(debug_max_chars)
+
+        def maybe_truncate(value: str) -> str:
+            if max_chars <= 0:
+                return value
+            return value[:max_chars]
+
         lines = [
             "[mask-debug] ===== trace begin =====",
             f"[mask-debug] query_idx={query_local_idx}",
@@ -337,13 +350,19 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
                 payload = json.dumps(payload, ensure_ascii=False)
             lines.append(
                 f"[mask-debug] turn={record.turn_id} step={record.step_id} "
-                f"node={record.node_id} agent={record.agent_id} out={str(payload)[:self.debug_max_chars]}"
+                f"node={record.node_id} agent={record.agent_id} out={maybe_truncate(str(payload))}"
             )
-        lines.append(f"[mask-debug] final_state={json.dumps(final_state, ensure_ascii=False)[:self.debug_max_chars]}")
+        lines.append(f"[mask-debug] final_state={maybe_truncate(json.dumps(final_state, ensure_ascii=False))}")
         lines.append("[mask-debug] ===== trace end =====")
         return "\n".join(lines)
 
-    async def run_query(self, query_batch: DataProto, query_local_idx: int, debug: bool) -> WorkflowTrace:
+    async def run_query(
+        self,
+        query_batch: DataProto,
+        query_local_idx: int,
+        debug: bool,
+        debug_max_chars: int | None = None,
+    ) -> WorkflowTrace:
         question = self._extract_question(query_batch)
         ground_truth = self._extract_gt_list(query_batch)
         query_id = str(self._extract_from_batch(query_batch, "query_id") or "")
@@ -513,26 +532,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             records.append(answer_record)
             step_id += 1
 
-        if not terminated_by_search_end:
-            final_ctx = self._build_prompt_context(question, nodes, current_state=current_state, turn_id=self.max_turns + 1)
-            final_record = await self._execute_llm_step(
-                query_batch=query_batch,
-                node_id="final_answer",
-                turn_id=self.max_turns + 1,
-                step_id=step_id,
-                node_cfg=self.final_answer_cfg,
-                prompt_context=final_ctx,
-                state_before=copy.deepcopy(current_state),
-                state_after=copy.deepcopy(current_state),
-            )
-            final_record.parsed_output, final_legal = self._parse_answer_output(final_record.raw_output, "final_answer")
-            self._set_record_format_reward(final_record, final_legal)
-            final_record.state_after = copy.deepcopy(current_state)
-            nodes["final_answer"] = copy.deepcopy(final_record.parsed_output)
-            records.append(final_record)
-            final_answer_value = final_record.parsed_output.get("final_answer", "Unknown")
-        else:
-            final_answer_value = str(current_state.get("predicted_answer", "Unknown")).strip() or "Unknown"
+        predicted_answer_value = str(current_state.get("predicted_answer", "Unknown")).strip() or "Unknown"
 
         used_turns = len([rec for rec in records if rec.node_id.startswith("search_")])
         completed_turns = len(
@@ -556,7 +556,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             state={
                 "nodes": nodes,
                 "knowledge_state": current_state,
-                "final_answer": final_answer_value,
+                "predicted_answer": predicted_answer_value,
             },
             metrics={
                 "workflow/mask/used_turns": float(used_turns),
@@ -571,5 +571,11 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             },
         )
         if debug:
-            trace.debug_dump = self._build_debug_dump(query_local_idx, question, records, current_state)
+            trace.debug_dump = self._build_debug_dump(
+                query_local_idx,
+                question,
+                records,
+                current_state,
+                debug_max_chars=debug_max_chars,
+            )
         return trace
