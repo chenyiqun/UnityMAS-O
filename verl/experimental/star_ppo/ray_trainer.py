@@ -561,6 +561,14 @@ class StarRayTrainer:
             self._rollout_semaphore_by_model[model_id] = asyncio.Semaphore(max(1, self._max_parallel_rollouts_per_model))
         gen_batch = self._get_gen_batch(batch)
         request_start = time.perf_counter()
+        request_bsz = int(len(gen_batch))
+        rollout_dp_size = 0
+        dp_padding_applied = 0.0
+        dp_padding_added = 0.0
+        dp_padding_factor = 1.0
+        manager_generate_s = 0.0
+        build_thin_s = 0.0
+        data_proto_pad_select_s = 0.0
         if timing_state is not None:
             timing_state["queue_wait_s"] = 0.0
             timing_state["rollout_exec_s"] = 0.0
@@ -580,6 +588,10 @@ class StarRayTrainer:
                     bsz = len(gen_batch)
                     if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
                         pad = rollout_dp_size - (bsz % rollout_dp_size)
+                        dp_padding_applied = 1.0
+                        dp_padding_added = float(pad)
+                        dp_padding_factor = float((bsz + pad) / max(1, bsz))
+                        pad_select_start = time.perf_counter()
                         padded_indices = list(range(bsz)) + [bsz - 1] * pad
                         padded_batch = gen_batch.select_idxs(padded_indices)
                         keep_mask = np.zeros((len(padded_indices),), dtype=bool)
@@ -590,29 +602,44 @@ class StarRayTrainer:
                         else:
                             keep_mask[:bsz] = True
                         padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
+                        data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
+                        build_thin_start = time.perf_counter()
                         thin_padded = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, padded_batch)
+                        build_thin_s += float(time.perf_counter() - build_thin_start)
+                        pad_select_start = time.perf_counter()
                         if bsz == 1 and len(padded_indices) >= rollout_dp_size:
                             pick_idx = int(np.argmax(keep_mask))
                             thin = thin_padded.select_idxs([pick_idx])
                         else:
                             thin = thin_padded.select_idxs(list(range(bsz)))
+                        data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
                     else:
+                        build_thin_start = time.perf_counter()
                         thin = await asyncio.to_thread(ctx.rollout_wg.generate_sequences_thin, gen_batch)
+                        build_thin_s += float(time.perf_counter() - build_thin_start)
                     worker_timing = self._extract_worker_rollout_timing(thin)
                 else:
+                    manager_start = time.perf_counter()
                     fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
+                    manager_generate_s = float(time.perf_counter() - manager_start)
                     # Avoid DataProto.union() conflicts on object-typed non-tensor fields
                     # (e.g. raw_prompt) that may be semantically equivalent but not deeply equal.
                     # The async agent-loop output already carries the required rollout tensors.
                     full_batch = fat
+                    pad_select_start = time.perf_counter()
                     for key in ("query_id", "agent_id"):
                         if key not in full_batch.non_tensor_batch and key in gen_batch.non_tensor_batch:
                             full_batch.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
+                    data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
                     bsz = len(full_batch)
                     if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
                         # ND dispatch requires equal chunks. For tiny validation/workflow batches,
                         # pad by repeating the last sample, then trim back after conversion.
                         pad = rollout_dp_size - (bsz % rollout_dp_size)
+                        dp_padding_applied = 1.0
+                        dp_padding_added = float(pad)
+                        dp_padding_factor = float((bsz + pad) / max(1, bsz))
+                        pad_select_start = time.perf_counter()
                         padded_indices = list(range(bsz)) + [bsz - 1] * pad
                         padded_batch = full_batch.select_idxs(padded_indices)
                         keep_mask = np.zeros((len(padded_indices),), dtype=bool)
@@ -623,14 +650,21 @@ class StarRayTrainer:
                         else:
                             keep_mask[:bsz] = True
                         padded_batch.non_tensor_batch["__star_keep_in_buffer__"] = keep_mask
+                        data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
+                        build_thin_start = time.perf_counter()
                         thin_padded = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, padded_batch)
+                        build_thin_s += float(time.perf_counter() - build_thin_start)
+                        pad_select_start = time.perf_counter()
                         if bsz == 1 and len(padded_indices) >= rollout_dp_size:
                             pick_idx = int(np.argmax(keep_mask))
                             thin = thin_padded.select_idxs([pick_idx])
                         else:
                             thin = thin_padded.select_idxs(list(range(bsz)))
+                        data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
                     else:
+                        build_thin_start = time.perf_counter()
                         thin = await asyncio.to_thread(ctx.rollout_wg.build_thin_from_generated, full_batch)
+                        build_thin_s += float(time.perf_counter() - build_thin_start)
                     worker_timing = self._extract_worker_rollout_timing(thin)
             finally:
                 exec_elapsed_s = float(time.perf_counter() - exec_start)
@@ -644,11 +678,27 @@ class StarRayTrainer:
                     worker_total_s = worker_timing.get("worker_total_s", None)
                     if isinstance(worker_total_s, int | float | np.integer | np.floating):
                         timing_state["rpc_overhead_s"] = float(max(exec_elapsed_s - float(worker_total_s), 0.0))
+                    timing_state["request_bsz"] = float(request_bsz)
+                    timing_state["rollout_dp_size"] = float(rollout_dp_size)
+                    timing_state["dp_padding_applied"] = float(dp_padding_applied)
+                    timing_state["dp_padding_added"] = float(dp_padding_added)
+                    timing_state["dp_padding_factor"] = float(dp_padding_factor)
+                    timing_state["manager_generate_s"] = float(manager_generate_s)
+                    timing_state["build_thin_s"] = float(build_thin_s)
+                    timing_state["data_proto_pad_select_s"] = float(data_proto_pad_select_s)
         timing_info = {
             "queue_wait_s": float(timing_state["queue_wait_s"]) if timing_state is not None else queue_wait_s,
             "rollout_exec_s": float(timing_state["rollout_exec_s"]) if timing_state is not None else exec_elapsed_s,
             "rollout_total_s": float(timing_state["rollout_total_s"]) if timing_state is not None else total_elapsed_s,
             "rpc_roundtrip_s": float(timing_state["rpc_roundtrip_s"]) if timing_state is not None else exec_elapsed_s,
+            "request_bsz": float(request_bsz),
+            "rollout_dp_size": float(rollout_dp_size),
+            "dp_padding_applied": float(dp_padding_applied),
+            "dp_padding_added": float(dp_padding_added),
+            "dp_padding_factor": float(dp_padding_factor),
+            "manager_generate_s": float(manager_generate_s),
+            "build_thin_s": float(build_thin_s),
+            "data_proto_pad_select_s": float(data_proto_pad_select_s),
         }
         if timing_state is not None:
             for key, value in timing_state.items():

@@ -441,11 +441,12 @@ class TraceWorkflowRunner(WorkflowRunner):
             [[{"role": "user", "content": prompt_text}]],
             agent_id,
         )
-        rollout_coro = self.trainer._rollout_model_async(model_id, prompt_batch)
+        timing_state: dict[str, Any] = {}
+        rollout_coro = self.trainer._rollout_model_async(model_id, prompt_batch, timing_state=timing_state)
         if self.llm_timeout_seconds > 0:
-            _, thin, _, _ = await asyncio.wait_for(rollout_coro, timeout=self.llm_timeout_seconds)
+            _, thin, _, timing_info = await asyncio.wait_for(rollout_coro, timeout=self.llm_timeout_seconds)
         else:
-            _, thin, _, _ = await rollout_coro
+            _, thin, _, timing_info = await rollout_coro
         action_text_vec = thin.non_tensor_batch.get("action_text", np.array([], dtype=object))
         raw_text = str(action_text_vec[0]) if len(action_text_vec) > 0 else ""
         parsed_value, format_reward = self._parse_llm_output(raw_text, node_cfg)
@@ -455,6 +456,11 @@ class TraceWorkflowRunner(WorkflowRunner):
         meta["prompt_tokens"] = int(self._count_tokens(prompt_text))
         meta["output_tokens"] = int(self._count_tokens(raw_text))
         meta["prompt_trimmed_tokens"] = int(trimmed_tokens)
+        meta["timing"] = {
+            str(k): float(v)
+            for k, v in dict(timing_info or {}).items()
+            if isinstance(v, int | float | np.integer | np.floating)
+        }
         return WorkflowExecutionRecord(
             query_id=str(self._extract_from_batch(query_batch, "query_id") or ""),
             node_id=node_id,
@@ -525,6 +531,108 @@ class TraceWorkflowRunner(WorkflowRunner):
             if isinstance(value, int | float | np.integer | np.floating):
                 metric_acc[str(key)].append(float(value))
 
+    @staticmethod
+    def _safe_metric_component(value: Any) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value or "unknown")).strip("_.-")
+        return safe or "unknown"
+
+    @classmethod
+    def _merge_trace_timing_metrics(cls, metric_acc: dict[str, list[float]], trace: WorkflowTrace) -> None:
+        node_durations: list[float] = []
+        llm_durations: list[float] = []
+        tool_durations: list[float] = []
+        llm_timing_fields = {
+            "queue_wait_s": "llm_queue_wait_s",
+            "rollout_exec_s": "llm_rollout_exec_s",
+            "rollout_total_s": "llm_rollout_total_s",
+            "rpc_roundtrip_s": "llm_rpc_roundtrip_s",
+            "rpc_overhead_s": "llm_rpc_overhead_s",
+            "engine_generate_s": "llm_engine_generate_s",
+            "engine_generate_max_s": "llm_engine_generate_max_s",
+            "agent_loop_tool_calls_s": "llm_agent_loop_tool_calls_s",
+            "agent_loop_tool_calls_max_s": "llm_agent_loop_tool_calls_max_s",
+            "agent_server_rpc_roundtrip_s": "llm_agent_server_rpc_roundtrip_s",
+            "agent_server_rpc_roundtrip_max_s": "llm_agent_server_rpc_roundtrip_max_s",
+            "agent_server_total_s": "llm_agent_server_total_s",
+            "agent_server_total_max_s": "llm_agent_server_total_max_s",
+            "agent_server_rpc_overhead_s": "llm_agent_server_rpc_overhead_s",
+            "agent_server_rpc_overhead_max_s": "llm_agent_server_rpc_overhead_max_s",
+            "agent_server_first_token_s": "llm_agent_server_first_token_s",
+            "agent_server_first_token_max_s": "llm_agent_server_first_token_max_s",
+            "agent_server_decode_tail_s": "llm_agent_server_decode_tail_s",
+            "agent_server_decode_tail_max_s": "llm_agent_server_decode_tail_max_s",
+            "agent_worker_start_lag_s": "llm_agent_worker_start_lag_s",
+            "agent_worker_start_lag_max_s": "llm_agent_worker_start_lag_max_s",
+            "agent_worker_prep_s": "llm_agent_worker_prep_s",
+            "agent_worker_prep_max_s": "llm_agent_worker_prep_max_s",
+            "agent_worker_run_loops_s": "llm_agent_worker_run_loops_s",
+            "agent_worker_run_loops_max_s": "llm_agent_worker_run_loops_max_s",
+            "agent_worker_postprocess_s": "llm_agent_worker_postprocess_s",
+            "agent_worker_postprocess_max_s": "llm_agent_worker_postprocess_max_s",
+            "agent_worker_total_s": "llm_agent_worker_total_s",
+            "agent_worker_total_max_s": "llm_agent_worker_total_max_s",
+            "agent_worker_non_loop_overhead_s": "llm_agent_worker_non_loop_overhead_s",
+            "agent_worker_non_loop_overhead_max_s": "llm_agent_worker_non_loop_overhead_max_s",
+            "agent_loop_manager_prep_s": "llm_agent_loop_manager_prep_s",
+            "agent_loop_manager_worker_rpc_wait_s": "llm_agent_loop_manager_worker_rpc_wait_s",
+            "agent_loop_manager_worker_rpc_mean_s": "llm_agent_loop_manager_worker_rpc_mean_s",
+            "agent_loop_manager_worker_rpc_max_s": "llm_agent_loop_manager_worker_rpc_max_s",
+            "agent_loop_manager_concat_s": "llm_agent_loop_manager_concat_s",
+            "agent_loop_manager_metrics_reduce_s": "llm_agent_loop_manager_metrics_reduce_s",
+            "agent_loop_manager_total_s": "llm_agent_loop_manager_total_s",
+            "agent_loop_manager_overhead_s": "llm_agent_loop_manager_overhead_s",
+            "worker_total_s": "llm_worker_total_s",
+            "manager_generate_s": "llm_manager_generate_s",
+            "build_thin_s": "llm_build_thin_s",
+            "data_proto_pad_select_s": "llm_data_proto_pad_select_s",
+            "request_bsz": "llm_request_bsz",
+            "rollout_dp_size": "llm_rollout_dp_size",
+            "dp_padding_applied": "llm_dp_padding_applied_ratio",
+            "dp_padding_added": "llm_dp_padding_added",
+            "dp_padding_factor": "llm_dp_padding_factor",
+        }
+        for record in trace.records:
+            meta = record.meta if isinstance(record.meta, dict) else {}
+            timing = meta.get("timing", {})
+            if not isinstance(timing, dict):
+                timing = {}
+            duration = timing.get("rollout_total_s", None) if record.node_type == "llm" else meta.get("duration_s", None)
+            if isinstance(duration, int | float | np.integer | np.floating) and float(duration) >= 0:
+                node_durations.append(float(duration))
+                if record.node_type == "llm":
+                    llm_durations.append(float(duration))
+                elif record.node_type == "tool":
+                    tool_durations.append(float(duration))
+
+            if record.node_type != "llm":
+                continue
+            model_id = cls._safe_metric_component(record.model_id)
+            agent_id = cls._safe_metric_component(record.agent_id)
+            node_id = cls._safe_metric_component(record.node_id)
+            metric_acc[f"workflow/timing/group/model_{model_id}_s_mean"].append(float(timing.get("rollout_total_s", 0.0)))
+            metric_acc[f"workflow/timing/group/model_{model_id}_count"].append(1.0)
+            metric_acc[f"workflow/timing/group/agent_{agent_id}_s_mean"].append(float(timing.get("rollout_total_s", 0.0)))
+            metric_acc[f"workflow/timing/group/agent_{agent_id}_count"].append(1.0)
+            for field, metric_suffix in llm_timing_fields.items():
+                value = timing.get(field, None)
+                if not isinstance(value, int | float | np.integer | np.floating):
+                    continue
+                value_f = float(value)
+                metric_acc[f"workflow/timing/{metric_suffix}_mean"].append(value_f)
+                metric_acc[f"workflow/timing/model/{model_id}/{metric_suffix}_mean"].append(value_f)
+                metric_acc[f"workflow/timing/agent/{agent_id}/{metric_suffix}_mean"].append(value_f)
+                metric_acc[f"workflow/timing/node/{node_id}/{metric_suffix}_mean"].append(value_f)
+
+        if node_durations:
+            metric_acc["workflow/timing/node_s_mean"].append(float(np.mean(node_durations)))
+            metric_acc["workflow/timing/node_invocations"].append(float(len(node_durations)))
+        if llm_durations:
+            metric_acc["workflow/timing/llm_node_s_mean"].append(float(np.mean(llm_durations)))
+            metric_acc["workflow/timing/llm_node_calls"].append(float(len(llm_durations)))
+        if tool_durations:
+            metric_acc["workflow/timing/tool_node_s_mean"].append(float(np.mean(tool_durations)))
+            metric_acc["workflow/timing/tool_node_calls"].append(float(len(tool_durations)))
+
     @abstractmethod
     async def run_query(
         self,
@@ -544,9 +652,10 @@ class TraceWorkflowRunner(WorkflowRunner):
         debug_max_chars: int | None = None,
     ) -> WorkflowTrace:
         async with query_sem:
+            query_start = time.perf_counter()
             try:
                 if self.query_timeout_seconds > 0:
-                    return await asyncio.wait_for(
+                    trace = await asyncio.wait_for(
                         self.run_query(
                             query_batch,
                             query_local_idx=query_local_idx,
@@ -555,18 +664,29 @@ class TraceWorkflowRunner(WorkflowRunner):
                         ),
                         timeout=self.query_timeout_seconds,
                     )
-                return await self.run_query(
-                    query_batch,
-                    query_local_idx=query_local_idx,
-                    debug=debug,
-                    debug_max_chars=debug_max_chars,
-                )
+                else:
+                    trace = await self.run_query(
+                        query_batch,
+                        query_local_idx=query_local_idx,
+                        debug=debug,
+                        debug_max_chars=debug_max_chars,
+                    )
+                trace.metrics["workflow/timing/query_s_mean"] = float(time.perf_counter() - query_start)
+                return trace
             except asyncio.TimeoutError as exc:
                 logger.warning("[trace-workflow] query timeout dropped idx=%s err=%r", query_local_idx, exc)
-                return self._empty_trace(query_batch, reason="query_timeout", error=str(exc))
+                trace = self._empty_trace(query_batch, reason="query_timeout", error=str(exc))
+                trace.metrics["workflow/timing/query_s_mean"] = float(time.perf_counter() - query_start)
+                return trace
             except Exception as exc:
                 logger.warning("[trace-workflow] query error dropped idx=%s err=%r", query_local_idx, exc)
-                return self._empty_trace(query_batch, reason="query_error", error=f"{type(exc).__name__}: {exc}")
+                trace = self._empty_trace(
+                    query_batch,
+                    reason="query_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                trace.metrics["workflow/timing/query_s_mean"] = float(time.perf_counter() - query_start)
+                return trace
 
     async def run_batch(self, batch: DataProto, epoch: int, stage: str = "train") -> tuple[DataProto, dict[str, float]]:
         del epoch
@@ -623,6 +743,7 @@ class TraceWorkflowRunner(WorkflowRunner):
             self._merge_scalar_metrics(metric_acc, trace.metrics)
             self._merge_scalar_metrics(metric_acc, alloc_metrics)
             self._merge_scalar_metrics(metric_acc, assign_metrics)
+            self._merge_trace_timing_metrics(metric_acc, trace)
             metric_acc["workflow/trace_records"].append(float(len(trace.records)))
             metric_acc["workflow/trace_assignments"].append(float(len(assignments)))
             metric_acc["workflow/trace_reward_sum"].append(float(sum(a.reward for a in assignments)))

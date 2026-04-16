@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import time
 from typing import Any
 
 from verl import DataProto
@@ -300,6 +301,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
         state_before: Any,
         state_after: Any,
     ) -> WorkflowExecutionRecord:
+        start = time.perf_counter()
         output = await self._run_tool(
             tool_name,
             input_value=input_value,
@@ -307,6 +309,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             max_attempts=max_attempts,
             fail_open=fail_open,
         )
+        duration_s = float(time.perf_counter() - start)
         return WorkflowExecutionRecord(
             query_id=str(self._extract_from_batch(query_batch, "query_id") or ""),
             node_id=node_id,
@@ -321,7 +324,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             trainable=False,
             state_before=state_before,
             state_after=state_after,
-            meta={},
+            meta={"duration_s": duration_s},
         )
 
     def _build_debug_dump(
