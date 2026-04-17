@@ -2117,6 +2117,22 @@ class StarRayTrainer:
             return float(value)
         return float(default)
 
+    def _pick_progress_reward(self, metrics: dict[str, float]) -> float:
+        # Graph workflows report outcome reward; trace workflows report the summed
+        # assigned reward per trace. Fall back to agent means for older configs.
+        for key in (
+            "workflow/outcome_reward_mean",
+            "workflow/trace_reward_sum",
+            "agent/answer_agent/reward_mean",
+            "agent/search_agent/reward_mean",
+            "agent/summary_agent/reward_mean",
+            "agent/update_agent/reward_mean",
+        ):
+            value = metrics.get(key, None)
+            if isinstance(value, int | float):
+                return float(value)
+        return 0.0
+
     @staticmethod
     def _is_fine_grained_timing_key(metric_key: str) -> bool:
         key = str(metric_key)
@@ -2500,7 +2516,7 @@ class StarRayTrainer:
                                 "gstep": int(global_step),
                                 "inflight": int(self.config.star.workflow.get("max_inflight_queries", 32)),
                                 "samples": int(workflow_metrics.get("workflow/samples", 0)),
-                                "reward": float(workflow_metrics.get("workflow/outcome_reward_mean", 0.0)),
+                                "reward": self._pick_progress_reward(step_metrics),
                             },
                             refresh=False,
                         )
