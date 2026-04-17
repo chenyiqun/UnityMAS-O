@@ -654,7 +654,11 @@ class GraphWorkflowRunner(WorkflowRunner):
                 agent_id,
             )
             rollout_timing_state: dict[str, Any] = {}
-            rollout_coro = self.trainer._rollout_model_async(model_id, prompt_batch, timing_state=rollout_timing_state)
+            rollout_coro = self.trainer._rollout_model_async_batched(
+                model_id,
+                prompt_batch,
+                timing_state=rollout_timing_state,
+            )
             if self.llm_timeout_seconds > 0:
                 try:
                     _, thin, _, rollout_timing = await asyncio.wait_for(rollout_coro, timeout=self.llm_timeout_seconds)
@@ -1192,6 +1196,16 @@ class GraphWorkflowRunner(WorkflowRunner):
             "agent_loop_manager_metrics_reduce_s",
             "agent_loop_manager_total_s",
             "agent_loop_manager_overhead_s",
+            "microbatch_enabled",
+            "microbatch_size",
+            "microbatch_request_count",
+            "microbatch_wait_s",
+            "microbatch_wait_max_s",
+            "microbatch_batch_exec_s",
+            "microbatch_flush_timeout",
+            "microbatch_flush_size",
+            "microbatch_saved_calls",
+            "microbatch_saved_call_ratio",
         )
         llm_timing_all = {field: [] for field in llm_timing_fields}
         llm_timing_by_id = {field: defaultdict(list) for field in llm_timing_fields}

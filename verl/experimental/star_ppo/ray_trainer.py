@@ -19,6 +19,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm.auto import tqdm
 
 from verl import DataProto
+from verl.experimental.star_ppo.trajectory_buffer import TrajectoryBuffer, TrajectoryEntry
 from verl.experimental.star_ppo.types import EngineSpec
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
@@ -44,6 +45,15 @@ class ModelWorkerContext:
     critic_wg: Optional[RayWorkerGroup] = None
     ref_policy_wg: Optional[RayWorkerGroup] = None
     rm_wg: Optional[RayWorkerGroup] = None
+
+
+@dataclass
+class RolloutMicrobatchRequest:
+    model_id: str
+    batch: DataProto
+    timing_state: Optional[dict[str, Any]]
+    future: asyncio.Future
+    enqueue_ts: float
 
 
 class StarRayTrainer:
@@ -87,10 +97,36 @@ class StarRayTrainer:
         self._train_loader_state_loaded = False
         self._max_parallel_rollouts_per_model = int(self.config.star.workflow.get("max_parallel_rollouts_per_model", 32))
         self._rollout_semaphore_by_model: dict[str, asyncio.Semaphore] = {}
+        microbatch_flag = str(os.environ.get("STAR_LLM_MICROBATCH_ENABLE", "true")).strip().lower()
+        self._llm_microbatch_enabled = microbatch_flag in {"1", "true", "yes", "on"}
+        self._llm_microbatch_max_size = max(1, int(os.environ.get("STAR_LLM_MICROBATCH_MAX_SIZE", "8")))
+        self._llm_microbatch_max_wait_s = max(
+            0.0,
+            float(os.environ.get("STAR_LLM_MICROBATCH_MAX_WAIT_MS", "100")) / 1000.0,
+        )
+        self._llm_microbatch_queues_by_model: dict[str, list[RolloutMicrobatchRequest]] = defaultdict(list)
+        self._llm_microbatch_locks_by_model: dict[str, asyncio.Lock] = {}
+        self._llm_microbatch_flush_tasks_by_model: dict[str, asyncio.Task] = {}
+        self._llm_microbatch_flush_task_kind_by_model: dict[str, str] = {}
         # For tiny batches (especially bsz=1), ND dispatch padding can bias samples
         # to shard-0 if we always slice the first item. Use round-robin shard pick to
         # spread committed trajectories across rollout shards.
         self._thin_pick_cursor_by_model: dict[str, int] = defaultdict(int)
+        local_build_thin_flag = str(os.environ.get("STAR_LOCAL_BUILD_THIN", "true")).strip().lower()
+        self._local_build_thin_enabled = local_build_thin_flag in {"1", "true", "yes", "on"}
+        self._local_build_thin_max_bsz = max(
+            1,
+            int(os.environ.get("STAR_LOCAL_BUILD_THIN_MAX_BSZ", str(self._llm_microbatch_max_size))),
+        )
+        buffer_cfg = self.config.star.get("buffer", {})
+        self._local_traj_buffers_by_model: dict[str, TrajectoryBuffer] = {
+            model_id: TrajectoryBuffer(
+                max_items=int(buffer_cfg.get("max_items", 100000)),
+                ttl_seconds=int(buffer_cfg.get("ttl_seconds", 7200)),
+                dropped_query_ttl_seconds=int(buffer_cfg.get("dropped_query_ttl_seconds", 120)),
+            )
+            for model_id in self.model_ids
+        }
         timing_print_flag = str(os.environ.get("STAR_TIMING_PRINT", "true")).strip().lower()
         self._timing_print_enabled = timing_print_flag in {"1", "true", "yes", "on"}
         self._timing_print_every_n_batches = max(1, int(os.environ.get("STAR_TIMING_PRINT_EVERY_N_BATCHES", "1")))
@@ -394,6 +430,11 @@ class StarRayTrainer:
 
         for spec in self.engine_specs:
             ctx = self.model_contexts[spec.model_id]
+            local_buffer = self._local_traj_buffers_by_model.get(spec.model_id, None)
+            if local_buffer is not None:
+                # Worker-side buffers are per rollout-DP shard. The local buffer is
+                # per model, so preserve equivalent aggregate residency capacity.
+                local_buffer.max_items *= max(1, self._get_dp_size(ctx.rollout_wg, "rollout"))
             actor_rollout_cfg = actor_rollout_cfg_by_model_id[spec.model_id]
             rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode") or "async")
             if rollout_mode == "async":
@@ -550,6 +591,184 @@ class StarRayTrainer:
                 timing[str(key).replace("__star_timing_", "", 1)] = float(np.mean(flat.astype(np.float64)))
         return timing
 
+    def _decode_action_text(self, response_tokens: torch.Tensor | None) -> str:
+        if response_tokens is None:
+            return ""
+        tokens = response_tokens.detach().cpu().tolist()
+        try:
+            return self.tokenizer.decode(tokens, skip_special_tokens=True)
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _attach_rollout_timing(batch: DataProto, timing: dict[str, Any]) -> None:
+        merged: dict[str, float] = {}
+        for key, value in batch.non_tensor_batch.items():
+            if not str(key).startswith("__star_timing_"):
+                continue
+            if not isinstance(value, np.ndarray) or value.size == 0:
+                continue
+            flat = value.reshape(-1)
+            if np.issubdtype(flat.dtype, np.number):
+                merged[str(key).replace("__star_timing_", "", 1)] = float(np.mean(flat.astype(np.float64)))
+        for key, value in timing.items():
+            if isinstance(value, int | float | np.integer | np.floating):
+                merged[str(key)] = float(value)
+        bsz = len(batch)
+        for key, value in merged.items():
+            batch.non_tensor_batch[f"__star_timing_{key}"] = np.full((bsz,), float(value), dtype=np.float64)
+
+    @staticmethod
+    def _extract_inner_rollout_timing(full_batch: DataProto) -> dict[str, float]:
+        timing: dict[str, float] = {}
+        meta_info = full_batch.meta_info or {}
+
+        inner_timing = meta_info.get("timing", None)
+        if isinstance(inner_timing, dict):
+            generate_s = inner_timing.get("generate_sequences", None)
+            if isinstance(generate_s, int | float | np.integer | np.floating):
+                timing["engine_generate_s"] = float(generate_s)
+            timing_aliases = {
+                "agent_loop/generate_sequences/mean": "engine_generate_s",
+                "agent_loop/generate_sequences/max": "engine_generate_max_s",
+                "agent_loop/tool_calls/mean": "agent_loop_tool_calls_s",
+                "agent_loop/tool_calls/max": "agent_loop_tool_calls_max_s",
+                "agent_loop/server_rpc_roundtrip/mean": "agent_server_rpc_roundtrip_s",
+                "agent_loop/server_rpc_roundtrip/max": "agent_server_rpc_roundtrip_max_s",
+                "agent_loop/server_total/mean": "agent_server_total_s",
+                "agent_loop/server_total/max": "agent_server_total_max_s",
+                "agent_loop/server_rpc_overhead/mean": "agent_server_rpc_overhead_s",
+                "agent_loop/server_rpc_overhead/max": "agent_server_rpc_overhead_max_s",
+                "agent_loop/server_first_token/mean": "agent_server_first_token_s",
+                "agent_loop/server_first_token/max": "agent_server_first_token_max_s",
+                "agent_loop/server_decode_tail/mean": "agent_server_decode_tail_s",
+                "agent_loop/server_decode_tail/max": "agent_server_decode_tail_max_s",
+                "agent_loop/worker/start_lag/mean": "agent_worker_start_lag_s",
+                "agent_loop/worker/start_lag/max": "agent_worker_start_lag_max_s",
+                "agent_loop/worker/prep/mean": "agent_worker_prep_s",
+                "agent_loop/worker/prep/max": "agent_worker_prep_max_s",
+                "agent_loop/worker/run_loops/mean": "agent_worker_run_loops_s",
+                "agent_loop/worker/run_loops/max": "agent_worker_run_loops_max_s",
+                "agent_loop/worker/postprocess/mean": "agent_worker_postprocess_s",
+                "agent_loop/worker/postprocess/max": "agent_worker_postprocess_max_s",
+                "agent_loop/worker/total/mean": "agent_worker_total_s",
+                "agent_loop/worker/total/max": "agent_worker_total_max_s",
+                "agent_loop/worker/non_loop_overhead/mean": "agent_worker_non_loop_overhead_s",
+                "agent_loop/worker/non_loop_overhead/max": "agent_worker_non_loop_overhead_max_s",
+                "agent_loop/manager/prep": "agent_loop_manager_prep_s",
+                "agent_loop/manager/worker_rpc_wait": "agent_loop_manager_worker_rpc_wait_s",
+                "agent_loop/manager/worker_rpc_mean": "agent_loop_manager_worker_rpc_mean_s",
+                "agent_loop/manager/worker_rpc_max": "agent_loop_manager_worker_rpc_max_s",
+                "agent_loop/manager/concat": "agent_loop_manager_concat_s",
+                "agent_loop/manager/metrics_reduce": "agent_loop_manager_metrics_reduce_s",
+                "agent_loop/manager/total": "agent_loop_manager_total_s",
+                "agent_loop/manager/overhead": "agent_loop_manager_overhead_s",
+            }
+            for src_key, dst_key in timing_aliases.items():
+                value = inner_timing.get(src_key, None)
+                if isinstance(value, int | float | np.integer | np.floating):
+                    timing[dst_key] = float(value)
+
+        metric_list = meta_info.get("metrics", None)
+        if isinstance(metric_list, list):
+            metric_acc: dict[str, list[float]] = {}
+            for item in metric_list:
+                if not isinstance(item, dict):
+                    continue
+                for key, value in item.items():
+                    if not isinstance(value, int | float | np.integer | np.floating):
+                        continue
+                    metric_acc.setdefault(str(key), []).append(float(value))
+            if metric_acc.get("generate_sequences") and "engine_generate_s" not in timing:
+                timing["engine_generate_s"] = float(np.mean(metric_acc["generate_sequences"]))
+            if metric_acc.get("tool_calls"):
+                timing["agent_loop_tool_calls_s"] = float(np.mean(metric_acc["tool_calls"]))
+
+        for key, value in full_batch.non_tensor_batch.items():
+            if not str(key).startswith("__star_timing_"):
+                continue
+            if not isinstance(value, np.ndarray) or value.size == 0:
+                continue
+            flat = value.reshape(-1)
+            if np.issubdtype(flat.dtype, np.number):
+                timing[str(key).replace("__star_timing_", "", 1)] = float(np.mean(flat.astype(np.float64)))
+
+        return timing
+
+    def _build_thin_from_generated_local(self, model_id: str, full_batch: DataProto) -> DataProto:
+        build_start = time.perf_counter()
+        bsz = len(full_batch)
+        query_ids = full_batch.non_tensor_batch.get("query_id", np.array(["unknown"] * bsz, dtype=object))
+        agent_ids = full_batch.non_tensor_batch.get("agent_id", np.array(["agent_0"] * bsz, dtype=object))
+        keep_mask = full_batch.non_tensor_batch.get("__star_keep_in_buffer__", None)
+        if keep_mask is None:
+            keep_mask = np.ones((bsz,), dtype=bool)
+        else:
+            keep_mask = np.array(keep_mask, dtype=bool).reshape(-1)
+            if keep_mask.shape[0] != bsz:
+                keep_mask = np.ones((bsz,), dtype=bool)
+
+        traj_ids = np.empty((bsz,), dtype=object)
+        model_ids = np.empty((bsz,), dtype=object)
+        action_text = np.empty((bsz,), dtype=object)
+        created_ts = np.empty((bsz,), dtype=np.float64)
+
+        responses = full_batch.batch.get("responses", None)
+        now = time.time()
+        decode_action_text_s = 0.0
+        buffer_put_s = 0.0
+        local_buffer = self._local_traj_buffers_by_model[model_id]
+        for i in range(bsz):
+            traj_id = uuid.uuid4().hex if bool(keep_mask[i]) else ""
+            traj_ids[i] = traj_id
+            model_ids[i] = model_id
+            created_ts[i] = now
+
+            response_tokens = responses[i] if responses is not None else None
+            decode_start = time.perf_counter()
+            action_text[i] = self._decode_action_text(response_tokens)
+            decode_action_text_s += float(time.perf_counter() - decode_start)
+
+            if bool(keep_mask[i]):
+                fat_item = full_batch[i : i + 1]
+                put_start = time.perf_counter()
+                local_buffer.put(
+                    TrajectoryEntry(
+                        traj_id=traj_id,
+                        model_id=model_id,
+                        query_id=str(query_ids[i]),
+                        agent_id=str(agent_ids[i]),
+                        fat_data=fat_item,
+                    )
+                )
+                buffer_put_s += float(time.perf_counter() - put_start)
+
+        thin = DataProto.from_dict(
+            non_tensors={
+                "traj_id": traj_ids,
+                "query_id": query_ids.astype(object),
+                "agent_id": agent_ids.astype(object),
+                "model_id": model_ids,
+                "action_text": action_text,
+                "created_ts": created_ts,
+            },
+            meta_info={"thin_only": True},
+        )
+        thin_build_s = float(time.perf_counter() - build_start)
+        inherited_timing = self._extract_inner_rollout_timing(full_batch)
+        inherited_timing.update(
+            {
+                "worker_thin_build_s": thin_build_s,
+                "worker_decode_action_text_s": float(decode_action_text_s),
+                "worker_buffer_put_s": float(buffer_put_s),
+                "worker_build_overhead_s": float(max(thin_build_s - decode_action_text_s - buffer_put_s, 0.0)),
+                "worker_total_s": thin_build_s,
+                "local_build_thin_used": 1.0,
+            }
+        )
+        self._attach_rollout_timing(thin, inherited_timing)
+        return thin
+
     async def _rollout_model_async(
         self,
         model_id: str,
@@ -566,6 +785,7 @@ class StarRayTrainer:
         dp_padding_applied = 0.0
         dp_padding_added = 0.0
         dp_padding_factor = 1.0
+        local_build_thin_used = 0.0
         manager_generate_s = 0.0
         build_thin_s = 0.0
         data_proto_pad_select_s = 0.0
@@ -632,7 +852,17 @@ class StarRayTrainer:
                             full_batch.non_tensor_batch[key] = gen_batch.non_tensor_batch[key]
                     data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
                     bsz = len(full_batch)
-                    if bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
+                    use_local_build_thin = (
+                        self._local_build_thin_enabled
+                        and bsz > 0
+                        and bsz <= self._local_build_thin_max_bsz
+                    )
+                    if use_local_build_thin:
+                        local_build_thin_used = 1.0
+                        build_thin_start = time.perf_counter()
+                        thin = self._build_thin_from_generated_local(model_id, full_batch)
+                        build_thin_s += float(time.perf_counter() - build_thin_start)
+                    elif bsz > 0 and rollout_dp_size > 1 and bsz % rollout_dp_size != 0:
                         # ND dispatch requires equal chunks. For tiny validation/workflow batches,
                         # pad by repeating the last sample, then trim back after conversion.
                         pad = rollout_dp_size - (bsz % rollout_dp_size)
@@ -683,6 +913,7 @@ class StarRayTrainer:
                     timing_state["dp_padding_applied"] = float(dp_padding_applied)
                     timing_state["dp_padding_added"] = float(dp_padding_added)
                     timing_state["dp_padding_factor"] = float(dp_padding_factor)
+                    timing_state["local_build_thin_used"] = float(local_build_thin_used)
                     timing_state["manager_generate_s"] = float(manager_generate_s)
                     timing_state["build_thin_s"] = float(build_thin_s)
                     timing_state["data_proto_pad_select_s"] = float(data_proto_pad_select_s)
@@ -696,6 +927,7 @@ class StarRayTrainer:
             "dp_padding_applied": float(dp_padding_applied),
             "dp_padding_added": float(dp_padding_added),
             "dp_padding_factor": float(dp_padding_factor),
+            "local_build_thin_used": float(local_build_thin_used),
             "manager_generate_s": float(manager_generate_s),
             "build_thin_s": float(build_thin_s),
             "data_proto_pad_select_s": float(data_proto_pad_select_s),
@@ -707,6 +939,222 @@ class StarRayTrainer:
                 if isinstance(value, int | float | np.integer | np.floating):
                     timing_info[key] = float(value)
         return model_id, thin, batch, timing_info
+
+    def _get_microbatch_lock(self, model_id: str) -> asyncio.Lock:
+        lock = self._llm_microbatch_locks_by_model.get(model_id, None)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._llm_microbatch_locks_by_model[model_id] = lock
+        return lock
+
+    @staticmethod
+    def _microbatch_pending_size(queue: list[RolloutMicrobatchRequest]) -> int:
+        return int(sum(len(req.batch) for req in queue if not req.future.cancelled()))
+
+    async def _rollout_model_async_batched(
+        self,
+        model_id: str,
+        batch: DataProto,
+        timing_state: Optional[dict[str, Any]] = None,
+    ):
+        if (
+            not self._llm_microbatch_enabled
+            or len(batch) == 0
+            or len(batch) >= self._llm_microbatch_max_size
+        ):
+            if timing_state is not None:
+                timing_state["microbatch_enabled"] = 0.0
+                timing_state["microbatch_size"] = float(len(batch))
+                timing_state["microbatch_request_count"] = 1.0
+                timing_state["microbatch_wait_s"] = 0.0
+                timing_state["microbatch_wait_max_s"] = 0.0
+                timing_state["microbatch_batch_exec_s"] = 0.0
+                timing_state["microbatch_flush_timeout"] = 0.0
+                timing_state["microbatch_flush_size"] = 0.0
+                timing_state["microbatch_saved_calls"] = 0.0
+                timing_state["microbatch_saved_call_ratio"] = 0.0
+            return await self._rollout_model_async(model_id, batch, timing_state=timing_state)
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        request = RolloutMicrobatchRequest(
+            model_id=model_id,
+            batch=batch,
+            timing_state=timing_state,
+            future=future,
+            enqueue_ts=time.perf_counter(),
+        )
+        if timing_state is not None:
+            timing_state["microbatch_enabled"] = 1.0
+            timing_state["microbatch_size"] = 1.0
+            timing_state["microbatch_wait_s"] = 0.0
+
+        await self._enqueue_rollout_microbatch_request(request)
+        try:
+            return await future
+        except asyncio.CancelledError:
+            future.cancel()
+            await self._remove_rollout_microbatch_request(request)
+            raise
+
+    async def _enqueue_rollout_microbatch_request(self, request: RolloutMicrobatchRequest) -> None:
+        model_id = request.model_id
+        lock = self._get_microbatch_lock(model_id)
+        async with lock:
+            queue = self._llm_microbatch_queues_by_model[model_id]
+            queue.append(request)
+            pending_size = self._microbatch_pending_size(queue)
+            should_flush_now = pending_size >= self._llm_microbatch_max_size or self._llm_microbatch_max_wait_s <= 0
+            if should_flush_now:
+                reason = "size" if pending_size >= self._llm_microbatch_max_size else "timeout"
+                task = self._llm_microbatch_flush_tasks_by_model.get(model_id, None)
+                task_kind = self._llm_microbatch_flush_task_kind_by_model.get(model_id, "")
+                if task is not None and not task.done():
+                    if task_kind == "timer":
+                        task.cancel()
+                    else:
+                        return
+                self._llm_microbatch_flush_tasks_by_model[model_id] = asyncio.create_task(
+                    self._flush_rollout_microbatch(model_id, reason=reason)
+                )
+                self._llm_microbatch_flush_task_kind_by_model[model_id] = "flush"
+                return
+
+            task = self._llm_microbatch_flush_tasks_by_model.get(model_id, None)
+            if task is None or task.done():
+                self._llm_microbatch_flush_tasks_by_model[model_id] = asyncio.create_task(
+                    self._flush_rollout_microbatch_after_wait(model_id)
+                )
+                self._llm_microbatch_flush_task_kind_by_model[model_id] = "timer"
+
+    async def _remove_rollout_microbatch_request(self, request: RolloutMicrobatchRequest) -> None:
+        lock = self._get_microbatch_lock(request.model_id)
+        async with lock:
+            queue = self._llm_microbatch_queues_by_model.get(request.model_id, [])
+            self._llm_microbatch_queues_by_model[request.model_id] = [req for req in queue if req is not request]
+            if len(self._llm_microbatch_queues_by_model[request.model_id]) == 0:
+                self._llm_microbatch_flush_tasks_by_model.pop(request.model_id, None)
+                self._llm_microbatch_flush_task_kind_by_model.pop(request.model_id, None)
+
+    async def _flush_rollout_microbatch_after_wait(self, model_id: str) -> None:
+        try:
+            await asyncio.sleep(self._llm_microbatch_max_wait_s)
+            if self._llm_microbatch_flush_tasks_by_model.get(model_id) is not asyncio.current_task():
+                return
+            self._llm_microbatch_flush_tasks_by_model[model_id] = asyncio.create_task(
+                self._flush_rollout_microbatch(model_id, reason="timeout")
+            )
+            self._llm_microbatch_flush_task_kind_by_model[model_id] = "flush"
+        except asyncio.CancelledError:
+            return
+
+    async def _flush_rollout_microbatch(self, model_id: str, reason: str) -> None:
+        selected: list[RolloutMicrobatchRequest] = []
+        lock = self._get_microbatch_lock(model_id)
+        async with lock:
+            queue = [
+                req
+                for req in self._llm_microbatch_queues_by_model.get(model_id, [])
+                if not req.future.cancelled()
+            ]
+            selected_size = 0
+            remaining: list[RolloutMicrobatchRequest] = []
+            for req in queue:
+                req_size = len(req.batch)
+                if selected and selected_size + req_size > self._llm_microbatch_max_size:
+                    remaining.append(req)
+                    continue
+                selected.append(req)
+                selected_size += req_size
+
+            self._llm_microbatch_queues_by_model[model_id] = remaining
+            current_task = asyncio.current_task()
+            if self._llm_microbatch_flush_tasks_by_model.get(model_id) is current_task:
+                self._llm_microbatch_flush_tasks_by_model.pop(model_id, None)
+                self._llm_microbatch_flush_task_kind_by_model.pop(model_id, None)
+
+            if remaining:
+                pending_size = self._microbatch_pending_size(remaining)
+                if pending_size >= self._llm_microbatch_max_size:
+                    next_task = asyncio.create_task(self._flush_rollout_microbatch(model_id, reason="size"))
+                    next_kind = "flush"
+                else:
+                    next_task = asyncio.create_task(self._flush_rollout_microbatch_after_wait(model_id))
+                    next_kind = "timer"
+                self._llm_microbatch_flush_tasks_by_model[model_id] = next_task
+                self._llm_microbatch_flush_task_kind_by_model[model_id] = next_kind
+
+        if not selected:
+            return
+        await self._run_rollout_microbatch(model_id, selected, reason=reason)
+
+    async def _run_rollout_microbatch(
+        self,
+        model_id: str,
+        requests: list[RolloutMicrobatchRequest],
+        reason: str,
+    ) -> None:
+        active_requests = [req for req in requests if not req.future.cancelled()]
+        if not active_requests:
+            return
+
+        flush_ts = time.perf_counter()
+        wait_times = [max(0.0, flush_ts - req.enqueue_ts) for req in active_requests]
+        microbatch_request_count = len(active_requests)
+        microbatch_size = int(sum(len(req.batch) for req in active_requests))
+
+        batch_timing_state: dict[str, Any] = {}
+        batch_start = time.perf_counter()
+        try:
+            batched_batch = (
+                active_requests[0].batch
+                if len(active_requests) == 1
+                else DataProto.concat([req.batch for req in active_requests])
+            )
+            _, thin, _, batch_timing_info = await self._rollout_model_async(
+                model_id,
+                batched_batch,
+                timing_state=batch_timing_state,
+            )
+            batch_exec_s = float(time.perf_counter() - batch_start)
+        except Exception as exc:
+            for req in active_requests:
+                if not req.future.cancelled():
+                    req.future.set_exception(exc)
+            return
+
+        offset = 0
+        max_wait_s = float(max(wait_times)) if wait_times else 0.0
+        for req, wait_s in zip(active_requests, wait_times, strict=True):
+            req_len = len(req.batch)
+            indices = list(range(offset, offset + req_len))
+            offset += req_len
+            try:
+                req_thin = thin.select_idxs(indices)
+            except Exception as exc:
+                if not req.future.cancelled():
+                    req.future.set_exception(exc)
+                continue
+
+            req_timing = dict(batch_timing_info or {})
+            req_timing["rollout_total_s"] = float(req_timing.get("rollout_total_s", 0.0) + wait_s)
+            req_timing["microbatch_enabled"] = 1.0
+            req_timing["microbatch_size"] = float(microbatch_size)
+            req_timing["microbatch_request_count"] = float(microbatch_request_count)
+            req_timing["microbatch_wait_s"] = float(wait_s)
+            req_timing["microbatch_wait_max_s"] = max_wait_s
+            req_timing["microbatch_batch_exec_s"] = batch_exec_s
+            req_timing["microbatch_flush_timeout"] = 1.0 if reason == "timeout" else 0.0
+            req_timing["microbatch_flush_size"] = 1.0 if reason == "size" else 0.0
+            req_timing["microbatch_saved_calls"] = float(max(0, microbatch_request_count - 1))
+            req_timing["microbatch_saved_call_ratio"] = float(
+                max(0, microbatch_request_count - 1) / max(1, microbatch_request_count)
+            )
+
+            if req.timing_state is not None:
+                req.timing_state.update(req_timing)
+            if not req.future.cancelled():
+                req.future.set_result((model_id, req_thin, req.batch, req_timing))
 
     @staticmethod
     def _extract_first_json_object(text: str) -> Optional[dict]:
@@ -947,9 +1395,19 @@ class StarRayTrainer:
             if not indices:
                 continue
             sub = rewards.select_idxs(indices)
-            worker_outputs = self.model_contexts[model_id].rollout_wg.commit_rewards(sub)
-            reduced = self._reduce_worker_metrics(worker_outputs)
-            for k, v in reduced.items():
+            model_metrics, remote_indices = self._commit_rewards_to_local_buffer(model_id, sub)
+            if remote_indices:
+                remote_sub = sub.select_idxs(remote_indices)
+                worker_outputs = self.model_contexts[model_id].rollout_wg.commit_rewards(remote_sub)
+                reduced = self._reduce_worker_metrics(worker_outputs)
+                for k, v in reduced.items():
+                    if k in {"star/committed", "buffer/total", "buffer/ready", "buffer/dropped_queries"}:
+                        model_metrics[k] = float(model_metrics.get(k, 0.0) + float(v))
+                    elif k != "star/reward_in":
+                        model_metrics[k] = float(v)
+                model_metrics["star/remote_reward_in"] = float(len(remote_indices))
+            model_metrics["star/reward_in"] = float(len(sub))
+            for k, v in model_metrics.items():
                 metrics[f"model/{model_id}/{k}"] = v
         # reward metrics by agent id (for independent curves on tracking backend)
         reward_vec = rewards.batch["reward"].detach().cpu().numpy() if len(rewards) > 0 else np.array([])
@@ -960,6 +1418,48 @@ class StarRayTrainer:
                 metrics[f"agent/{agent_id}/reward_mean"] = float(np.mean(reward_vec[mask]))
                 metrics[f"agent/{agent_id}/samples"] = float(np.sum(mask))
         return metrics
+
+    def _commit_rewards_to_local_buffer(self, model_id: str, rewards: DataProto) -> tuple[dict[str, float], list[int]]:
+        local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
+        if local_buffer is None or len(rewards) == 0:
+            return {}, list(range(len(rewards)))
+
+        traj_ids = rewards.non_tensor_batch.get("traj_id", np.array([], dtype=object))
+        reward_vec = rewards.batch.get("reward", None) if rewards.batch is not None else None
+        done_vec = rewards.batch.get("done", None) if rewards.batch is not None else None
+        if reward_vec is None:
+            reward_vec = torch.zeros((len(traj_ids),), dtype=torch.float32)
+        if done_vec is None:
+            done_vec = torch.ones((len(traj_ids),), dtype=torch.bool)
+
+        committed = 0
+        remote_indices: list[int] = []
+        for i, traj_id in enumerate(traj_ids):
+            ok = local_buffer.commit_reward(
+                str(traj_id),
+                reward=reward_vec[i].reshape(()).to(torch.float32),
+                done=bool(done_vec[i].item()),
+            )
+            if ok:
+                committed += 1
+            else:
+                remote_indices.append(i)
+
+        rollout_dp_size = max(1, self._get_dp_size(self.model_contexts[model_id].rollout_wg, "rollout"))
+        stats = local_buffer.stats()
+        metrics = {
+            "star/local_committed": float(committed),
+            "star/local_reward_in": float(len(traj_ids)),
+            "star/local_buffer_total": float(stats["buffer/total"]),
+            "star/local_buffer_ready": float(stats["buffer/ready"]),
+            "star/local_buffer_dropped_queries": float(stats["buffer/dropped_queries"]),
+            # Preserve the old worker-reduced scale for unprefixed buffer metrics.
+            "star/committed": float(committed / rollout_dp_size),
+            "buffer/total": float(stats["buffer/total"] / rollout_dp_size),
+            "buffer/ready": float(stats["buffer/ready"] / rollout_dp_size),
+            "buffer/dropped_queries": float(stats["buffer/dropped_queries"] / rollout_dp_size),
+        }
+        return metrics, remote_indices
 
     @staticmethod
     def _is_timeout_error(exc: Exception) -> bool:
@@ -1030,6 +1530,17 @@ class StarRayTrainer:
             "workflow/query_dropped_cleanup": float(len(unique_ids)),
         }
         for model_id, ctx in self.model_contexts.items():
+            local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
+            if local_buffer is not None:
+                local_purged = local_buffer.mark_queries_dropped(unique_ids)
+                local_stats = local_buffer.stats()
+                metrics[f"model/{model_id}/star/local_dropped_queries"] = float(len(unique_ids))
+                metrics[f"model/{model_id}/star/local_purged_traj"] = float(local_purged)
+                metrics[f"model/{model_id}/star/local_buffer_total"] = float(local_stats["buffer/total"])
+                metrics[f"model/{model_id}/star/local_buffer_ready"] = float(local_stats["buffer/ready"])
+                metrics[f"model/{model_id}/star/local_buffer_dropped_queries"] = float(
+                    local_stats["buffer/dropped_queries"]
+                )
             try:
                 outputs = ctx.rollout_wg.drop_queries(unique_ids)
                 reduced = self._reduce_worker_metrics(outputs)
@@ -1123,11 +1634,187 @@ class StarRayTrainer:
             dp_rank_mapping = worker_group._dispatch_info[role]
         return max(dp_rank_mapping) + 1
 
+    @staticmethod
+    def _empty_batch() -> DataProto:
+        return DataProto.from_dict(non_tensors={"traj_id": np.array([], dtype=object)})
+
+    @staticmethod
+    def _pad_fill_value_for_key(key: str, tensor: torch.Tensor):
+        key_lower = str(key).lower()
+        if tensor.dtype == torch.bool:
+            return False
+        if "label" in key_lower:
+            return -100
+        if tensor.is_floating_point():
+            return 0.0
+        return 0
+
+    @classmethod
+    def _pad_tensor_to_shape(cls, key: str, tensor: torch.Tensor, target_shape: tuple[int, ...]) -> torch.Tensor:
+        fill_value = cls._pad_fill_value_for_key(key, tensor)
+        padded = torch.full(target_shape, fill_value=fill_value, dtype=tensor.dtype, device=tensor.device)
+        copy_slices = tuple(slice(0, min(src, dst)) for src, dst in zip(tensor.shape, target_shape))
+        padded[copy_slices] = tensor[copy_slices]
+        return padded
+
+    def _align_fat_batch_shapes_for_concat(self, fat_list: list[DataProto]) -> list[DataProto]:
+        if len(fat_list) <= 1:
+            return fat_list
+
+        target_shapes: dict[str, tuple[int, ...]] = {}
+        prototypes: dict[str, torch.Tensor] = {}
+        for fat in fat_list:
+            if fat.batch is None:
+                continue
+            for key in fat.batch.keys():
+                tensor = fat.batch[key]
+                if not isinstance(tensor, torch.Tensor):
+                    continue
+                key = str(key)
+                shape = tuple(int(x) for x in tensor.shape)
+                if key not in target_shapes:
+                    target_shapes[key] = shape
+                    prototypes[key] = tensor
+                    continue
+                prev = target_shapes[key]
+                if len(prev) != len(shape):
+                    raise RuntimeError(
+                        f"Inconsistent tensor rank for key={key}: shape={shape} vs prev_shape={prev}"
+                    )
+                target_shapes[key] = tuple(max(a, b) for a, b in zip(prev, shape))
+
+        if not target_shapes:
+            return fat_list
+
+        aligned: list[DataProto] = []
+        for fat in fat_list:
+            if fat.batch is None:
+                aligned.append(fat)
+                continue
+
+            tensors: dict[str, torch.Tensor] = {}
+            changed = False
+            bsz = int(fat.batch.batch_size[0])
+
+            for key, target_shape in target_shapes.items():
+                if key in fat.batch.keys():
+                    tensor = fat.batch[key]
+                    if not isinstance(tensor, torch.Tensor):
+                        continue
+                else:
+                    proto = prototypes[key]
+                    cur_shape = list(target_shape)
+                    cur_shape[0] = bsz
+                    tensors[key] = torch.full(
+                        tuple(cur_shape),
+                        fill_value=self._pad_fill_value_for_key(key, proto),
+                        dtype=proto.dtype,
+                        device=proto.device,
+                    )
+                    changed = True
+                    continue
+
+                cur_target = list(target_shape)
+                cur_target[0] = int(tensor.shape[0])
+                cur_target_t = tuple(cur_target)
+                if tuple(int(x) for x in tensor.shape) != cur_target_t:
+                    tensors[key] = self._pad_tensor_to_shape(key, tensor, cur_target_t)
+                    changed = True
+                else:
+                    tensors[key] = tensor
+
+            if changed:
+                aligned.append(DataProto.from_dict(tensors=tensors, non_tensors=fat.non_tensor_batch, meta_info=fat.meta_info))
+            else:
+                aligned.append(fat)
+
+        return aligned
+
+    @staticmethod
+    def _summarize_fat_shapes(fat_list: list[DataProto], max_items: int = 8) -> str:
+        items = []
+        for i, fat in enumerate(fat_list[:max_items]):
+            if fat.batch is None:
+                items.append(f"{i}:<none>")
+                continue
+            key_shapes = []
+            for key in sorted(fat.batch.keys()):
+                tensor = fat.batch[key]
+                if isinstance(tensor, torch.Tensor):
+                    key_shapes.append(f"{key}:{tuple(int(x) for x in tensor.shape)}")
+            items.append(f"{i}:{{{', '.join(key_shapes[:6])}}}")
+        suffix = f", ...+{len(fat_list) - max_items}" if len(fat_list) > max_items else ""
+        return "[" + "; ".join(items) + suffix + "]"
+
+    def _build_ready_train_batch_from_local_buffer(self, model_id: str, max_items: int = 0) -> DataProto:
+        local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
+        if local_buffer is None:
+            return self._empty_batch()
+        entries = local_buffer.pop_ready(max_items=max_items if max_items and max_items > 0 else None)
+        if len(entries) == 0:
+            return self._empty_batch()
+
+        fat_list = []
+        for entry in entries:
+            fat = entry.fat_data
+            if fat.meta_info is None:
+                fat.meta_info = {}
+            else:
+                fat.meta_info.pop("timing", None)
+                fat.meta_info.pop("metrics", None)
+            fat_list.append(fat)
+        fat_list = self._align_fat_batch_shapes_for_concat(fat_list)
+        try:
+            batch = DataProto.concat(fat_list)
+        except RuntimeError as exc:
+            shape_summary = self._summarize_fat_shapes(fat_list)
+            raise RuntimeError(f"Failed to concat local ready fat batches. shapes={shape_summary}") from exc
+        batch.meta_info = {}
+
+        response_mask = batch.batch.get("response_mask", None)
+        responses = batch.batch.get("responses", None)
+        if responses is None:
+            return batch
+
+        bsz, resp_len = responses.shape[0], responses.shape[1]
+        token_level_scores = torch.zeros((bsz, resp_len), dtype=torch.float32)
+
+        reward_scalar = torch.tensor([float(entry.reward.item()) if entry.reward is not None else 0.0 for entry in entries])
+        if response_mask is None:
+            token_level_scores[:, -1] = reward_scalar
+        else:
+            last_pos = response_mask.to(torch.long).sum(dim=-1) - 1
+            last_pos = torch.clamp(last_pos, min=0)
+            token_level_scores[torch.arange(bsz), last_pos] = reward_scalar
+
+        extra = DataProto.from_dict(
+            tensors={
+                "token_level_scores": token_level_scores,
+                "token_level_rewards": token_level_scores.clone(),
+                "reward": reward_scalar,
+                "done": torch.tensor([entry.done for entry in entries], dtype=torch.bool),
+            },
+            non_tensors={
+                "traj_id": np.array([entry.traj_id for entry in entries], dtype=object),
+                "query_id": np.array([entry.query_id for entry in entries], dtype=object),
+                "agent_id": np.array([entry.agent_id for entry in entries], dtype=object),
+                "model_id": np.array([entry.model_id for entry in entries], dtype=object),
+            },
+        )
+        return batch.union(extra)
+
     def _merge_ready_batches(self, ready_parts: list[DataProto]) -> Optional[DataProto]:
         valid = [x for x in ready_parts if isinstance(x, DataProto) and len(x) > 0]
         if not valid:
             return None
-        return valid[0] if len(valid) == 1 else DataProto.concat(valid)
+        if len(valid) == 1:
+            return valid[0]
+        aligned = self._align_fat_batch_shapes_for_concat(valid)
+        try:
+            return DataProto.concat(aligned)
+        except RuntimeError as exc:
+            shape_summary = self._summarize_fat_shapes(aligned)
+            raise RuntimeError(f"Failed to concat ready batches. shapes={shape_summary}") from exc
 
     def _maybe_drop_last(self, batch: DataProto, dp_size: int) -> tuple[DataProto, int]:
         enforce_divisible_batch = bool(self.config.star.train.get("enforce_divisible_batch", True))
@@ -1228,7 +1915,17 @@ class StarRayTrainer:
         for model_id, ctx in self.model_contexts.items():
             try:
                 ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
-                ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
+                remote_ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
+                remote_ready_count = len(remote_ready_batch) if isinstance(remote_ready_batch, DataProto) else 0
+                local_max_items = (
+                    max(0, int(max_ready_items) - int(remote_ready_count))
+                    if max_ready_items and max_ready_items > 0
+                    else 0
+                )
+                local_ready = self._build_ready_train_batch_from_local_buffer(model_id, max_items=local_max_items)
+                ready_batch = self._merge_ready_batches([remote_ready_batch, local_ready])
+                metrics[f"model/{model_id}/star/remote_ready_consumed"] = float(remote_ready_count)
+                metrics[f"model/{model_id}/star/local_ready_consumed"] = float(len(local_ready))
                 if ready_batch is None:
                     metrics[f"model/{model_id}/star/consumed"] = 0.0
                     metrics[f"model/{model_id}/star/dropped"] = 0.0
@@ -1384,7 +2081,8 @@ class StarRayTrainer:
     def _drain_rollout_ready_queues(self):
         # Validation also uses thin->commit flow, so drain ready queue to avoid
         # mixing validation trajectories into subsequent training updates.
-        for _, ctx in self.model_contexts.items():
+        for model_id, ctx in self.model_contexts.items():
+            _ = self._build_ready_train_batch_from_local_buffer(model_id, max_items=0)
             _ = ctx.rollout_wg.build_ready_train_batch(max_items=0)
 
     @staticmethod

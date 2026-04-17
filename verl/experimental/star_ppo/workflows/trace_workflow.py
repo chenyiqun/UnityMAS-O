@@ -442,7 +442,7 @@ class TraceWorkflowRunner(WorkflowRunner):
             agent_id,
         )
         timing_state: dict[str, Any] = {}
-        rollout_coro = self.trainer._rollout_model_async(model_id, prompt_batch, timing_state=timing_state)
+        rollout_coro = self.trainer._rollout_model_async_batched(model_id, prompt_batch, timing_state=timing_state)
         if self.llm_timeout_seconds > 0:
             _, thin, _, timing_info = await asyncio.wait_for(rollout_coro, timeout=self.llm_timeout_seconds)
         else:
@@ -590,6 +590,17 @@ class TraceWorkflowRunner(WorkflowRunner):
             "dp_padding_applied": "llm_dp_padding_applied_ratio",
             "dp_padding_added": "llm_dp_padding_added",
             "dp_padding_factor": "llm_dp_padding_factor",
+            "local_build_thin_used": "llm_local_build_thin_used_ratio",
+            "microbatch_enabled": "llm_microbatch_enabled_ratio",
+            "microbatch_size": "llm_microbatch_size",
+            "microbatch_request_count": "llm_microbatch_request_count",
+            "microbatch_wait_s": "llm_microbatch_wait_s",
+            "microbatch_wait_max_s": "llm_microbatch_wait_max_s",
+            "microbatch_batch_exec_s": "llm_microbatch_batch_exec_s",
+            "microbatch_flush_timeout": "llm_microbatch_flush_timeout_ratio",
+            "microbatch_flush_size": "llm_microbatch_flush_size_ratio",
+            "microbatch_saved_calls": "llm_microbatch_saved_calls",
+            "microbatch_saved_call_ratio": "llm_microbatch_saved_call_ratio",
         }
         for record in trace.records:
             meta = record.meta if isinstance(record.meta, dict) else {}
