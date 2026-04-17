@@ -1106,10 +1106,24 @@ class StarRayTrainer:
         batch_timing_state: dict[str, Any] = {}
         batch_start = time.perf_counter()
         try:
+            concat_batches = []
+            for req in active_requests:
+                meta_info = dict(req.batch.meta_info or {})
+                # Per-query timing/metrics differ by construction and are not part of
+                # the prompt payload. Drop them before DataProto.concat consistency checks.
+                meta_info.pop("timing", None)
+                meta_info.pop("metrics", None)
+                concat_batches.append(
+                    DataProto(
+                        batch=req.batch.batch,
+                        non_tensor_batch=req.batch.non_tensor_batch,
+                        meta_info=meta_info,
+                    )
+                )
             batched_batch = (
-                active_requests[0].batch
-                if len(active_requests) == 1
-                else DataProto.concat([req.batch for req in active_requests])
+                concat_batches[0]
+                if len(concat_batches) == 1
+                else DataProto.concat(concat_batches)
             )
             _, thin, _, batch_timing_info = await self._rollout_model_async(
                 model_id,
