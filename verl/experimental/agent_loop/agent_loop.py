@@ -996,13 +996,27 @@ class AgentLoopManager:
                 for worker, chunk in zip(self.agent_loop_workers, chunkes, strict=True)
             ]
         )
-        output = DataProto.concat(outputs)
+        concat_outputs = []
+        for item in outputs:
+            meta_info = dict(item.meta_info or {})
+            # Worker timing differs per chunk and is reduced below. Keep it out of
+            # DataProto.concat's strict non-metric meta_info consistency check.
+            meta_info.pop("timing", None)
+            meta_info.pop("__agent_loop_dispatch_ts__", None)
+            concat_outputs.append(
+                DataProto(batch=item.batch, non_tensor_batch=item.non_tensor_batch, meta_info=meta_info)
+            )
+        output = DataProto.concat(concat_outputs)
 
         # calculate performance metrics
         metrics = [output.meta_info.pop("metrics") for output in outputs]  # List[List[Dict[str, str]]]
         timing = self._performance_metrics(metrics, output)
 
-        output.meta_info = {**outputs[0].meta_info, "timing": timing}
+        output_meta = dict(outputs[0].meta_info or {})
+        output_meta.pop("metrics", None)
+        output_meta.pop("timing", None)
+        output_meta.pop("__agent_loop_dispatch_ts__", None)
+        output.meta_info = {**output_meta, "timing": timing}
         return output
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:

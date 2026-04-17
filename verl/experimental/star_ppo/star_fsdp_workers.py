@@ -235,6 +235,18 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         except Exception:
             return ""
 
+    @staticmethod
+    def _strip_concat_volatile_meta(data: DataProto) -> DataProto:
+        meta_info = dict(data.meta_info or {})
+        meta_info.pop("timing", None)
+        meta_info.pop("metrics", None)
+        return DataProto(batch=data.batch, non_tensor_batch=data.non_tensor_batch, meta_info=meta_info)
+
+    @classmethod
+    def _concat_data_proto_safe(cls, parts: list[DataProto]) -> DataProto:
+        cleaned = [cls._strip_concat_volatile_meta(part) for part in parts]
+        return DataProto.concat(cleaned) if len(cleaned) > 1 else cleaned[0]
+
     def _extract_inner_rollout_timing(self, full_batch: DataProto) -> dict[str, float]:
         timing: dict[str, float] = {}
         meta_info = full_batch.meta_info or {}
@@ -565,9 +577,15 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                     tensors[key] = tensor
 
             if changed:
-                aligned.append(DataProto.from_dict(tensors=tensors, non_tensors=fat.non_tensor_batch, meta_info=fat.meta_info))
+                aligned.append(
+                    DataProto.from_dict(
+                        tensors=tensors,
+                        non_tensors=fat.non_tensor_batch,
+                        meta_info=self._strip_concat_volatile_meta(fat).meta_info,
+                    )
+                )
             else:
-                aligned.append(fat)
+                aligned.append(self._strip_concat_volatile_meta(fat))
 
         return aligned
 
@@ -607,7 +625,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             fat_list.append(fat)
         fat_list = self._align_fat_batch_shapes_for_concat(fat_list)
         try:
-            batch = DataProto.concat(fat_list)
+            batch = self._concat_data_proto_safe(fat_list)
         except RuntimeError as exc:
             shape_summary = self._summarize_fat_shapes(fat_list)
             raise RuntimeError(f"Failed to concat ready fat batches. shapes={shape_summary}") from exc

@@ -157,7 +157,17 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
         worker_rpc_times = [elapsed_s for _, elapsed_s in chunk_results]
 
         concat_start = time.perf_counter()
-        output = DataProto.concat(outputs)
+        concat_outputs = []
+        for item in outputs:
+            meta_info = dict(item.meta_info or {})
+            # Worker timing differs per chunk and is merged below; do not let it
+            # participate in DataProto.concat's strict meta_info consistency check.
+            meta_info.pop("timing", None)
+            meta_info.pop("__agent_loop_dispatch_ts__", None)
+            concat_outputs.append(
+                DataProto(batch=item.batch, non_tensor_batch=item.non_tensor_batch, meta_info=meta_info)
+            )
+        output = DataProto.concat(concat_outputs)
         manager_concat_s = time.perf_counter() - concat_start
 
         # calculate performance metrics
@@ -181,7 +191,11 @@ class OneStepOffAgentLoopManager(AgentLoopManager):
             0.0,
         )
 
-        output.meta_info = {**outputs[0].meta_info, "timing": timing}
+        output_meta = dict(outputs[0].meta_info or {})
+        output_meta.pop("metrics", None)
+        output_meta.pop("timing", None)
+        output_meta.pop("__agent_loop_dispatch_ts__", None)
+        output.meta_info = {**output_meta, "timing": timing}
         return output
 
     async def wake_up(self):
