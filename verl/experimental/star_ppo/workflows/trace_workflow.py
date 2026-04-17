@@ -762,7 +762,7 @@ class TraceWorkflowRunner(WorkflowRunner):
                 print(trace.debug_dump, flush=True)
 
         rewards = self.trainer._empty_rewards() if len(reward_parts) == 0 else (
-            DataProto.concat(reward_parts) if len(reward_parts) > 1 else reward_parts[0]
+            self.trainer._concat_data_proto_safe(reward_parts)
         )
 
         metrics = {

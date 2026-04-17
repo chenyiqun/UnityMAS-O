@@ -1264,7 +1264,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         if len(reward_parts) == 0:
             rewards = self.trainer._empty_rewards()
         else:
-            rewards = DataProto.concat(reward_parts) if len(reward_parts) > 1 else reward_parts[0]
+            rewards = self.trainer._concat_data_proto_safe(reward_parts)
 
         metrics = {
             "workflow/samples": float(len(query_results)),

@@ -695,6 +695,20 @@ class StarRayTrainer:
 
         return timing
 
+    @staticmethod
+    def _strip_concat_volatile_meta(data: DataProto) -> DataProto:
+        meta_info = dict(data.meta_info or {})
+        # Per-request/per-worker diagnostics are not part of the sample payload.
+        # They can legitimately differ and break DataProto.concat consistency checks.
+        meta_info.pop("timing", None)
+        meta_info.pop("metrics", None)
+        return DataProto(batch=data.batch, non_tensor_batch=data.non_tensor_batch, meta_info=meta_info)
+
+    @classmethod
+    def _concat_data_proto_safe(cls, parts: list[DataProto]) -> DataProto:
+        cleaned = [cls._strip_concat_volatile_meta(part) for part in parts]
+        return DataProto.concat(cleaned) if len(cleaned) > 1 else cleaned[0]
+
     def _build_thin_from_generated_local(self, model_id: str, full_batch: DataProto) -> DataProto:
         build_start = time.perf_counter()
         bsz = len(full_batch)
@@ -1106,20 +1120,7 @@ class StarRayTrainer:
         batch_timing_state: dict[str, Any] = {}
         batch_start = time.perf_counter()
         try:
-            concat_batches = []
-            for req in active_requests:
-                meta_info = dict(req.batch.meta_info or {})
-                # Per-query timing/metrics differ by construction and are not part of
-                # the prompt payload. Drop them before DataProto.concat consistency checks.
-                meta_info.pop("timing", None)
-                meta_info.pop("metrics", None)
-                concat_batches.append(
-                    DataProto(
-                        batch=req.batch.batch,
-                        non_tensor_batch=req.batch.non_tensor_batch,
-                        meta_info=meta_info,
-                    )
-                )
+            concat_batches = [self._strip_concat_volatile_meta(req.batch) for req in active_requests]
             batched_batch = (
                 concat_batches[0]
                 if len(concat_batches) == 1
@@ -1260,7 +1261,12 @@ class StarRayTrainer:
         non_tensors = {k: v.copy() for k, v in source_batch.non_tensor_batch.items()}
         non_tensors["raw_prompt"] = np.array(raw_prompts, dtype=object)
         non_tensors["agent_id"] = np.array([agent_id] * bsz, dtype=object)
-        return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info=dict(source_batch.meta_info))
+        meta_info = dict(source_batch.meta_info or {})
+        # Workflow LLM requests only need prompt/sample payload. Per-query timing
+        # and metrics are volatile and can break DataProto.concat consistency checks.
+        meta_info.pop("timing", None)
+        meta_info.pop("metrics", None)
+        return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors, meta_info=meta_info)
 
     def _build_commit_rewards_from_thin(self, thin_batch: DataProto, reward: np.ndarray) -> DataProto:
         done = np.ones((len(thin_batch),), dtype=bool)
@@ -1302,7 +1308,7 @@ class StarRayTrainer:
 
         if len(reward_parts) == 0:
             return self._empty_rewards(), {}
-        rewards = DataProto.concat(reward_parts) if len(reward_parts) > 1 else reward_parts[0]
+        rewards = self._concat_data_proto_safe(reward_parts)
         return rewards, {}
 
     def _create_workflow_runner(self):
@@ -1397,7 +1403,6 @@ class StarRayTrainer:
                 "query_id": thin_batch.non_tensor_batch["query_id"],
                 "agent_id": thin_batch.non_tensor_batch["agent_id"],
             },
-            meta_info={"format_reward": format_reward.tolist(), "outcome_reward": outcome_reward.tolist()},
         )
         return rewards
 
@@ -1738,9 +1743,15 @@ class StarRayTrainer:
                     tensors[key] = tensor
 
             if changed:
-                aligned.append(DataProto.from_dict(tensors=tensors, non_tensors=fat.non_tensor_batch, meta_info=fat.meta_info))
+                aligned.append(
+                    DataProto.from_dict(
+                        tensors=tensors,
+                        non_tensors=fat.non_tensor_batch,
+                        meta_info=self._strip_concat_volatile_meta(fat).meta_info,
+                    )
+                )
             else:
-                aligned.append(fat)
+                aligned.append(self._strip_concat_volatile_meta(fat))
 
         return aligned
 
@@ -1779,7 +1790,7 @@ class StarRayTrainer:
             fat_list.append(fat)
         fat_list = self._align_fat_batch_shapes_for_concat(fat_list)
         try:
-            batch = DataProto.concat(fat_list)
+            batch = self._concat_data_proto_safe(fat_list)
         except RuntimeError as exc:
             shape_summary = self._summarize_fat_shapes(fat_list)
             raise RuntimeError(f"Failed to concat local ready fat batches. shapes={shape_summary}") from exc
@@ -1825,7 +1836,7 @@ class StarRayTrainer:
             return valid[0]
         aligned = self._align_fat_batch_shapes_for_concat(valid)
         try:
-            return DataProto.concat(aligned)
+            return self._concat_data_proto_safe(aligned)
         except RuntimeError as exc:
             shape_summary = self._summarize_fat_shapes(aligned)
             raise RuntimeError(f"Failed to concat ready batches. shapes={shape_summary}") from exc
