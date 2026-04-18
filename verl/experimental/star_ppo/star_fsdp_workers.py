@@ -218,6 +218,12 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         max_items = int(buffer_cfg.get("max_items", 100000))
         ttl_seconds = int(buffer_cfg.get("ttl_seconds", 7200))
         dropped_query_ttl_seconds = int(buffer_cfg.get("dropped_query_ttl_seconds", 120))
+        shuffle_ready = buffer_cfg.get("shuffle_ready", True)
+        self._shuffle_ready_buffer = (
+            shuffle_ready.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(shuffle_ready, str)
+            else bool(shuffle_ready)
+        )
         self._traj_buffer = TrajectoryBuffer(
             max_items=max_items,
             ttl_seconds=ttl_seconds,
@@ -607,7 +613,10 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def build_ready_train_batch(self, max_items: int = 0) -> DataProto:
-        entries = self._traj_buffer.pop_ready(max_items=max_items if max_items and max_items > 0 else None)
+        entries = self._traj_buffer.pop_ready(
+            max_items=max_items if max_items and max_items > 0 else None,
+            shuffle=self._shuffle_ready_buffer,
+        )
         if len(entries) == 0:
             return self._empty_batch()
 

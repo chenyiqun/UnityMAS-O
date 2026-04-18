@@ -119,6 +119,12 @@ class StarRayTrainer:
             int(os.environ.get("STAR_LOCAL_BUILD_THIN_MAX_BSZ", str(self._llm_microbatch_max_size))),
         )
         buffer_cfg = self.config.star.get("buffer", {})
+        shuffle_ready = buffer_cfg.get("shuffle_ready", True)
+        self._shuffle_ready_buffer = (
+            shuffle_ready.strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(shuffle_ready, str)
+            else bool(shuffle_ready)
+        )
         self._local_traj_buffers_by_model: dict[str, TrajectoryBuffer] = {
             model_id: TrajectoryBuffer(
                 max_items=int(buffer_cfg.get("max_items", 100000)),
@@ -1775,7 +1781,10 @@ class StarRayTrainer:
         local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
         if local_buffer is None:
             return self._empty_batch()
-        entries = local_buffer.pop_ready(max_items=max_items if max_items and max_items > 0 else None)
+        entries = local_buffer.pop_ready(
+            max_items=max_items if max_items and max_items > 0 else None,
+            shuffle=self._shuffle_ready_buffer,
+        )
         if len(entries) == 0:
             return self._empty_batch()
 
@@ -1840,6 +1849,11 @@ class StarRayTrainer:
         except RuntimeError as exc:
             shape_summary = self._summarize_fat_shapes(aligned)
             raise RuntimeError(f"Failed to concat ready batches. shapes={shape_summary}") from exc
+
+    def _shuffle_ready_batch(self, batch: DataProto) -> DataProto:
+        if not self._shuffle_ready_buffer or len(batch) <= 1:
+            return batch
+        return batch.select_idxs(np.random.permutation(len(batch)).tolist())
 
     def _maybe_drop_last(self, batch: DataProto, dp_size: int) -> tuple[DataProto, int]:
         enforce_divisible_batch = bool(self.config.star.train.get("enforce_divisible_batch", True))
@@ -1956,8 +1970,10 @@ class StarRayTrainer:
                     metrics[f"model/{model_id}/star/dropped"] = 0.0
                     continue
 
+                ready_batch = self._shuffle_ready_batch(ready_batch)
                 actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
                 metrics[f"model/{model_id}/star/drop_divisor"] = float(actor_dp_size)
+                metrics[f"model/{model_id}/star/buffer_shuffle_ready"] = float(self._shuffle_ready_buffer)
                 ready_batch, dropped = self._maybe_drop_last(ready_batch, actor_dp_size)
                 metrics[f"model/{model_id}/star/dropped"] = float(dropped)
             except Exception as exc:

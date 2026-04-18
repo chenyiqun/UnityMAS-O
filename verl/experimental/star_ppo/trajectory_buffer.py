@@ -1,5 +1,6 @@
 import time
 import threading
+import random
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -140,12 +141,16 @@ class TrajectoryBuffer:
                 self.ready_queue.append(traj_id)
             return True
 
-    def pop_ready(self, max_items: int | None = None) -> list[TrajectoryEntry]:
+    def pop_ready(self, max_items: int | None = None, *, shuffle: bool = False) -> list[TrajectoryEntry]:
         with self._lock:
             self._evict_expired()
             self._evict_expired_dropped_queries()
             out: list[TrajectoryEntry] = []
             limit = max_items if max_items is not None and max_items > 0 else len(self.ready_queue)
+            if shuffle and len(self.ready_queue) > 1:
+                ready_ids = list(self.ready_queue)
+                random.shuffle(ready_ids)
+                self.ready_queue = deque(ready_ids)
             for _ in range(min(limit, len(self.ready_queue))):
                 traj_id = self.ready_queue.popleft()
                 entry = self.entries.pop(traj_id, None)

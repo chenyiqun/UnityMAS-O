@@ -32,6 +32,7 @@ star:
     max_items: 100000
     ttl_seconds: 7200
     dropped_query_ttl_seconds: 120
+    shuffle_ready: ${oc.decode:${oc.env:STAR_BUFFER_SHUFFLE_READY,true}}
   reward:
     mode: streaming
     emit_intermediate_format: true

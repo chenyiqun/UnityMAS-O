@@ -1,0 +1,32 @@
+defaults:
+  - star_iterative_plan_search_summary_update_answer_f1_trainer
+  - _self_
+
+trainer:
+  experiment_name: ${oc.env:EXPERIMENT_NAME,star_iterative_plan_search_summary_update_answer_f1_shared_llm}
+  llm_engines:
+    - model_id: shared_agent_llm
+      nnodes: ${oc.decode:${oc.env:SHARED_AGENT_NNODES,${oc.env:REASONING_AGENT_NNODES,1}}}
+      n_gpus_per_node: ${oc.decode:${oc.env:SHARED_AGENT_GPUS_PER_NODE,${oc.env:REASONING_AGENT_GPUS_PER_NODE,8}}}
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: ${oc.env:SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:REASONING_MODEL_PATH,null}}}
+
+actor_rollout_ref:
+  model:
+    path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:REASONING_MODEL_PATH,null}}}}
+    tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:REASONING_MODEL_PATH,null}}}}}
+
+star:
+  workflow:
+    mask:
+      plan:
+        model_id: shared_agent_llm
+      search:
+        model_id: shared_agent_llm
+      summary:
+        model_id: shared_agent_llm
+      update:
+        model_id: shared_agent_llm
+      answer:
+        model_id: shared_agent_llm
