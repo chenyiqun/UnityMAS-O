@@ -37,7 +37,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
   rollout:
     name: ${oc.env:ROLLOUT_NAME,vllm}
-    max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,16384}}
+    max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,8192}}
     tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,2}}
     free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
     prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,8192}}
