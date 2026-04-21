@@ -241,7 +241,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                         loss = vf_loss * loss_scale_factor
                     else:
-                        loss_scale_factor = 1 / self.gradient_accumulation
+                        # Scale tail micro-batches by their actual size so an incomplete
+                        # final mini-batch does not contribute like a full configured one.
+                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                         loss = vf_loss * loss_scale_factor
 
                     loss.backward()

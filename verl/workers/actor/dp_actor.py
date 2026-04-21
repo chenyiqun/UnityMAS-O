@@ -575,7 +575,9 @@ class DataParallelPPOActor(BasePPOActor):
                     if self.config.use_dynamic_bsz:
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                     else:
-                        loss_scale_factor = 1 / self.gradient_accumulation
+                        # Scale tail micro-batches by their actual size so an incomplete
+                        # final mini-batch does not contribute like a full configured one.
+                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
 
                     # all return: (bsz, response_length)
                     outputs = self._forward_micro_batch(
