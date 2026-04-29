@@ -452,8 +452,20 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             metrics[f"workflow/code/agent/{agent_id}/prompt_tokens_mean"] = (
                 float(sum(prompt_values) / max(1, len(prompt_values))) if prompt_values else 0.0
             )
+            metrics[f"workflow/code/agent/{agent_id}/prompt_tokens_min"] = (
+                float(min(prompt_values)) if prompt_values else 0.0
+            )
+            metrics[f"workflow/code/agent/{agent_id}/prompt_tokens_max"] = (
+                float(max(prompt_values)) if prompt_values else 0.0
+            )
             metrics[f"workflow/code/agent/{agent_id}/output_tokens_mean"] = (
                 float(sum(output_values) / max(1, len(output_values))) if output_values else 0.0
+            )
+            metrics[f"workflow/code/agent/{agent_id}/output_tokens_min"] = (
+                float(min(output_values)) if output_values else 0.0
+            )
+            metrics[f"workflow/code/agent/{agent_id}/output_tokens_max"] = (
+                float(max(output_values)) if output_values else 0.0
             )
         for verifier_record in verifier_records:
             turn = int(verifier_record.turn_id)
