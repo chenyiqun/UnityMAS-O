@@ -98,22 +98,51 @@ class CodeJsonlDataset(RLHFDataset):
         for key in ("tests", "test_cases", "answer"):
             value = row.get(key)
             if value not in (None, ""):
-                return value
+                return value, key
         reward_model = row.get("reward_model")
         if isinstance(reward_model, dict):
             for key in ("ground_truth", "answer", "target"):
                 value = reward_model.get(key)
                 if value not in (None, ""):
-                    return value
+                    return value, f"reward_model.{key}"
         elif reward_model not in (None, ""):
-            return reward_model
+            return reward_model, "reward_model"
         extra_info = row.get("extra_info")
         if isinstance(extra_info, dict):
             for key in ("tests", "public_test_cases", "private_test_cases"):
                 value = extra_info.get(key)
                 if value not in (None, ""):
-                    return value
-        return ""
+                    return value, f"extra_info.{key}"
+        return "", "none"
+
+    @classmethod
+    def _count_test_cases(cls, value) -> int:
+        value = cls._json_loads_maybe(value)
+        if isinstance(value, dict) and "tests" in value:
+            value = cls._json_loads_maybe(value.get("tests"))
+        if isinstance(value, dict) and ("public_tests" in value or "private_tests" in value):
+            value = cls._json_loads_maybe(value.get("public_tests") or value.get("private_tests") or {})
+        if isinstance(value, dict):
+            if "inputs" in value and "outputs" in value:
+                inputs = cls._json_loads_maybe(value.get("inputs"))
+                outputs = cls._json_loads_maybe(value.get("outputs"))
+                return min(len(inputs or []), len(outputs or [])) if isinstance(inputs, list) and isinstance(outputs, list) else 0
+            if "input" in value or "output" in value:
+                return 1
+            return 0
+        if isinstance(value, list):
+            total = 0
+            for item in value:
+                item = cls._json_loads_maybe(item)
+                if isinstance(item, dict) and "inputs" in item and "outputs" in item:
+                    inputs = cls._json_loads_maybe(item.get("inputs"))
+                    outputs = cls._json_loads_maybe(item.get("outputs"))
+                    if isinstance(inputs, list) and isinstance(outputs, list):
+                        total += min(len(inputs), len(outputs))
+                elif isinstance(item, dict) and ("input" in item or "output" in item):
+                    total += 1
+            return total
+        return 0
 
     @classmethod
     def _normalize_raw_row(cls, row: dict, prompt_key: str, row_index: int) -> dict:
@@ -133,7 +162,15 @@ class CodeJsonlDataset(RLHFDataset):
             uid = f"{source}/{split}/{row.get('row_id', extra_info_raw.get('row_id', row_index))}"
 
         metadata_str = cls._json_dumps_maybe(metadata)
-        tests_str = cls._json_dumps_maybe(cls._extract_tests_value(row))
+        tests_value, tests_source = cls._extract_tests_value(row)
+        tests_count_raw = cls._count_test_cases(tests_value)
+        try:
+            from verl.experimental.star_ppo.tools.code_verifier import CodeVerifierTool
+
+            tests_count = len(CodeVerifierTool.normalize_and_expand_tests(tests_value, problem=problem))
+        except Exception:
+            tests_count = tests_count_raw
+        tests_str = cls._json_dumps_maybe(tests_value)
         normalized_extra_info = {
             "index": int(row_index),
             "tools_kwargs": {},
@@ -143,6 +180,9 @@ class CodeJsonlDataset(RLHFDataset):
             "starter_code": str(starter_code),
             "source": source,
             "split": split,
+            "tests_source": str(tests_source),
+            "tests_count_raw": int(tests_count_raw),
+            "tests_count": int(tests_count),
         }
 
         return {
@@ -156,6 +196,9 @@ class CodeJsonlDataset(RLHFDataset):
             "split": split,
             "starter_code": str(starter_code),
             "tests": tests_str,
+            "tests_source": str(tests_source),
+            "tests_count_raw": int(tests_count_raw),
+            "tests_count": int(tests_count),
             "metadata": metadata_str,
             "extra_info": normalized_extra_info,
         }

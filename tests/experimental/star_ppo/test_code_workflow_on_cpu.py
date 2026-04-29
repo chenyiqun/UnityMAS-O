@@ -22,6 +22,27 @@ def test_code_verifier_standard_input_passes():
     assert result["runner_count"] == 1
 
 
+def test_code_verifier_expands_batched_stdio_cases():
+    verifier = CodeVerifierTool(timeout_seconds=2)
+    result = verifier(
+        {
+            "code": (
+                "<code>\n"
+                "t = int(input())\n"
+                "for _ in range(t):\n"
+                "    x, y = map(int, input().split())\n"
+                "    print(min(x, y), max(x, y))\n"
+                "</code>"
+            ),
+            "tests": '[{"input": "3\\n1 9\\n8 4\\n2 0\\n", "output": "1 9\\n4 8\\n0 2\\n"}]',
+        }
+    )
+    assert result["total_raw"] == 1
+    assert result["total"] == 3
+    assert result["pass_rate"] == 1.0
+    assert result["all_passed"] == 1
+
+
 def test_code_verifier_supports_call_based_tests():
     verifier = CodeVerifierTool(timeout_seconds=2)
     result = verifier(
@@ -48,6 +69,33 @@ def test_code_verifier_rearrange_string_special_judge_accepts_alternate_answer()
     assert result["pass_rate"] == 1.0
     assert result["all_passed"] == 1
     assert result["checker_type"] == "cf_rearrange_string"
+
+
+def test_code_verifier_expands_batched_special_judge_cases():
+    verifier = CodeVerifierTool(timeout_seconds=2)
+    problem = "Rearrange the characters of s to form a new string r that is not equal to s, or report impossible."
+    result = verifier(
+        {
+            "problem": problem,
+            "code": (
+                "<code>\n"
+                "t = int(input())\n"
+                "for _ in range(t):\n"
+                "    s = input().strip()\n"
+                "    if len(set(s)) == 1:\n"
+                "        print('NO')\n"
+                "    else:\n"
+                "        print('YES')\n"
+                "        print(s[::-1])\n"
+                "</code>"
+            ),
+            "tests": '[{"input": "2\\nco\\naaaaa\\n", "output": "YES\\noc\\nNO\\n"}]',
+        }
+    )
+    assert result["total_raw"] == 1
+    assert result["total"] == 2
+    assert result["pass_rate"] == 1.0
+    assert result["all_passed"] == 1
 
 
 def test_code_parser_requires_single_outer_tag():

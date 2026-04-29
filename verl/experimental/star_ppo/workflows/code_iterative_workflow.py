@@ -108,6 +108,12 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         return ""
 
     @staticmethod
+    def _safe_metric_name(value: Any) -> str:
+        text = str(value or "unknown").strip().lower()
+        text = re.sub(r"[^a-zA-Z0-9_.-]+", "_", text)
+        return text.strip("_") or "unknown"
+
+    @staticmethod
     def _new_global_state(problem: str, starter_code: str = "") -> dict[str, Any]:
         return {
             "problem": str(problem or ""),
@@ -267,6 +273,17 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         tests = self._extract_first(query_batch, self.tests_candidates, "")
         starter_code = str(self._extract_first(query_batch, self.starter_code_candidates, "") or "")
         query_id = self._extract_query_id(query_batch)
+        tests_source = str(
+            self._extract_first(query_batch, ["tests_source", "extra_info.tests_source"], "unknown") or "unknown"
+        )
+        try:
+            tests_count = float(self._extract_first(query_batch, ["tests_count", "extra_info.tests_count"], 0) or 0)
+            tests_count_raw = float(
+                self._extract_first(query_batch, ["tests_count_raw", "extra_info.tests_count_raw"], tests_count) or 0
+            )
+        except Exception:
+            tests_count = 0.0
+            tests_count_raw = 0.0
 
         state: dict[str, Any] = self._new_global_state(problem, starter_code)
         records: list[WorkflowExecutionRecord] = []
@@ -419,6 +436,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             "workflow/code/stopped_by_all_passed": float(1.0 if stopped_by_all_passed else 0.0),
             "workflow/code/global_state_iterations": float(len(state.get("iterations", []))),
             "workflow/code/global_state_chars": float(len(self._format_global_state(state))),
+            "workflow/code/tests_count_raw": float(tests_count_raw),
+            "workflow/code/tests_count": float(tests_count),
+            f"workflow/code/tests_source/{self._safe_metric_name(tests_source)}": 1.0,
             "workflow/code/verifier/pass_rate_mean": (
                 float(sum(verifier_pass_rates) / max(1, len(verifier_pass_rates))) if verifier_pass_rates else 0.0
             ),

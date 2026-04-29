@@ -101,6 +101,76 @@ class CodeVerifierTool:
         return cls.normalize_test_spec(tests)["cases"]
 
     @classmethod
+    def normalize_and_expand_tests(
+        cls,
+        tests: Any,
+        problem: str = "",
+        default_checker_type: str = "auto",
+    ) -> list[dict[str, Any]]:
+        cases = cls.normalize_tests(tests)
+        return cls.expand_batched_stdio_tests(cases, problem=problem, default_checker_type=default_checker_type)
+
+    @classmethod
+    def expand_batched_stdio_tests(
+        cls,
+        cases: list[dict[str, Any]],
+        problem: str = "",
+        default_checker_type: str = "auto",
+    ) -> list[dict[str, Any]]:
+        expanded: list[dict[str, Any]] = []
+        for case in cases:
+            expanded.extend(cls._split_batched_stdio_case(case, problem, default_checker_type))
+        return expanded
+
+    @staticmethod
+    def _nonempty_lines(value: Any) -> list[str]:
+        return [line.strip() for line in str(value or "").splitlines() if line.strip()]
+
+    @classmethod
+    def _split_batched_stdio_case(
+        cls,
+        case: dict[str, Any],
+        problem: str,
+        default_checker_type: str,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(case, dict):
+            return []
+        if str(case.get("fn_name") or "").strip():
+            return [case]
+
+        input_lines = cls._nonempty_lines(case.get("input", ""))
+        if len(input_lines) <= 2:
+            return [case]
+        try:
+            t = int(input_lines[0])
+        except Exception:
+            return [case]
+        if t <= 1 or len(input_lines[1:]) != t:
+            return [case]
+
+        checker_type = cls._infer_checker_type(problem, case, default_checker_type)
+        output_lines = cls._nonempty_lines(case.get("output", ""))
+        if checker_type in {"standard", "unordered_tokens"}:
+            if len(output_lines) != t:
+                return [case]
+            outputs = output_lines
+        elif checker_type == "cf_rearrange_string":
+            outputs = [""] * t
+        else:
+            return [case]
+
+        split_cases: list[dict[str, Any]] = []
+        for idx, (input_line, output) in enumerate(zip(input_lines[1:], outputs)):
+            split_case = dict(case)
+            split_case["input"] = f"1\n{input_line}\n"
+            split_case["output"] = f"{output}\n" if output else ""
+            split_case["checker_type"] = checker_type
+            split_case["batch_parent_index"] = idx
+            split_case["batch_parent_size"] = t
+            split_cases.append(split_case)
+        return split_cases
+
+    @classmethod
     def normalize_test_spec(cls, tests: Any) -> dict[str, Any]:
         tests = cls._loads_maybe(tests)
         if isinstance(tests, dict) and "tests" in tests:
@@ -732,21 +802,27 @@ class CodeVerifierTool:
         problem = str(payload.get("problem", "") or "")
         metadata = payload.get("metadata", payload.get("extra_info", {}))
         code = self.extract_code(payload.get("code", ""))
-        tests = self.normalize_tests(payload.get("tests", []))
+        raw_tests = self.normalize_tests(payload.get("tests", []))
         if isinstance(metadata, str):
             metadata = self._loads_maybe(metadata)
         if isinstance(metadata, dict):
             metadata_fn_name = str(metadata.get("func_name") or metadata.get("function_name") or "").strip()
             if metadata_fn_name:
-                for test in tests:
+                for test in raw_tests:
                     if not test.get("fn_name"):
                         test["fn_name"] = metadata_fn_name
+        tests = self.expand_batched_stdio_tests(
+            raw_tests,
+            problem=problem,
+            default_checker_type=self.default_checker_type,
+        )
 
         result: dict[str, Any] = {
             "pass_rate": 0.0,
             "all_passed": 0,
             "passed": 0,
             "total": len(tests),
+            "total_raw": len(raw_tests),
             "error": "",
             "error_code": 0,
             "error_message": "",
