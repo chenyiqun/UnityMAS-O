@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 
 import datasets
@@ -17,21 +18,161 @@ class CodeJsonlDataset(RLHFDataset):
     fields for the STAR workflow verifier.
     """
 
+    @staticmethod
+    def _json_dumps_maybe(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _json_loads_maybe(value):
+        if not isinstance(value, str):
+            return value
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return value
+
+    @classmethod
+    def _read_json_rows(cls, path: str) -> list[dict]:
+        rows: list[dict] = []
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        stripped = content.strip()
+        if not stripped:
+            return rows
+        parsed = cls._json_loads_maybe(stripped)
+        if isinstance(parsed, list):
+            return [row for row in parsed if isinstance(row, dict)]
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("data"), list):
+                return [row for row in parsed["data"] if isinstance(row, dict)]
+            return [parsed]
+
+        for line in stripped.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            row = cls._json_loads_maybe(line)
+            if isinstance(row, dict):
+                rows.append(row)
+        return rows
+
+    @classmethod
+    def _extract_problem_text(cls, row: dict, prompt_key: str) -> str:
+        for key in ("problem", "question", "query"):
+            value = row.get(key)
+            if value:
+                return str(value)
+        prompt_value = row.get(prompt_key) or row.get("prompt")
+        if isinstance(prompt_value, str):
+            return prompt_value
+        if isinstance(prompt_value, list):
+            texts = []
+            for message in prompt_value:
+                if isinstance(message, dict):
+                    content = message.get("content", "")
+                    if isinstance(content, str):
+                        texts.append(content)
+                    elif isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and "text" in part:
+                                texts.append(str(part.get("text", "")))
+                            elif isinstance(part, str):
+                                texts.append(part)
+                else:
+                    texts.append(str(message))
+            return "\n".join(text for text in texts if text).strip()
+        return str(prompt_value or "")
+
+    @classmethod
+    def _extract_tests_value(cls, row: dict):
+        for key in ("tests", "test_cases", "answer"):
+            value = row.get(key)
+            if value not in (None, ""):
+                return value
+        reward_model = row.get("reward_model")
+        if isinstance(reward_model, dict):
+            for key in ("ground_truth", "answer", "target"):
+                value = reward_model.get(key)
+                if value not in (None, ""):
+                    return value
+        elif reward_model not in (None, ""):
+            return reward_model
+        extra_info = row.get("extra_info")
+        if isinstance(extra_info, dict):
+            for key in ("tests", "public_test_cases", "private_test_cases"):
+                value = extra_info.get(key)
+                if value not in (None, ""):
+                    return value
+        return ""
+
+    @classmethod
+    def _normalize_raw_row(cls, row: dict, prompt_key: str, row_index: int) -> dict:
+        extra_info_raw = row.get("extra_info")
+        if isinstance(extra_info_raw, str):
+            extra_info_raw = cls._json_loads_maybe(extra_info_raw)
+        if not isinstance(extra_info_raw, dict):
+            extra_info_raw = {}
+
+        metadata = row.get("metadata", extra_info_raw.get("metadata", {}))
+        starter_code = row.get("starter_code", extra_info_raw.get("starter_code", "")) or ""
+        problem = cls._extract_problem_text(row, prompt_key)
+        source = str(row.get("source") or row.get("data_source") or row.get("datasource") or extra_info_raw.get("source") or "code")
+        split = str(row.get("split") or extra_info_raw.get("split") or "unknown")
+        uid = str(row.get("uid") or row.get("query_id") or row.get("id") or "")
+        if not uid:
+            uid = f"{source}/{split}/{row.get('row_id', extra_info_raw.get('row_id', row_index))}"
+
+        metadata_str = cls._json_dumps_maybe(metadata)
+        tests_str = cls._json_dumps_maybe(cls._extract_tests_value(row))
+        normalized_extra_info = {
+            "index": int(row_index),
+            "tools_kwargs": {},
+            "interaction_kwargs": {},
+            "need_tools_kwargs": False,
+            "metadata": metadata_str,
+            "starter_code": str(starter_code),
+            "source": source,
+            "split": split,
+        }
+
+        return {
+            prompt_key: [{"role": "user", "content": problem}],
+            "prompt": [{"role": "user", "content": problem}],
+            "problem": problem,
+            "query_id": uid,
+            "uid": uid,
+            "data_source": source,
+            "source": source,
+            "split": split,
+            "starter_code": str(starter_code),
+            "tests": tests_str,
+            "metadata": metadata_str,
+            "extra_info": normalized_extra_info,
+        }
+
     def _read_files_and_tokenize(self):
-        dataframes = []
+        rows = []
         for data_file in self.data_files:
             if data_file.endswith(".parquet"):
                 dataframe = datasets.load_dataset("parquet", data_files=data_file)["train"]
+                rows.extend(dict(row) for row in dataframe)
             elif data_file.endswith((".json", ".jsonl")):
-                dataframe = datasets.load_dataset("json", data_files=data_file)["train"]
+                rows.extend(self._read_json_rows(data_file))
             else:
                 raise ValueError(f"Unsupported file format for CodeJsonlDataset: {data_file}")
-            dataframes.append(dataframe)
 
-        self.dataframe: datasets.Dataset = datasets.concatenate_datasets(dataframes)
-        total = len(self.dataframe)
+        total = len(rows)
         print(f"dataset len: {total}")
-
         if self.max_samples > 0 and self.max_samples < total:
             if self.shuffle:
                 rngs_args = (self.seed,) if self.seed is not None else ()
@@ -39,55 +180,12 @@ class CodeJsonlDataset(RLHFDataset):
                 indices = rng.choice(total, size=self.max_samples, replace=False)
             else:
                 indices = np.arange(self.max_samples)
-            self.dataframe = self.dataframe.select(indices.tolist())
+            rows = [rows[int(i)] for i in indices]
             print(f"selected {self.max_samples} random samples out of {total}")
 
         prompt_key = self.prompt_key
-
-        def row_problem_text(row):
-            for key in ("problem", "question", "query"):
-                value = row.get(key)
-                if value:
-                    return str(value)
-            prompt_value = row.get(prompt_key) or row.get("prompt")
-            if isinstance(prompt_value, str):
-                return prompt_value
-            if isinstance(prompt_value, list):
-                texts = []
-                for message in prompt_value:
-                    if isinstance(message, dict):
-                        content = message.get("content", "")
-                        if isinstance(content, str):
-                            texts.append(content)
-                        elif isinstance(content, list):
-                            for part in content:
-                                if isinstance(part, dict) and "text" in part:
-                                    texts.append(str(part.get("text", "")))
-                                elif isinstance(part, str):
-                                    texts.append(part)
-                    else:
-                        texts.append(str(message))
-                return "\n".join(text for text in texts if text).strip()
-            return str(prompt_value or "")
-
-        def normalize_row(row):
-            problem = row_problem_text(row)
-            uid = str(row.get("uid") or row.get("query_id") or row.get("id") or "")
-            if not uid:
-                uid = (
-                    f"{row.get('source') or row.get('datasource') or row.get('data_source') or 'code'}/"
-                    f"{row.get('split', 'unknown')}/{row.get('row_id', '')}"
-                )
-            row[prompt_key] = [{"role": "user", "content": problem}]
-            row["query_id"] = uid
-            row["data_source"] = str(row.get("source") or row.get("data_source") or row.get("datasource") or "code")
-            if row.get("starter_code") is None:
-                row["starter_code"] = ""
-            if "extra_info" not in row or row["extra_info"] is None:
-                row["extra_info"] = {}
-            return row
-
-        self.dataframe = self.dataframe.map(normalize_row, desc="Building code-task prompts")
+        normalized_rows = [self._normalize_raw_row(row, prompt_key, idx) for idx, row in enumerate(rows)]
+        self.dataframe = datasets.Dataset.from_list(normalized_rows)
         self.dataframe = self.maybe_filter_out_long_prompts(self.dataframe)
 
     def _download(self, use_origin_parquet=False):
