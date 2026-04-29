@@ -191,7 +191,24 @@ star:
           complete Python source code here
           </code>
 
-          Do not use Markdown fences. Do not output explanations outside the code tags.
+          Correct format example:
+          <code>
+          import sys
+
+          def solve():
+              data = sys.stdin.read().strip().split()
+              # Replace this example logic with the actual solution.
+              if not data:
+                  return
+              print(data[0])
+
+          if __name__ == "__main__":
+              solve()
+          </code>
+
+          Do not copy the example logic. Solve the original problem.
+          Do not use Markdown fences such as ```python. Do not output explanations before or after the code tags.
+          Your entire response must be exactly one <code>...</code> block.
       reflection:
         model_id: reflection_llm
         agent_id: reflection_agent
