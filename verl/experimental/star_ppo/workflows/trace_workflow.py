@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -404,6 +405,16 @@ class TraceWorkflowRunner(WorkflowRunner):
             return await asyncio.to_thread(func, *args, **kwargs)
 
         try:
+            if hasattr(tool, "acall"):
+                coro = tool.acall(input_value)
+                if self.tool_timeout_seconds > 0:
+                    return await asyncio.wait_for(coro, timeout=self.tool_timeout_seconds)
+                return await coro
+            if hasattr(tool, "aquery"):
+                coro = tool.aquery(question=str(input_value), N=top_k, max_attempts=max_attempts)
+                if self.tool_timeout_seconds > 0:
+                    return await asyncio.wait_for(coro, timeout=self.tool_timeout_seconds)
+                return await coro
             if hasattr(tool, "query"):
                 try:
                     return await _run_tool_call(tool.query, question=str(input_value), N=top_k, max_attempts=max_attempts)
@@ -412,6 +423,11 @@ class TraceWorkflowRunner(WorkflowRunner):
             if hasattr(tool, "retrieve"):
                 return await _run_tool_call(tool.retrieve, str(input_value), top_k)
             if callable(tool):
+                if inspect.iscoroutinefunction(tool):
+                    coro = tool(input_value)
+                    if self.tool_timeout_seconds > 0:
+                        return await asyncio.wait_for(coro, timeout=self.tool_timeout_seconds)
+                    return await coro
                 return await _run_tool_call(tool, input_value)
             raise TypeError(f"tool {tool_name} is not callable and has no query()/retrieve()")
         except Exception:
