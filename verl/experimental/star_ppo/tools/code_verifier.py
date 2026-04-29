@@ -307,22 +307,234 @@ class CodeVerifierTool:
             f.write(runner)
         return runner_path
 
-    def _run_python(self, script_path: str, stdin: str, cwd: str) -> tuple[int, str, str, str]:
+    def _write_stdio_batch_runner(self, tmpdir: str, code: str) -> str:
+        runner_path = os.path.join(tmpdir, "stdio_batch_runner.py")
+        runner = (
+            self._guard_prelude()
+            + "\n\n"
+            + textwrap.dedent(
+                f"""
+                import contextlib as __verl_contextlib
+                import io as __verl_io
+                import json as __verl_json
+                import signal as __verl_signal
+                import sys as __verl_sys
+                import traceback as __verl_traceback
+
+                __verl_user_code = {str(code or "")!r}
+                __verl_case_timeout = {float(self.timeout_seconds)!r}
+                __verl_compiled = compile(__verl_user_code, "solution.py", "exec")
+                __verl_payload = __verl_json.loads(__verl_sys.stdin.read() or "[]")
+                __verl_results = []
+
+                class __VerlCaseTimeout(Exception):
+                    pass
+
+                def __verl_timeout_handler(__verl_signum, __verl_frame):
+                    raise __VerlCaseTimeout(
+                        f"Time limit exceeded after {{__verl_case_timeout:.2f}}s."
+                    )
+
+                for __verl_case in __verl_payload:
+                    __verl_stdin = str(__verl_case.get("input", ""))
+                    __verl_stdout = __verl_io.StringIO()
+                    __verl_stderr = __verl_io.StringIO()
+                    __verl_old_stdin, __verl_old_stdout, __verl_old_stderr = (
+                        __verl_sys.stdin,
+                        __verl_sys.stdout,
+                        __verl_sys.stderr,
+                    )
+                    __verl_returncode = 0
+                    __verl_error = ""
+                    try:
+                        __verl_signal.signal(__verl_signal.SIGALRM, __verl_timeout_handler)
+                        __verl_signal.setitimer(__verl_signal.ITIMER_REAL, __verl_case_timeout)
+                        __verl_sys.stdin = __verl_io.StringIO(__verl_stdin)
+                        __verl_sys.stdout = __verl_stdout
+                        __verl_sys.stderr = __verl_stderr
+                        __verl_ns = {{"__name__": "__main__", "__file__": "solution.py"}}
+                        exec(__verl_compiled, __verl_ns, __verl_ns)
+                    except SystemExit as __verl_exc:
+                        __verl_code = __verl_exc.code
+                        if __verl_code not in (None, 0):
+                            __verl_returncode = int(__verl_code) if isinstance(__verl_code, int) else 1
+                            __verl_error = "SystemExit: " + str(__verl_code)
+                    except __VerlCaseTimeout as __verl_exc:
+                        __verl_returncode = -1
+                        __verl_error = str(__verl_exc)
+                    except BaseException:
+                        __verl_returncode = 1
+                        __verl_error = __verl_traceback.format_exc(limit=8)
+                    finally:
+                        __verl_signal.setitimer(__verl_signal.ITIMER_REAL, 0.0)
+                        __verl_sys.stdin = __verl_old_stdin
+                        __verl_sys.stdout = __verl_old_stdout
+                        __verl_sys.stderr = __verl_old_stderr
+
+                    __verl_results.append({{
+                        "returncode": __verl_returncode,
+                        "stdout": __verl_stdout.getvalue(),
+                        "stderr": __verl_stderr.getvalue(),
+                        "error": __verl_error,
+                    }})
+
+                __verl_sys.stdout.write(__verl_json.dumps(__verl_results, ensure_ascii=False))
+                """
+            ).strip()
+        )
+        with open(runner_path, "w", encoding="utf-8") as f:
+            f.write(runner)
+        return runner_path
+
+    def _write_call_batch_runner(self, tmpdir: str, code: str) -> str:
+        runner_path = os.path.join(tmpdir, "call_batch_runner.py")
+        code = self._strip_main_guard(code)
+        runner = (
+            self._guard_prelude()
+            + "\n\n"
+            + code
+            + "\n\n"
+            + self._json_safe_expr()
+            + "\n"
+            + textwrap.dedent(
+                """
+                import json as __verl_json
+                import signal as __verl_signal
+                import sys as __verl_sys
+                import traceback as __verl_traceback
+
+                __verl_case_timeout = __VERL_CASE_TIMEOUT__
+
+                def __verl_parse_args(__verl_payload):
+                    __verl_payload = str(__verl_payload or "")
+                    __verl_lines = [line for line in __verl_payload.splitlines() if line.strip()]
+                    if __verl_lines:
+                        return [__verl_json.loads(line) for line in __verl_lines]
+                    if __verl_payload.strip():
+                        return [__verl_json.loads(__verl_payload)]
+                    return []
+
+                class __VerlCaseTimeout(Exception):
+                    pass
+
+                def __verl_timeout_handler(__verl_signum, __verl_frame):
+                    raise __VerlCaseTimeout(
+                        f"Time limit exceeded after {__verl_case_timeout:.2f}s."
+                    )
+
+                __verl_cases = __verl_json.loads(__verl_sys.stdin.read() or "[]")
+                __verl_results = []
+                for __verl_case in __verl_cases:
+                    __verl_fn_name = str(__verl_case.get("fn_name") or "")
+                    __verl_returncode = 0
+                    __verl_stdout = ""
+                    __verl_stderr = ""
+                    __verl_error = ""
+                    try:
+                        __verl_signal.signal(__verl_signal.SIGALRM, __verl_timeout_handler)
+                        __verl_signal.setitimer(__verl_signal.ITIMER_REAL, __verl_case_timeout)
+                        __verl_target = globals().get(__verl_fn_name)
+                        if __verl_target is None and "Solution" in globals():
+                            __verl_obj = globals()["Solution"]()
+                            __verl_target = getattr(__verl_obj, __verl_fn_name)
+                        if __verl_target is None:
+                            raise AttributeError("function not found: " + __verl_fn_name)
+                        __verl_args = __verl_parse_args(__verl_case.get("input", ""))
+                        __verl_output = __verl_target(*__verl_args)
+                        __verl_stdout = __verl_json.dumps(__verl_json_safe(__verl_output), ensure_ascii=False)
+                    except __VerlCaseTimeout as __verl_exc:
+                        __verl_returncode = -1
+                        __verl_error = str(__verl_exc)
+                    except BaseException:
+                        __verl_returncode = 1
+                        __verl_error = __verl_traceback.format_exc(limit=8)
+                    finally:
+                        __verl_signal.setitimer(__verl_signal.ITIMER_REAL, 0.0)
+                    __verl_results.append({
+                        "returncode": __verl_returncode,
+                        "stdout": __verl_stdout,
+                        "stderr": __verl_stderr,
+                        "error": __verl_error,
+                    })
+
+                __verl_sys.stdout.write(__verl_json.dumps(__verl_results, ensure_ascii=False))
+                """
+            ).strip()
+        )
+        runner = runner.replace("__VERL_CASE_TIMEOUT__", repr(float(self.timeout_seconds)))
+        with open(runner_path, "w", encoding="utf-8") as f:
+            f.write(runner)
+        return runner_path
+
+    def _run_python(
+        self,
+        script_path: str,
+        stdin: str,
+        cwd: str,
+        timeout_seconds: float | None = None,
+    ) -> tuple[int, str, str, str]:
+        timeout_seconds = self.timeout_seconds if timeout_seconds is None else float(timeout_seconds)
         try:
             proc = subprocess.run(
                 [self.python_executable, script_path],
                 input=stdin,
                 text=True,
                 capture_output=True,
-                timeout=self.timeout_seconds,
+                timeout=timeout_seconds,
                 cwd=cwd,
                 preexec_fn=self._preexec_memory_limit(),
             )
             return proc.returncode, proc.stdout, proc.stderr, ""
         except subprocess.TimeoutExpired:
-            return -1, "", "", f"Time limit exceeded after {self.timeout_seconds:.2f}s."
+            return -1, "", "", f"Time limit exceeded after {timeout_seconds:.2f}s."
         except Exception as exc:
             return -1, "", "", f"{type(exc).__name__}: {exc}"
+
+    def _run_batch_runner(
+        self,
+        script_path: str,
+        cases: list[dict[str, Any]],
+        cwd: str,
+        timeout_seconds: float,
+    ) -> list[dict[str, Any]]:
+        runner_input = json.dumps(cases, ensure_ascii=False)
+        returncode, stdout, stderr, run_error = self._run_python(
+            script_path,
+            runner_input,
+            cwd,
+            timeout_seconds=timeout_seconds,
+        )
+        if run_error:
+            return [
+                {"returncode": returncode, "stdout": "", "stderr": stderr, "error": run_error}
+                for _ in cases
+            ]
+        if returncode != 0:
+            err = stderr or f"Batch runner exited with non-zero code: {returncode}"
+            return [
+                {"returncode": returncode, "stdout": "", "stderr": stderr, "error": err}
+                for _ in cases
+            ]
+        try:
+            parsed = json.loads(stdout or "[]")
+        except Exception as exc:
+            err = f"Batch runner produced invalid JSON: {type(exc).__name__}: {exc}"
+            return [{"returncode": -1, "stdout": stdout, "stderr": stderr, "error": err} for _ in cases]
+        if not isinstance(parsed, list):
+            err = "Batch runner output is not a list."
+            return [{"returncode": -1, "stdout": stdout, "stderr": stderr, "error": err} for _ in cases]
+        results: list[dict[str, Any]] = []
+        for idx in range(len(cases)):
+            item = parsed[idx] if idx < len(parsed) and isinstance(parsed[idx], dict) else {}
+            results.append(
+                {
+                    "returncode": int(item.get("returncode", 0) or 0),
+                    "stdout": str(item.get("stdout", "") or ""),
+                    "stderr": str(item.get("stderr", "") or ""),
+                    "error": str(item.get("error", "") or ""),
+                }
+            )
+        return results
 
     @staticmethod
     def _parse_json_maybe(value: Any) -> Any:
@@ -541,6 +753,8 @@ class CodeVerifierTool:
             "failed_test_index": -1,
             "test_results": [],
             "checker_type": "",
+            "runner_count": 0,
+            "batch_mode": "",
             "duration_s": 0.0,
         }
         if not code.strip():
@@ -556,7 +770,7 @@ class CodeVerifierTool:
             result["duration_s"] = float(time.perf_counter() - start)
             return result
 
-        hard_deadline = start + self.timeout_seconds * max(1, len(tests)) + 5.0
+        batch_timeout = self.timeout_seconds * max(1, len(tests)) + 5.0
         passed = 0
         first_error = ""
         first_error_code = 0
@@ -565,31 +779,55 @@ class CodeVerifierTool:
         checker_types: list[str] = []
 
         with tempfile.TemporaryDirectory(prefix="verl_code_verify_") as tmpdir:
-            solution_path = self._write_solution(tmpdir, code)
-            call_runner_by_fn: dict[str, str] = {}
+            batch_results: list[dict[str, Any] | None] = [None] * len(tests)
+            stdio_indices = [idx for idx, test in enumerate(tests) if not str(test.get("fn_name") or "").strip()]
+            call_indices = [idx for idx, test in enumerate(tests) if str(test.get("fn_name") or "").strip()]
+            runner_count = 0
+            batch_modes: list[str] = []
+
+            if stdio_indices:
+                runner_count += 1
+                batch_modes.append("stdio")
+                stdio_runner = self._write_stdio_batch_runner(tmpdir, code)
+                stdio_cases = [{"input": str(tests[idx].get("input", ""))} for idx in stdio_indices]
+                stdio_results = self._run_batch_runner(stdio_runner, stdio_cases, tmpdir, batch_timeout)
+                for idx, item in zip(stdio_indices, stdio_results):
+                    batch_results[idx] = item
+
+            if call_indices:
+                runner_count += 1
+                batch_modes.append("call")
+                call_runner = self._write_call_batch_runner(tmpdir, code)
+                call_cases = [
+                    {
+                        "input": str(tests[idx].get("input", "")),
+                        "fn_name": str(tests[idx].get("fn_name") or "").strip(),
+                    }
+                    for idx in call_indices
+                ]
+                call_results = self._run_batch_runner(call_runner, call_cases, tmpdir, batch_timeout)
+                for idx, item in zip(call_indices, call_results):
+                    batch_results[idx] = item
+
+            result["runner_count"] = int(runner_count)
+            result["batch_mode"] = "+".join(batch_modes)
 
             for idx, test in enumerate(tests):
                 failure_kind = ""
-                if time.perf_counter() > hard_deadline:
-                    ok = False
+                fn_name = str(test.get("fn_name") or "").strip()
+                runner_result = batch_results[idx] if idx < len(batch_results) else None
+                if not isinstance(runner_result, dict):
+                    returncode = -1
                     stdout = ""
                     stderr = ""
-                    run_error = "Global verifier timeout."
-                    returncode = -1
-                    failure_kind = "timeout"
+                    run_error = "Batch verifier did not produce a result for this test."
+                    ok = False
+                    failure_kind = "runtime"
                 else:
-                    fn_name = str(test.get("fn_name") or "").strip()
-                    stdin = str(test.get("input", ""))
-                    if fn_name:
-                        if fn_name not in call_runner_by_fn:
-                            call_runner_by_fn[fn_name] = self._write_call_runner(tmpdir, code, fn_name)
-                        returncode, stdout, stderr, run_error = self._run_python(
-                            call_runner_by_fn[fn_name],
-                            stdin,
-                            tmpdir,
-                        )
-                    else:
-                        returncode, stdout, stderr, run_error = self._run_python(solution_path, stdin, tmpdir)
+                    returncode = int(runner_result.get("returncode", 0) or 0)
+                    stdout = str(runner_result.get("stdout", "") or "")
+                    stderr = str(runner_result.get("stderr", "") or "")
+                    run_error = str(runner_result.get("error", "") or "")
 
                     if run_error:
                         ok = False

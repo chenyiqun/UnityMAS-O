@@ -392,6 +392,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         verifier_total_tests: list[float] = []
         verifier_durations: list[float] = []
         verifier_error_codes: list[float] = []
+        verifier_runner_counts: list[float] = []
         for record in records:
             if record.node_id.startswith("verifier_"):
                 parsed = record.parsed_output if isinstance(record.parsed_output, dict) else {}
@@ -400,6 +401,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 verifier_total_tests.append(float(parsed.get("total", 0) or 0))
                 verifier_durations.append(float(parsed.get("duration_s", record.meta.get("duration_s", 0.0)) or 0.0))
                 verifier_error_codes.append(float(parsed.get("error_code", 0) or 0))
+                verifier_runner_counts.append(float(parsed.get("runner_count", 0) or 0))
             if not record.agent_id or not record.trainable:
                 continue
             agent_id = str(record.agent_id)
@@ -431,6 +433,11 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             ),
             "workflow/code/verifier/error_code_mean": (
                 float(sum(verifier_error_codes) / max(1, len(verifier_error_codes))) if verifier_error_codes else 0.0
+            ),
+            "workflow/code/verifier/runner_count_mean": (
+                float(sum(verifier_runner_counts) / max(1, len(verifier_runner_counts)))
+                if verifier_runner_counts
+                else 0.0
             ),
             "workflow/code/agent/planner_agent/call_count": float(agent_call_counts.get("planner_agent", 0)),
             "workflow/code/agent/coder_agent/call_count": float(agent_call_counts.get("coder_agent", 0)),

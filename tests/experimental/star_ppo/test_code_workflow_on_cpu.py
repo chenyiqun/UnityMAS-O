@@ -19,6 +19,7 @@ def test_code_verifier_standard_input_passes():
     )
     assert result["pass_rate"] == 1.0
     assert result["all_passed"] == 1
+    assert result["runner_count"] == 1
 
 
 def test_code_verifier_supports_call_based_tests():
@@ -31,6 +32,7 @@ def test_code_verifier_supports_call_based_tests():
     )
     assert result["pass_rate"] == 1.0
     assert result["all_passed"] == 1
+    assert result["runner_count"] == 1
 
 
 def test_code_verifier_rearrange_string_special_judge_accepts_alternate_answer():
