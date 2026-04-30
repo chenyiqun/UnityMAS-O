@@ -26,6 +26,7 @@ def test_code_verifier_expands_batched_stdio_cases():
     verifier = CodeVerifierTool(timeout_seconds=2)
     result = verifier(
         {
+            "problem": "The first line contains a single integer t — the number of test cases.",
             "code": (
                 "<code>\n"
                 "t = int(input())\n"
@@ -43,6 +44,15 @@ def test_code_verifier_expands_batched_stdio_cases():
     assert result["all_passed"] == 1
 
 
+def test_code_verifier_does_not_expand_single_case_n_line_input():
+    tests = '[{"input": "3\\na\\nb\\nc\\n", "output": "a\\nb\\nc\\n"}]'
+    expanded = CodeVerifierTool.normalize_and_expand_tests(
+        tests,
+        problem="Given n strings. Print the strings in order.",
+    )
+    assert len(expanded) == 1
+
+
 def test_code_verifier_supports_call_based_tests():
     verifier = CodeVerifierTool(timeout_seconds=2)
     result = verifier(
@@ -54,6 +64,42 @@ def test_code_verifier_supports_call_based_tests():
     assert result["pass_rate"] == 1.0
     assert result["all_passed"] == 1
     assert result["runner_count"] == 1
+
+
+def test_code_verifier_supports_common_typing_imports_for_call_based_tests():
+    verifier = CodeVerifierTool(timeout_seconds=2)
+    result = verifier(
+        {
+            "code": "<code>\ndef first(xs: List[int]):\n    return xs[0]\n</code>",
+            "tests": {"inputs": ["[3, 4]"], "outputs": ["3"], "fn_name": "first"},
+        }
+    )
+    assert result["pass_rate"] == 1.0
+    assert result["all_passed"] == 1
+
+
+def test_code_verifier_preserves_zero_exit_for_stdio_tests():
+    verifier = CodeVerifierTool(timeout_seconds=2)
+    result = verifier(
+        {
+            "code": "<code>\nprint('ok')\nexit()\n</code>",
+            "tests": '[{"input": "", "output": "ok"}]',
+        }
+    )
+    assert result["pass_rate"] == 1.0
+    assert result["all_passed"] == 1
+
+
+def test_code_verifier_accepts_yes_no_case_inside_witness_output():
+    verifier = CodeVerifierTool(timeout_seconds=2)
+    result = verifier(
+        {
+            "code": "<code>\nprint('Yes')\nprint('1 2')\n</code>",
+            "tests": '[{"input": "", "output": "YES\\n1 2"}]',
+        }
+    )
+    assert result["pass_rate"] == 1.0
+    assert result["all_passed"] == 1
 
 
 def test_code_verifier_rearrange_string_special_judge_accepts_alternate_answer():
@@ -73,7 +119,10 @@ def test_code_verifier_rearrange_string_special_judge_accepts_alternate_answer()
 
 def test_code_verifier_expands_batched_special_judge_cases():
     verifier = CodeVerifierTool(timeout_seconds=2)
-    problem = "Rearrange the characters of s to form a new string r that is not equal to s, or report impossible."
+    problem = (
+        "The first line contains a single integer t — the number of test cases. "
+        "Rearrange the characters of s to form a new string r that is not equal to s, or report impossible."
+    )
     result = verifier(
         {
             "problem": problem,
@@ -106,6 +155,18 @@ def test_code_parser_requires_single_outer_tag():
     value, legal = CodeIterativeWorkflowRunner._parse_tagged_text("Plan:\n<pseudocode>x</pseudocode>", "pseudocode")
     assert value == "x"
     assert legal is False
+
+
+def test_code_workflow_extracts_function_mode_from_marti_label():
+    label = '{"inputs": ["2\\n7"], "outputs": ["6"], "fn_name": "max_multiple"}'
+    assert CodeIterativeWorkflowRunner._find_fn_name_in_value(label) == "max_multiple"
+
+    instruction = CodeIterativeWorkflowRunner._execution_instruction("max_multiple")
+    assert "call-based function task" in instruction
+    assert "Do not read from stdin" in instruction
+
+    example = CodeIterativeWorkflowRunner._format_example_code("max_multiple")
+    assert "def max_multiple" in example
 
 
 def _thin(traj_id: str) -> DataProto:

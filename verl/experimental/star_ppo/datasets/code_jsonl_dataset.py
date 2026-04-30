@@ -95,7 +95,7 @@ class CodeJsonlDataset(RLHFDataset):
 
     @classmethod
     def _extract_tests_value(cls, row: dict):
-        for key in ("tests", "test_cases", "answer"):
+        for key in ("tests", "test_cases", "answer", "label"):
             value = row.get(key)
             if value not in (None, ""):
                 return value, key
@@ -114,6 +114,22 @@ class CodeJsonlDataset(RLHFDataset):
                 if value not in (None, ""):
                     return value, f"extra_info.{key}"
         return "", "none"
+
+    @classmethod
+    def _normalize_metadata(cls, row: dict, extra_info: dict) -> dict:
+        metadata = cls._json_loads_maybe(row.get("metadata", extra_info.get("metadata", {})))
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        for source in (row.get("label"), extra_info):
+            source = cls._json_loads_maybe(source)
+            if not isinstance(source, dict):
+                continue
+            fn_name = source.get("fn_name") or source.get("function_name") or source.get("func_name")
+            if fn_name and not (metadata.get("func_name") or metadata.get("function_name")):
+                metadata["func_name"] = str(fn_name)
+                break
+        return metadata
 
     @classmethod
     def _count_test_cases(cls, value) -> int:
@@ -152,7 +168,7 @@ class CodeJsonlDataset(RLHFDataset):
         if not isinstance(extra_info_raw, dict):
             extra_info_raw = {}
 
-        metadata = row.get("metadata", extra_info_raw.get("metadata", {}))
+        metadata = cls._normalize_metadata(row, extra_info_raw)
         starter_code = row.get("starter_code", extra_info_raw.get("starter_code", "")) or ""
         problem = cls._extract_problem_text(row, prompt_key)
         source = str(row.get("source") or row.get("data_source") or row.get("datasource") or extra_info_raw.get("source") or "code")

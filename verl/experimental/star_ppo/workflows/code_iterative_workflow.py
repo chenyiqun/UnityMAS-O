@@ -114,10 +114,92 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         return text.strip("_") or "unknown"
 
     @staticmethod
-    def _new_global_state(problem: str, starter_code: str = "") -> dict[str, Any]:
+    def _loads_maybe(value: Any) -> Any:
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        if not isinstance(value, str):
+            return value
+        raw = value.strip()
+        if not raw:
+            return value
+        try:
+            return json.loads(raw)
+        except Exception:
+            return value
+
+    @classmethod
+    def _find_fn_name_in_value(cls, value: Any) -> str:
+        value = cls._loads_maybe(value)
+        if isinstance(value, dict):
+            for key in ("fn_name", "function_name", "func_name"):
+                fn_name = value.get(key)
+                if fn_name is not None and str(fn_name).strip():
+                    return str(fn_name).strip()
+            for key in ("metadata", "extra_info", "label", "tests", "public_tests", "private_tests"):
+                fn_name = cls._find_fn_name_in_value(value.get(key))
+                if fn_name:
+                    return fn_name
+        if isinstance(value, list):
+            for item in value:
+                fn_name = cls._find_fn_name_in_value(item)
+                if fn_name:
+                    return fn_name
+        return ""
+
+    def _extract_fn_name(self, query_batch: DataProto, tests: Any) -> str:
+        for value in (
+            tests,
+            self._extract_first(query_batch, ["metadata", "extra_info.metadata", "extra.metadata"], ""),
+            self._extract_first(query_batch, ["extra_info", "extra"], ""),
+            self._extract_first(query_batch, ["label"], ""),
+        ):
+            fn_name = self._find_fn_name_in_value(value)
+            if fn_name:
+                return fn_name
+        return ""
+
+    @staticmethod
+    def _execution_instruction(fn_name: str) -> str:
+        fn_name = str(fn_name or "").strip()
+        if fn_name:
+            return (
+                f'This is a call-based function task. Implement the function "{fn_name}" with exactly this name. '
+                "Do not read from stdin, do not write to stdout, and do not wrap the solution in an input loop. "
+                "Return the answer from the function. You may define helper functions/classes if needed."
+            )
+        return (
+            "This is a standard input/output task. Write a complete Python 3 program that reads from stdin "
+            "and writes the answer to stdout."
+        )
+
+    @staticmethod
+    def _format_example_code(fn_name: str) -> str:
+        fn_name = str(fn_name or "").strip()
+        if fn_name:
+            return (
+                f"def {fn_name}(*args):\n"
+                "    # Replace this example logic with the actual solution.\n"
+                "    return None"
+            )
+        return (
+            "import sys\n\n"
+            "def solve():\n"
+            "    data = sys.stdin.read().strip().split()\n"
+            "    # Replace this example logic with the actual solution.\n"
+            "    if not data:\n"
+            "        return\n"
+            "    print(data[0])\n\n"
+            "if __name__ == \"__main__\":\n"
+            "    solve()"
+        )
+
+    @staticmethod
+    def _new_global_state(problem: str, starter_code: str = "", fn_name: str = "") -> dict[str, Any]:
         return {
             "problem": str(problem or ""),
             "starter_code": str(starter_code or ""),
+            "fn_name": str(fn_name or ""),
+            "execution_instruction": CodeIterativeWorkflowRunner._execution_instruction(fn_name),
             "iterations": [],
         }
 
@@ -125,6 +207,8 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         visible_state = {
             "problem": state.get("problem", ""),
             "starter_code": state.get("starter_code", ""),
+            "fn_name": state.get("fn_name", ""),
+            "execution_instruction": state.get("execution_instruction", ""),
             "iterations": state.get("iterations", []),
         }
         return self._safe_json(visible_state, max_chars=int(self.code_cfg.get("max_state_chars", 12000)))
@@ -154,6 +238,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             "current_pass_rate": float(current_pass_rate),
             "current_all_passed": int(current_all_passed),
             "starter_code": str(state.get("starter_code", "")),
+            "fn_name": str(state.get("fn_name", "")),
+            "execution_instruction": str(state.get("execution_instruction", "")),
+            "code_format_example": self._format_example_code(str(state.get("fn_name", ""))),
         }
 
     async def _run_verifier_record(
@@ -272,6 +359,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         problem = self._extract_question(query_batch)
         tests = self._extract_first(query_batch, self.tests_candidates, "")
         starter_code = str(self._extract_first(query_batch, self.starter_code_candidates, "") or "")
+        fn_name = self._extract_fn_name(query_batch, tests)
         query_id = self._extract_query_id(query_batch)
         tests_source = str(
             self._extract_first(query_batch, ["tests_source", "extra_info.tests_source"], "unknown") or "unknown"
@@ -285,7 +373,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             tests_count = 0.0
             tests_count_raw = 0.0
 
-        state: dict[str, Any] = self._new_global_state(problem, starter_code)
+        state: dict[str, Any] = self._new_global_state(problem, starter_code, fn_name=fn_name)
         records: list[WorkflowExecutionRecord] = []
         step_id = 0
         stopped_by_all_passed = False

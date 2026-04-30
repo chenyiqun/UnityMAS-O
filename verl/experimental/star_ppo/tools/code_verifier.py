@@ -126,6 +126,21 @@ class CodeVerifierTool:
     def _nonempty_lines(value: Any) -> list[str]:
         return [line.strip() for line in str(value or "").splitlines() if line.strip()]
 
+    @staticmethod
+    def _problem_has_batched_stdio_cases(problem: str) -> bool:
+        p = str(problem or "").lower()
+        return any(
+            marker in p
+            for marker in (
+                "number of test cases",
+                "multiple test cases",
+                "each test consists of multiple test cases",
+                "the first line contains a single integer t",
+                "the first line contains an integer t",
+                "the first line of the input contains t",
+            )
+        )
+
     @classmethod
     def _split_batched_stdio_case(
         cls,
@@ -136,6 +151,8 @@ class CodeVerifierTool:
         if not isinstance(case, dict):
             return []
         if str(case.get("fn_name") or "").strip():
+            return [case]
+        if not cls._problem_has_batched_stdio_cases(problem):
             return [case]
 
         input_lines = cls._nonempty_lines(case.get("input", ""))
@@ -250,8 +267,10 @@ class CodeVerifierTool:
         return textwrap.dedent(
             """
             import builtins as __verl_builtins
-            __verl_builtins.exit = None
-            __verl_builtins.quit = None
+            def __verl_exit(*args):
+                raise SystemExit(args[0] if args else 0)
+            __verl_builtins.exit = __verl_exit
+            __verl_builtins.quit = __verl_exit
             try:
                 import os as __verl_os
                 __verl_os.environ["OMP_NUM_THREADS"] = "1"
@@ -276,6 +295,50 @@ class CodeVerifierTool:
             try:
                 import subprocess as __verl_subprocess
                 __verl_subprocess.Popen = None
+            except Exception:
+                pass
+            """
+        ).strip()
+
+    @staticmethod
+    def _common_code_prelude() -> str:
+        return textwrap.dedent(
+            """
+            from string import *
+            from re import *
+            from datetime import *
+            from collections import *
+            from heapq import *
+            from bisect import *
+            from copy import *
+            from math import *
+            from random import *
+            from statistics import *
+            from itertools import *
+            from functools import *
+            from operator import *
+            from io import *
+            from sys import *
+            from json import *
+            from typing import *
+            import string
+            import re
+            import datetime
+            import collections
+            import heapq
+            import bisect
+            import copy
+            import math
+            import random
+            import statistics
+            import itertools
+            import functools
+            import operator
+            import io
+            import sys
+            import json
+            try:
+                sys.setrecursionlimit(6 * 10**5)
             except Exception:
                 pass
             """
@@ -315,7 +378,7 @@ class CodeVerifierTool:
 
     def _write_solution(self, tmpdir: str, code: str) -> str:
         solution_path = os.path.join(tmpdir, "solution.py")
-        source = self._guard_prelude() + "\n\n" + code + "\n"
+        source = self._guard_prelude() + "\n\n" + self._common_code_prelude() + "\n\n" + code + "\n"
         with open(solution_path, "w", encoding="utf-8") as f:
             f.write(source)
         return solution_path
@@ -348,6 +411,8 @@ class CodeVerifierTool:
         code = self._strip_main_guard(code)
         runner = (
             self._guard_prelude()
+            + "\n\n"
+            + self._common_code_prelude()
             + "\n\n"
             + code
             + "\n\n"
@@ -393,7 +458,7 @@ class CodeVerifierTool:
 
                 __verl_user_code = {str(code or "")!r}
                 __verl_case_timeout = {float(self.timeout_seconds)!r}
-                __verl_compiled = compile(__verl_user_code, "solution.py", "exec")
+                __verl_compiled = compile({self._common_code_prelude()!r} + "\\n\\n" + __verl_user_code, "solution.py", "exec")
                 __verl_payload = __verl_json.loads(__verl_sys.stdin.read() or "[]")
                 __verl_results = []
 
@@ -461,6 +526,8 @@ class CodeVerifierTool:
         code = self._strip_main_guard(code)
         runner = (
             self._guard_prelude()
+            + "\n\n"
+            + self._common_code_prelude()
             + "\n\n"
             + code
             + "\n\n"
@@ -656,6 +723,19 @@ class CodeVerifierTool:
                 return False
         return True
 
+    @staticmethod
+    def _tokens_equal_with_yes_no_casefold(actual_tokens: list[str], expected_tokens: list[str]) -> bool:
+        if len(actual_tokens) != len(expected_tokens):
+            return False
+        yn = {"yes", "no"}
+        for actual, expected in zip(actual_tokens, expected_tokens):
+            if expected.lower() in yn:
+                if actual.lower() != expected.lower():
+                    return False
+            elif actual != expected:
+                return False
+        return True
+
     @classmethod
     def _standard_output_match(cls, actual: str, expected: str) -> bool:
         actual_s = str(actual or "").strip()
@@ -673,6 +753,8 @@ class CodeVerifierTool:
         actual_tokens = actual_s.split()
         expected_tokens = expected_s.split()
         if actual_tokens == expected_tokens:
+            return True
+        if cls._tokens_equal_with_yes_no_casefold(actual_tokens, expected_tokens):
             return True
         if cls._float_tokens_close(actual_tokens, expected_tokens):
             return True

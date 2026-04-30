@@ -115,7 +115,7 @@ star:
       path: pkg://verl.experimental.star_ppo.reward_allocators.code_turn_level
       name: CodeTurnLevelRewardAllocator
     question_candidates: ["problem", "question", "query", "extra_info.question"]
-    tests_candidates: ["tests", "test_cases", "answer", "reward_model.ground_truth", "reward_model", "extra.tests", "extra_info.tests", "extra_info.public_test_cases"]
+    tests_candidates: ["tests", "test_cases", "answer", "label", "reward_model.ground_truth", "reward_model", "extra.tests", "extra_info.tests", "extra_info.public_test_cases", "extra_info.private_test_cases"]
     starter_code_candidates: ["starter_code", "extra.starter_code", "extra_info.starter_code"]
     tools:
       code_verifier:
@@ -183,8 +183,11 @@ star:
           Current turn pseudocode:
           {current_pseudocode}
 
+          Execution mode:
+          {execution_instruction}
+
           Task:
-          Write a complete Python 3 solution for the original problem. The solution must read from standard input and write to standard output. Use the current pseudocode and any previous reflections/errors from the global state.
+          Write the Python 3 solution for the original problem. Follow the execution mode exactly. Use the current pseudocode and any previous reflections/errors from the global state.
 
           Output strictly in this format only:
           <code>
@@ -193,17 +196,7 @@ star:
 
           Correct format example:
           <code>
-          import sys
-
-          def solve():
-              data = sys.stdin.read().strip().split()
-              # Replace this example logic with the actual solution.
-              if not data:
-                  return
-              print(data[0])
-
-          if __name__ == "__main__":
-              solve()
+          {code_format_example}
           </code>
 
           Do not copy the example logic. Solve the original problem.
