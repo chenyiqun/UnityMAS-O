@@ -284,6 +284,8 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 "passed": 0,
                 "total": 0,
                 "error": str(output),
+                "error_code": -5,
+                "error_message": "Verifier Tool Error",
                 "failed_test_index": -1,
             }
         output["pass_rate"] = float(output.get("pass_rate", 0.0) or 0.0)

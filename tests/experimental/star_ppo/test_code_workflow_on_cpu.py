@@ -66,6 +66,29 @@ def test_code_verifier_supports_call_based_tests():
     assert result["runner_count"] == 1
 
 
+def test_code_verifier_supports_single_line_list_as_multiple_call_args():
+    verifier = CodeVerifierTool(timeout_seconds=2)
+    result = verifier(
+        {
+            "code": "<code>\ndef max_multiple(divisor, bound):\n    return bound - bound % divisor\n</code>",
+            "tests": {"inputs": ["[2, 7]", "10\n50"], "outputs": ["6", "50"], "fn_name": "max_multiple"},
+        }
+    )
+    assert result["pass_rate"] == 1.0
+    assert result["all_passed"] == 1
+
+
+def test_code_verifier_preserves_outer_fn_name_for_nested_tests():
+    for tests in (
+        {"fn_name": "add", "tests": [{"input": "1\n2", "output": "3"}]},
+        {"fn_name": "add", "public_tests": [{"input": "1\n2", "output": "3"}]},
+        {"fn_name": "add", "public_tests": {"inputs": ["1\n2"], "outputs": ["3"]}},
+    ):
+        cases = CodeVerifierTool.normalize_tests(tests)
+        assert len(cases) == 1
+        assert cases[0]["fn_name"] == "add"
+
+
 def test_code_verifier_supports_common_typing_imports_for_call_based_tests():
     verifier = CodeVerifierTool(timeout_seconds=2)
     result = verifier(

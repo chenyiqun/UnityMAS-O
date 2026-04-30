@@ -133,7 +133,7 @@ star:
       max_state_chars: ${oc.decode:${oc.env:CODE_MAX_STATE_CHARS,12000}}
       verifier:
         tool: code_verifier
-        fail_open: ${oc.decode:${oc.env:CODE_VERIFIER_FAIL_OPEN,true}}
+        fail_open: ${oc.decode:${oc.env:CODE_VERIFIER_FAIL_OPEN,false}}
       planner:
         model_id: planner_llm
         agent_id: planner_agent

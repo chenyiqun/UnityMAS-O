@@ -190,12 +190,43 @@ class CodeVerifierTool:
     @classmethod
     def normalize_test_spec(cls, tests: Any) -> dict[str, Any]:
         tests = cls._loads_maybe(tests)
+        outer_common: dict[str, Any] = {}
+        if isinstance(tests, dict):
+            outer_common = {
+                "fn_name": tests.get("fn_name") or tests.get("function_name") or "",
+                "checker_type": tests.get("checker_type") or tests.get("special_judge") or "",
+                "checker_code": tests.get("checker_code") or tests.get("checker") or "",
+            }
         if isinstance(tests, dict) and "tests" in tests:
-            tests = cls._loads_maybe(tests["tests"])
+            nested = cls._loads_maybe(tests["tests"])
+            if isinstance(nested, dict):
+                for key, value in outer_common.items():
+                    if value and not (nested.get(key) or nested.get("function_name" if key == "fn_name" else key)):
+                        nested[key] = value
+            tests = nested
+        if isinstance(tests, dict):
+            for key, value in outer_common.items():
+                if value and not tests.get(key):
+                    tests[key] = value
 
         # MARTI answer schema: use public tests by default for training-time rewards.
         if isinstance(tests, dict) and ("public_tests" in tests or "private_tests" in tests):
-            tests = cls._loads_maybe(tests.get("public_tests") or tests.get("private_tests") or {})
+            nested = cls._loads_maybe(tests.get("public_tests") or tests.get("private_tests") or {})
+            if isinstance(nested, dict):
+                inherited_common = {
+                    "fn_name": tests.get("fn_name") or tests.get("function_name") or outer_common.get("fn_name") or "",
+                    "checker_type": (
+                        tests.get("checker_type")
+                        or tests.get("special_judge")
+                        or outer_common.get("checker_type")
+                        or ""
+                    ),
+                    "checker_code": tests.get("checker_code") or tests.get("checker") or outer_common.get("checker_code") or "",
+                }
+                for key, value in inherited_common.items():
+                    if value and not nested.get(key):
+                        nested[key] = value
+            tests = nested
 
         common: dict[str, Any] = {}
         cases: list[dict[str, Any]] = []
@@ -213,9 +244,9 @@ class CodeVerifierTool:
                 cases = [{"input": tests.get("input", ""), "output": tests.get("output", ""), **common}]
 
         elif isinstance(tests, list):
-            inferred_fn_name = ""
-            inferred_checker_type = ""
-            inferred_checker_code = ""
+            inferred_fn_name = outer_common.get("fn_name", "")
+            inferred_checker_type = outer_common.get("checker_type", "")
+            inferred_checker_code = outer_common.get("checker_code", "")
             for item in tests:
                 item = cls._loads_maybe(item)
                 if not isinstance(item, dict):
@@ -232,16 +263,26 @@ class CodeVerifierTool:
                         {
                             "input": inp,
                             "output": out,
-                            "fn_name": item.get("fn_name") or item.get("function_name") or "",
-                            "checker_type": item.get("checker_type") or item.get("special_judge") or "",
-                            "checker_code": item.get("checker_code") or item.get("checker") or "",
+                            "fn_name": item.get("fn_name") or item.get("function_name") or outer_common.get("fn_name") or "",
+                            "checker_type": (
+                                item.get("checker_type")
+                                or item.get("special_judge")
+                                or outer_common.get("checker_type")
+                                or ""
+                            ),
+                            "checker_code": item.get("checker_code") or item.get("checker") or outer_common.get("checker_code") or "",
                         }
                     )
                 elif "inputs" in item and "outputs" in item:
                     item_common = {
-                        "fn_name": item.get("fn_name") or item.get("function_name") or "",
-                        "checker_type": item.get("checker_type") or item.get("special_judge") or "",
-                        "checker_code": item.get("checker_code") or item.get("checker") or "",
+                        "fn_name": item.get("fn_name") or item.get("function_name") or outer_common.get("fn_name") or "",
+                        "checker_type": (
+                            item.get("checker_type")
+                            or item.get("special_judge")
+                            or outer_common.get("checker_type")
+                            or ""
+                        ),
+                        "checker_code": item.get("checker_code") or item.get("checker") or outer_common.get("checker_code") or "",
                     }
                     for inp, out in zip(cls._as_list(item["inputs"]), cls._as_list(item["outputs"])):
                         cases.append({"input": inp, "output": out, **item_common})
@@ -542,13 +583,36 @@ class CodeVerifierTool:
 
                 __verl_case_timeout = __VERL_CASE_TIMEOUT__
 
-                def __verl_parse_args(__verl_payload):
+                def __verl_parse_args(__verl_payload, __verl_target):
                     __verl_payload = str(__verl_payload or "")
                     __verl_lines = [line for line in __verl_payload.splitlines() if line.strip()]
-                    if __verl_lines:
+                    if len(__verl_lines) > 1:
                         return [__verl_json.loads(line) for line in __verl_lines]
+                    if len(__verl_lines) == 1:
+                        __verl_value = __verl_json.loads(__verl_lines[0])
+                        if not isinstance(__verl_value, list):
+                            return [__verl_value]
+                        try:
+                            import inspect as __verl_inspect
+
+                            __verl_sig = __verl_inspect.signature(__verl_target)
+                            __verl_positional = [
+                                p for p in __verl_sig.parameters.values()
+                                if p.kind in (
+                                    p.POSITIONAL_ONLY,
+                                    p.POSITIONAL_OR_KEYWORD,
+                                    p.VAR_POSITIONAL,
+                                )
+                            ]
+                            __verl_has_varargs = any(p.kind == p.VAR_POSITIONAL for p in __verl_positional)
+                            if __verl_has_varargs or len(__verl_positional) != 1:
+                                return list(__verl_value)
+                        except Exception:
+                            pass
+                        return [__verl_value]
                     if __verl_payload.strip():
-                        return [__verl_json.loads(__verl_payload)]
+                        __verl_value = __verl_json.loads(__verl_payload)
+                        return list(__verl_value) if isinstance(__verl_value, list) else [__verl_value]
                     return []
 
                 class __VerlCaseTimeout(Exception):
@@ -576,7 +640,7 @@ class CodeVerifierTool:
                             __verl_target = getattr(__verl_obj, __verl_fn_name)
                         if __verl_target is None:
                             raise AttributeError("function not found: " + __verl_fn_name)
-                        __verl_args = __verl_parse_args(__verl_case.get("input", ""))
+                        __verl_args = __verl_parse_args(__verl_case.get("input", ""), __verl_target)
                         __verl_output = __verl_target(*__verl_args)
                         __verl_stdout = __verl_json.dumps(__verl_json_safe(__verl_output), ensure_ascii=False)
                     except __VerlCaseTimeout as __verl_exc:

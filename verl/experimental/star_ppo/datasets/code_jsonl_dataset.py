@@ -71,10 +71,10 @@ class CodeJsonlDataset(RLHFDataset):
         for key in ("problem", "question", "query"):
             value = row.get(key)
             if value:
-                return str(value)
+                return cls._clean_problem_text(str(value))
         prompt_value = row.get(prompt_key) or row.get("prompt")
         if isinstance(prompt_value, str):
-            return prompt_value
+            return cls._clean_problem_text(prompt_value)
         if isinstance(prompt_value, list):
             texts = []
             for message in prompt_value:
@@ -90,8 +90,26 @@ class CodeJsonlDataset(RLHFDataset):
                                 texts.append(part)
                 else:
                     texts.append(str(message))
-            return "\n".join(text for text in texts if text).strip()
-        return str(prompt_value or "")
+            return cls._clean_problem_text("\n".join(text for text in texts if text).strip())
+        return cls._clean_problem_text(str(prompt_value or ""))
+
+    @staticmethod
+    def _clean_problem_text(text: str) -> str:
+        """Remove dataset-level answer-format wrappers that conflict with STAR prompts."""
+
+        text = str(text or "").strip()
+        if "### Question:" in text:
+            text = text.split("### Question:", 1)[1].strip()
+
+        cut_markers = (
+            "\nNow solve the problem and return the code.",
+            "\n### Format:",
+            "\n### Answer:",
+        )
+        cut_positions = [idx for marker in cut_markers if (idx := text.find(marker)) >= 0]
+        if cut_positions:
+            text = text[: min(cut_positions)].strip()
+        return text
 
     @classmethod
     def _extract_tests_value(cls, row: dict):
