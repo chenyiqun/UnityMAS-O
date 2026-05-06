@@ -59,6 +59,8 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
     fsdp_config:
       ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
+      param_offload: ${oc.decode:${oc.env:REF_FSDP_PARAM_OFFLOAD,${oc.env:FSDP_PARAM_OFFLOAD,false}}}
+      offload_policy: ${oc.decode:${oc.env:REF_FSDP_OFFLOAD_POLICY,${oc.env:FSDP_OFFLOAD_POLICY,false}}}
   rollout:
     name: ${oc.env:ROLLOUT_NAME,vllm}
     max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,16384}}
