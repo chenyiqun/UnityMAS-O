@@ -94,7 +94,7 @@ critic:
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
 
 algorithm:
-  adv_estimator: ${oc.env:ADV_ESTIMATOR,grpo}
+  adv_estimator: ${oc.env:ADV_ESTIMATOR,gae}
   use_kl_in_reward: ${oc.decode:${oc.env:USE_KL_IN_REWARD,false}}
   kl_ctrl:
     kl_coef: ${oc.decode:${oc.env:KL_COEF,0.0}}
