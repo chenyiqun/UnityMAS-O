@@ -123,14 +123,23 @@ star:
         path: pkg://verl.experimental.star_ppo.tools.code_verifier
         name: CodeVerifierTool
         kwargs:
-          timeout_seconds: ${oc.decode:${oc.env:CODE_VERIFY_TIMEOUT_SECONDS,5}}
+          timeout_seconds: ${oc.decode:${oc.env:CODE_VERIFY_TIMEOUT_SECONDS,1.0}}
           max_error_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_ERROR_CHARS,2000}}
           allow_custom_checker: ${oc.decode:${oc.env:CODE_VERIFY_ALLOW_CUSTOM_CHECKER,false}}
           default_checker_type: ${oc.env:CODE_VERIFY_DEFAULT_CHECKER_TYPE,auto}
+          respect_problem_time_limit: ${oc.decode:${oc.env:CODE_VERIFY_RESPECT_PROBLEM_TIME_LIMIT,true}}
+          problem_time_limit_multiplier: ${oc.decode:${oc.env:CODE_VERIFY_TIME_LIMIT_MULTIPLIER,1.0}}
+          min_timeout_seconds: ${oc.decode:${oc.env:CODE_VERIFY_MIN_TIMEOUT_SECONDS,0.0}}
+          max_tests_per_example: ${oc.decode:${oc.env:CODE_VERIFY_MAX_TESTS_PER_EXAMPLE,8}}
+          max_case_input_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_CASE_INPUT_CHARS,20000}}
+          max_case_output_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_CASE_OUTPUT_CHARS,20000}}
+          max_total_test_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_TOTAL_TEST_CHARS,80000}}
     code:
       max_turns: ${oc.decode:${oc.env:CODE_MAX_TURNS,3}}
       stop_on_all_passed: ${oc.decode:${oc.env:CODE_STOP_ON_ALL_PASSED,true}}
       max_state_chars: ${oc.decode:${oc.env:CODE_MAX_STATE_CHARS,12000}}
+      visible_tests_max_examples: ${oc.decode:${oc.env:CODE_VISIBLE_TESTS_MAX_EXAMPLES,3}}
+      visible_tests_max_chars: ${oc.decode:${oc.env:CODE_VISIBLE_TESTS_MAX_CHARS,3000}}
       verifier:
         tool: code_verifier
         fail_open: ${oc.decode:${oc.env:CODE_VERIFIER_FAIL_OPEN,false}}
@@ -148,11 +157,20 @@ star:
           Original problem/task:
           {original_problem}
 
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
           Global state so far:
           {global_state_text}
 
           Task:
-          Produce the pseudocode for turn {turn_number} of {max_turns}. Use previous code, verification errors, and reflections in the global state to improve the plan. Be concrete about input parsing, algorithm, edge cases, and output formatting.
+          Produce the pseudocode for turn {turn_number} of {max_turns}. Use the problem, execution mode, visible tests, previous code, verification errors, and reflections in the global state to improve the plan. Be concrete about input parsing or function arguments, algorithm, edge cases, and output/return formatting.
 
           Output strictly in this format only:
           <pseudocode>
@@ -177,17 +195,24 @@ star:
           Starter code, if any:
           {starter_code}
 
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
           Global state so far:
           {global_state_text}
 
           Current turn pseudocode:
           {current_pseudocode}
 
-          Execution mode:
-          {execution_instruction}
-
           Task:
-          Write the Python 3 solution for the original problem. Follow the execution mode exactly. Use the current pseudocode and any previous reflections/errors from the global state.
+          {coder_task_instruction}
+          Use the original problem, current pseudocode, visible tests, and any previous reflections/errors from the global state.
 
           Output strictly in this format only:
           <code>
@@ -215,6 +240,15 @@ star:
 
           Original problem/task:
           {original_problem}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
 
           Global state, including the current failed or partial attempt:
           {global_state_text}

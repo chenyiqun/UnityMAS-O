@@ -89,6 +89,46 @@ def test_code_verifier_preserves_outer_fn_name_for_nested_tests():
         assert cases[0]["fn_name"] == "add"
 
 
+def test_code_verifier_applies_runtime_test_budget():
+    verifier = CodeVerifierTool(timeout_seconds=2, max_tests_per_example=2)
+    result = verifier(
+        {
+            "code": "<code>\nprint(input())\n</code>",
+            "tests": [
+                {"input": "a\n", "output": "a\n"},
+                {"input": "b\n", "output": "b\n"},
+                {"input": "c\n", "output": "c\n"},
+            ],
+        }
+    )
+    assert result["pass_rate"] == 1.0
+    assert result["total_available"] == 3
+    assert result["total"] == 2
+    assert result["skipped_by_limit"] == 1
+
+
+def test_code_verifier_parses_problem_time_limit():
+    verifier = CodeVerifierTool(timeout_seconds=5, respect_problem_time_limit=True)
+    result = verifier(
+        {
+            "problem": "Time Limit: 1000 ms\nMemory Limit: 256 MB",
+            "code": "<code>\nprint('ok')\n</code>",
+            "tests": [{"input": "", "output": "ok\n"}],
+        }
+    )
+    assert result["pass_rate"] == 1.0
+    assert result["timeout_seconds"] == 1.0
+
+
+def test_code_workflow_formats_visible_tests_summary():
+    label = '{"inputs": ["2\\n7", "10\\n50"], "outputs": ["6", "50"], "fn_name": "max_multiple"}'
+    summary = CodeIterativeWorkflowRunner._format_visible_tests(label, max_examples=1, max_chars=1000)
+    assert "fn_name=max_multiple" in summary
+    assert "2\n7" in summary
+    assert "6" in summary
+    assert "1 more visible tests omitted" in summary
+
+
 def test_code_verifier_supports_common_typing_imports_for_call_based_tests():
     verifier = CodeVerifierTool(timeout_seconds=2)
     result = verifier(
@@ -190,6 +230,17 @@ def test_code_workflow_extracts_function_mode_from_marti_label():
 
     example = CodeIterativeWorkflowRunner._format_example_code("max_multiple")
     assert "def max_multiple" in example
+
+
+def test_code_workflow_coder_instruction_switches_by_fn_name():
+    call_instruction = CodeIterativeWorkflowRunner._coder_task_instruction("max_multiple")
+    assert 'define "max_multiple" exactly' in call_instruction
+    assert "Do not parse stdin" in call_instruction
+    assert "Return the result" in call_instruction
+
+    stdio_instruction = CodeIterativeWorkflowRunner._coder_task_instruction("")
+    assert "stdin/stdout program" in stdio_instruction
+    assert "print the required output" in stdio_instruction
 
 
 def _thin(traj_id: str) -> DataProto:

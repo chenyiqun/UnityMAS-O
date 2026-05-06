@@ -33,17 +33,31 @@ class CodeVerifierTool:
 
     def __init__(
         self,
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 1.0,
         max_error_chars: int = 2000,
         python_executable: str | None = None,
         allow_custom_checker: bool = False,
         default_checker_type: str = "auto",
+        respect_problem_time_limit: bool = True,
+        problem_time_limit_multiplier: float = 1.0,
+        min_timeout_seconds: float = 0.0,
+        max_tests_per_example: int = 0,
+        max_case_input_chars: int = 0,
+        max_case_output_chars: int = 0,
+        max_total_test_chars: int = 0,
     ):
         self.timeout_seconds = float(timeout_seconds)
         self.max_error_chars = int(max_error_chars)
         self.python_executable = python_executable or sys.executable
         self.allow_custom_checker = bool(allow_custom_checker)
         self.default_checker_type = str(default_checker_type or "auto")
+        self.respect_problem_time_limit = bool(respect_problem_time_limit)
+        self.problem_time_limit_multiplier = max(0.01, float(problem_time_limit_multiplier or 1.0))
+        self.min_timeout_seconds = max(0.0, float(min_timeout_seconds or 0.0))
+        self.max_tests_per_example = max(0, int(max_tests_per_example or 0))
+        self.max_case_input_chars = max(0, int(max_case_input_chars or 0))
+        self.max_case_output_chars = max(0, int(max_case_output_chars or 0))
+        self.max_total_test_chars = max(0, int(max_total_test_chars or 0))
 
     @classmethod
     def extract_code(cls, value: Any, min_fenced_length: int = 1, strict_syntax: bool = True) -> str:
@@ -483,8 +497,9 @@ class CodeVerifierTool:
             f.write(runner)
         return runner_path
 
-    def _write_stdio_batch_runner(self, tmpdir: str, code: str) -> str:
+    def _write_stdio_batch_runner(self, tmpdir: str, code: str, case_timeout_seconds: float | None = None) -> str:
         runner_path = os.path.join(tmpdir, "stdio_batch_runner.py")
+        case_timeout_seconds = self.timeout_seconds if case_timeout_seconds is None else float(case_timeout_seconds)
         runner = (
             self._guard_prelude()
             + "\n\n"
@@ -498,7 +513,7 @@ class CodeVerifierTool:
                 import traceback as __verl_traceback
 
                 __verl_user_code = {str(code or "")!r}
-                __verl_case_timeout = {float(self.timeout_seconds)!r}
+                __verl_case_timeout = {float(case_timeout_seconds)!r}
                 __verl_compiled = compile({self._common_code_prelude()!r} + "\\n\\n" + __verl_user_code, "solution.py", "exec")
                 __verl_payload = __verl_json.loads(__verl_sys.stdin.read() or "[]")
                 __verl_results = []
@@ -562,9 +577,10 @@ class CodeVerifierTool:
             f.write(runner)
         return runner_path
 
-    def _write_call_batch_runner(self, tmpdir: str, code: str) -> str:
+    def _write_call_batch_runner(self, tmpdir: str, code: str, case_timeout_seconds: float | None = None) -> str:
         runner_path = os.path.join(tmpdir, "call_batch_runner.py")
         code = self._strip_main_guard(code)
+        case_timeout_seconds = self.timeout_seconds if case_timeout_seconds is None else float(case_timeout_seconds)
         runner = (
             self._guard_prelude()
             + "\n\n"
@@ -662,7 +678,7 @@ class CodeVerifierTool:
                 """
             ).strip()
         )
-        runner = runner.replace("__VERL_CASE_TIMEOUT__", repr(float(self.timeout_seconds)))
+        runner = runner.replace("__VERL_CASE_TIMEOUT__", repr(float(case_timeout_seconds)))
         with open(runner_path, "w", encoding="utf-8") as f:
             f.write(runner)
         return runner_path
@@ -942,6 +958,56 @@ class CodeVerifierTool:
         keep = max(0, self.max_error_chars // 2)
         return text[:keep] + "\n...(truncated)...\n" + text[-keep:]
 
+    def _select_runtime_tests(self, tests: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+        selected: list[dict[str, Any]] = []
+        skipped = 0
+        total_chars = 0
+        for test in tests:
+            input_chars = len(str(test.get("input", "") or ""))
+            output_chars = len(str(test.get("output", "") or ""))
+            if self.max_case_input_chars > 0 and input_chars > self.max_case_input_chars:
+                skipped += 1
+                continue
+            if self.max_case_output_chars > 0 and output_chars > self.max_case_output_chars:
+                skipped += 1
+                continue
+            case_chars = input_chars + output_chars
+            if self.max_total_test_chars > 0 and selected and total_chars + case_chars > self.max_total_test_chars:
+                skipped += 1
+                continue
+            selected.append(test)
+            total_chars += case_chars
+            if self.max_tests_per_example > 0 and len(selected) >= self.max_tests_per_example:
+                skipped += max(0, len(tests) - len(selected) - skipped)
+                break
+        return selected, skipped
+
+    @staticmethod
+    def _parse_problem_time_limit_seconds(problem: str) -> float | None:
+        text = str(problem or "")
+        patterns = (
+            r"time\s*limit(?:\s*per\s*test)?\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(ms|milliseconds?)\b",
+            r"time\s*limit(?:\s*per\s*test)?\s*:?\s*([0-9]+(?:\.[0-9]+)?)\s*(s|sec|secs|second|seconds)\b",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            value = float(match.group(1))
+            unit = match.group(2).lower()
+            return value / 1000.0 if unit.startswith("m") else value
+        return None
+
+    def _effective_timeout_seconds(self, problem: str) -> float:
+        timeout = float(self.timeout_seconds)
+        if self.respect_problem_time_limit:
+            parsed = self._parse_problem_time_limit_seconds(problem)
+            if parsed is not None:
+                timeout = float(parsed) * self.problem_time_limit_multiplier
+        if self.min_timeout_seconds > 0:
+            timeout = max(timeout, self.min_timeout_seconds)
+        return max(0.05, timeout)
+
     def __call__(self, payload: Any) -> dict[str, Any]:
         start = time.perf_counter()
         payload = payload if isinstance(payload, dict) else {}
@@ -962,6 +1028,8 @@ class CodeVerifierTool:
             problem=problem,
             default_checker_type=self.default_checker_type,
         )
+        total_available = len(tests)
+        tests, skipped_by_limit = self._select_runtime_tests(tests)
 
         result: dict[str, Any] = {
             "pass_rate": 0.0,
@@ -969,6 +1037,8 @@ class CodeVerifierTool:
             "passed": 0,
             "total": len(tests),
             "total_raw": len(raw_tests),
+            "total_available": total_available,
+            "skipped_by_limit": skipped_by_limit,
             "error": "",
             "error_code": 0,
             "error_message": "",
@@ -977,6 +1047,7 @@ class CodeVerifierTool:
             "checker_type": "",
             "runner_count": 0,
             "batch_mode": "",
+            "timeout_seconds": 0.0,
             "duration_s": 0.0,
         }
         if not code.strip():
@@ -986,13 +1057,15 @@ class CodeVerifierTool:
             result["duration_s"] = float(time.perf_counter() - start)
             return result
         if not tests:
-            result["error"] = "No tests found."
+            result["error"] = "No runnable tests found after applying verifier test limits."
             result["error_code"] = -1
-            result["error_message"] = "No tests found"
+            result["error_message"] = "No runnable tests found"
             result["duration_s"] = float(time.perf_counter() - start)
             return result
 
-        batch_timeout = self.timeout_seconds * max(1, len(tests)) + 5.0
+        case_timeout = self._effective_timeout_seconds(problem)
+        result["timeout_seconds"] = float(case_timeout)
+        batch_timeout = case_timeout * max(1, len(tests)) + 5.0
         passed = 0
         first_error = ""
         first_error_code = 0
@@ -1010,7 +1083,7 @@ class CodeVerifierTool:
             if stdio_indices:
                 runner_count += 1
                 batch_modes.append("stdio")
-                stdio_runner = self._write_stdio_batch_runner(tmpdir, code)
+                stdio_runner = self._write_stdio_batch_runner(tmpdir, code, case_timeout_seconds=case_timeout)
                 stdio_cases = [{"input": str(tests[idx].get("input", ""))} for idx in stdio_indices]
                 stdio_results = self._run_batch_runner(stdio_runner, stdio_cases, tmpdir, batch_timeout)
                 for idx, item in zip(stdio_indices, stdio_results):
@@ -1019,7 +1092,7 @@ class CodeVerifierTool:
             if call_indices:
                 runner_count += 1
                 batch_modes.append("call")
-                call_runner = self._write_call_batch_runner(tmpdir, code)
+                call_runner = self._write_call_batch_runner(tmpdir, code, case_timeout_seconds=case_timeout)
                 call_cases = [
                     {
                         "input": str(tests[idx].get("input", "")),

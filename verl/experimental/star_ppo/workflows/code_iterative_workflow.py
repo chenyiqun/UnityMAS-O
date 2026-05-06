@@ -173,6 +173,22 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         )
 
     @staticmethod
+    def _coder_task_instruction(fn_name: str) -> str:
+        fn_name = str(fn_name or "").strip()
+        if fn_name:
+            return (
+                f'Write a Python 3 function solution. The submitted code must define "{fn_name}" exactly. '
+                "The verifier will call this function directly with the provided arguments. "
+                "Do not parse stdin, do not print the answer, and do not add an input loop. "
+                "Return the result using Python objects or scalar values matching the expected output."
+            )
+        return (
+            "Write a complete Python 3 stdin/stdout program. The submitted code must read all required input "
+            "from standard input and print the required output to standard output. "
+            "Do not define only a function unless the program also calls it from main."
+        )
+
+    @staticmethod
     def _format_example_code(fn_name: str) -> str:
         fn_name = str(fn_name or "").strip()
         if fn_name:
@@ -194,12 +210,50 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         )
 
     @staticmethod
-    def _new_global_state(problem: str, starter_code: str = "", fn_name: str = "") -> dict[str, Any]:
+    def _format_visible_tests(tests: Any, max_examples: int = 3, max_chars: int = 3000) -> str:
+        try:
+            from verl.experimental.star_ppo.tools.code_verifier import CodeVerifierTool
+
+            cases = CodeVerifierTool.normalize_tests(tests)
+        except Exception:
+            cases = []
+
+        if not cases:
+            return "No visible tests were provided."
+
+        lines: list[str] = []
+        total = len(cases)
+        for idx, case in enumerate(cases[: max(0, int(max_examples))]):
+            fn_name = str(case.get("fn_name") or "").strip()
+            mode = f"call fn_name={fn_name}" if fn_name else "stdin/stdout"
+            lines.append(f"Test {idx + 1} of {total} ({mode})")
+            lines.append("Input:")
+            lines.append(str(case.get("input", "")))
+            lines.append("Expected output:")
+            lines.append(str(case.get("output", "")))
+            lines.append("")
+        if total > max_examples:
+            lines.append(f"... {total - max_examples} more visible tests omitted from the prompt.")
+
+        text = "\n".join(lines).strip()
+        if max_chars > 0 and len(text) > max_chars:
+            keep = max_chars // 2
+            text = text[:keep] + "\n...(visible tests truncated)...\n" + text[-keep:]
+        return text
+
+    @staticmethod
+    def _new_global_state(
+        problem: str,
+        starter_code: str = "",
+        fn_name: str = "",
+        visible_tests_summary: str = "",
+    ) -> dict[str, Any]:
         return {
             "problem": str(problem or ""),
             "starter_code": str(starter_code or ""),
             "fn_name": str(fn_name or ""),
             "execution_instruction": CodeIterativeWorkflowRunner._execution_instruction(fn_name),
+            "visible_tests": str(visible_tests_summary or ""),
             "iterations": [],
         }
 
@@ -209,6 +263,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             "starter_code": state.get("starter_code", ""),
             "fn_name": state.get("fn_name", ""),
             "execution_instruction": state.get("execution_instruction", ""),
+            "visible_tests": state.get("visible_tests", ""),
             "iterations": state.get("iterations", []),
         }
         return self._safe_json(visible_state, max_chars=int(self.code_cfg.get("max_state_chars", 12000)))
@@ -240,6 +295,8 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             "starter_code": str(state.get("starter_code", "")),
             "fn_name": str(state.get("fn_name", "")),
             "execution_instruction": str(state.get("execution_instruction", "")),
+            "coder_task_instruction": self._coder_task_instruction(str(state.get("fn_name", ""))),
+            "visible_tests": str(state.get("visible_tests", "")),
             "code_format_example": self._format_example_code(str(state.get("fn_name", ""))),
         }
 
@@ -366,6 +423,11 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         tests_source = str(
             self._extract_first(query_batch, ["tests_source", "extra_info.tests_source"], "unknown") or "unknown"
         )
+        visible_tests_summary = self._format_visible_tests(
+            tests,
+            max_examples=int(self.code_cfg.get("visible_tests_max_examples", 3)),
+            max_chars=int(self.code_cfg.get("visible_tests_max_chars", 3000)),
+        )
         try:
             tests_count = float(self._extract_first(query_batch, ["tests_count", "extra_info.tests_count"], 0) or 0)
             tests_count_raw = float(
@@ -375,7 +437,12 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             tests_count = 0.0
             tests_count_raw = 0.0
 
-        state: dict[str, Any] = self._new_global_state(problem, starter_code, fn_name=fn_name)
+        state: dict[str, Any] = self._new_global_state(
+            problem,
+            starter_code,
+            fn_name=fn_name,
+            visible_tests_summary=visible_tests_summary,
+        )
         records: list[WorkflowExecutionRecord] = []
         step_id = 0
         stopped_by_all_passed = False
@@ -497,6 +564,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         verifier_pass_rates: list[float] = []
         verifier_all_passed: list[float] = []
         verifier_total_tests: list[float] = []
+        verifier_total_available_tests: list[float] = []
+        verifier_skipped_by_limit: list[float] = []
+        verifier_timeouts: list[float] = []
         verifier_durations: list[float] = []
         verifier_error_codes: list[float] = []
         verifier_runner_counts: list[float] = []
@@ -506,6 +576,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 verifier_pass_rates.append(float(parsed.get("pass_rate", 0.0) or 0.0))
                 verifier_all_passed.append(float(parsed.get("all_passed", 0) or 0))
                 verifier_total_tests.append(float(parsed.get("total", 0) or 0))
+                verifier_total_available_tests.append(float(parsed.get("total_available", parsed.get("total", 0)) or 0))
+                verifier_skipped_by_limit.append(float(parsed.get("skipped_by_limit", 0) or 0))
+                verifier_timeouts.append(float(parsed.get("timeout_seconds", 0.0) or 0.0))
                 verifier_durations.append(float(parsed.get("duration_s", record.meta.get("duration_s", 0.0)) or 0.0))
                 verifier_error_codes.append(float(parsed.get("error_code", 0) or 0))
                 verifier_runner_counts.append(float(parsed.get("runner_count", 0) or 0))
@@ -537,6 +610,19 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             ),
             "workflow/code/verifier/total_tests_mean": (
                 float(sum(verifier_total_tests) / max(1, len(verifier_total_tests))) if verifier_total_tests else 0.0
+            ),
+            "workflow/code/verifier/total_available_tests_mean": (
+                float(sum(verifier_total_available_tests) / max(1, len(verifier_total_available_tests)))
+                if verifier_total_available_tests
+                else 0.0
+            ),
+            "workflow/code/verifier/skipped_by_limit_mean": (
+                float(sum(verifier_skipped_by_limit) / max(1, len(verifier_skipped_by_limit)))
+                if verifier_skipped_by_limit
+                else 0.0
+            ),
+            "workflow/code/verifier/timeout_seconds_mean": (
+                float(sum(verifier_timeouts) / max(1, len(verifier_timeouts))) if verifier_timeouts else 0.0
             ),
             "workflow/code/verifier/duration_s_mean": (
                 float(sum(verifier_durations) / max(1, len(verifier_durations))) if verifier_durations else 0.0
