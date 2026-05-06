@@ -1,17 +1,21 @@
 # STAR PPO Math Multi-Agent Workflow
 
-This workflow trains four non-shared math agents:
+This workflow trains four math agents with two shared LLM parameter groups:
 
-- `solver_agent` on `solver_llm`
-- `verifier_agent` on `verifier_llm`
-- `refiner_agent` on `refiner_llm`
-- `finalizer_agent` on `finalizer_llm`
+- `solver_agent` and `verifier_agent` share `solver_verifier_llm`
+- `refiner_agent` and `finalizer_agent` share `refiner_finalizer_llm`
 
-The default model path for all four agents is:
+The default model path for both shared LLM groups is:
 
 ```bash
 /mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
 ```
+
+By default the launch scripts use 4 total nodes and place each shared LLM group
+on 2 nodes:
+
+- `solver_verifier_llm`: 2 nodes
+- `refiner_finalizer_llm`: 2 nodes
 
 The workflow is:
 
@@ -57,10 +61,12 @@ bash examples/star_ppo/math_multi_agent/run_star_math_test.sh
 Useful overrides:
 
 - `AGENT_MODEL_PATH`
-- `SOLVER_MODEL_PATH`, `VERIFIER_MODEL_PATH`, `REFINER_MODEL_PATH`, `FINALIZER_MODEL_PATH`
+- `SOLVER_VERIFIER_MODEL_PATH`, `REFINER_FINALIZER_MODEL_PATH`
+- `SOLVER_MODEL_PATH`, `REFINER_MODEL_PATH` as backward-compatible fallbacks
 - `TRAIN_JSONL`
 - `VAL_FILES`
-- `NNODES`, `GPUS_PER_NODE`, `AGENT_GPUS_PER_NODE`
+- `NNODES`, `SHARED_LLM_NNODES`, `SOLVER_VERIFIER_NNODES`, `REFINER_FINALIZER_NNODES`
+- `GPUS_PER_NODE`, `AGENT_GPUS_PER_NODE`
 - `GEN_BATCH_SIZE`, `VAL_BATCH_SIZE`
 - `TEST_FREQ`, `SAVE_FREQ`
 

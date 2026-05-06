@@ -5,6 +5,7 @@ import time
 import uuid
 import zlib
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -434,7 +435,7 @@ class StarRayTrainer:
                 ray.get(role_refs)
                 print(f"[star] parallel init_model role={role_name} done")
 
-        for spec in self.engine_specs:
+        def _post_init_model(spec: EngineSpec):
             ctx = self.model_contexts[spec.model_id]
             local_buffer = self._local_traj_buffers_by_model.get(spec.model_id, None)
             if local_buffer is not None:
@@ -452,6 +453,36 @@ class StarRayTrainer:
 
             self._init_weight_sync_group(spec.model_id, ctx)
             self._sync_rollout_weights(spec.model_id, ctx)
+            return spec.model_id
+
+        parallel_post_init = str(os.environ.get("STAR_PARALLEL_POST_INIT", "false")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        post_init_parallelism = max(
+            1,
+            int(os.environ.get("STAR_POST_INIT_PARALLELISM", str(len(self.engine_specs)))),
+        )
+        if parallel_post_init and len(self.engine_specs) > 1:
+            print(
+                f"[star] parallel post-init enabled models={len(self.engine_specs)} "
+                f"parallelism={post_init_parallelism}"
+            )
+            with ThreadPoolExecutor(max_workers=post_init_parallelism) as executor:
+                futures = {executor.submit(_post_init_model, spec): spec.model_id for spec in self.engine_specs}
+                for future in as_completed(futures):
+                    model_id = futures[future]
+                    try:
+                        future.result()
+                        print(f"[star] post-init done model={model_id}")
+                    except Exception as exc:
+                        print(f"[star] post-init failed model={model_id} err={type(exc).__name__}: {exc}")
+                        raise
+        else:
+            for spec in self.engine_specs:
+                _post_init_model(spec)
 
     def _init_weight_sync_group(self, model_id: str, ctx: ModelWorkerContext):
         weights_info = ctx.actor_wg.get_actor_weights_info()[0]

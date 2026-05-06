@@ -18,6 +18,7 @@ VAL_FILES="${VAL_FILES:-[${MATH500_FILE},${AIME24_FILE},${AIME25_FILE},${AIME26_
 NNODES="${NNODES:-4}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 AGENT_GPUS_PER_NODE="${AGENT_GPUS_PER_NODE:-8}"
+SHARED_LLM_NNODES="${SHARED_LLM_NNODES:-2}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
 
 python3 -m verl.experimental.star_ppo.main_ppo \
@@ -32,15 +33,13 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   "trainer.test_freq=-1" \
   "trainer.save_freq=-1" \
   "trainer.total_epochs=1" \
-  "trainer.llm_engines.0.model_path=${SOLVER_MODEL_PATH:-${AGENT_MODEL_PATH}}" \
-  "trainer.llm_engines.1.model_path=${VERIFIER_MODEL_PATH:-${AGENT_MODEL_PATH}}" \
-  "trainer.llm_engines.2.model_path=${REFINER_MODEL_PATH:-${AGENT_MODEL_PATH}}" \
-  "trainer.llm_engines.3.model_path=${FINALIZER_MODEL_PATH:-${AGENT_MODEL_PATH}}" \
-  "trainer.llm_engines.0.n_gpus_per_node=${SOLVER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}" \
-  "trainer.llm_engines.1.n_gpus_per_node=${VERIFIER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}" \
-  "trainer.llm_engines.2.n_gpus_per_node=${REFINER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}" \
-  "trainer.llm_engines.3.n_gpus_per_node=${FINALIZER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}" \
-  "actor_rollout_ref.model.path=${SOLVER_MODEL_PATH:-${AGENT_MODEL_PATH}}" \
+  "trainer.llm_engines.0.model_path=${SOLVER_VERIFIER_MODEL_PATH:-${SOLVER_MODEL_PATH:-${AGENT_MODEL_PATH}}}" \
+  "trainer.llm_engines.1.model_path=${REFINER_FINALIZER_MODEL_PATH:-${REFINER_MODEL_PATH:-${AGENT_MODEL_PATH}}}" \
+  "trainer.llm_engines.0.nnodes=${SOLVER_VERIFIER_NNODES:-${SHARED_LLM_NNODES}}" \
+  "trainer.llm_engines.1.nnodes=${REFINER_FINALIZER_NNODES:-${SHARED_LLM_NNODES}}" \
+  "trainer.llm_engines.0.n_gpus_per_node=${SOLVER_VERIFIER_GPUS_PER_NODE:-${SOLVER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}}" \
+  "trainer.llm_engines.1.n_gpus_per_node=${REFINER_FINALIZER_GPUS_PER_NODE:-${REFINER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}}" \
+  "actor_rollout_ref.model.path=${SOLVER_VERIFIER_MODEL_PATH:-${SOLVER_MODEL_PATH:-${AGENT_MODEL_PATH}}}" \
   "data.train_files=${TRAIN_JSONL}" \
   "data.val_files=${VAL_FILES}" \
   "data.val_batch_size=${VAL_BATCH_SIZE}" \

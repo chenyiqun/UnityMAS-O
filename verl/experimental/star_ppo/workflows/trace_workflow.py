@@ -305,6 +305,20 @@ class TraceWorkflowRunner(WorkflowRunner):
             return int(len(token_ids))
         return len(str(text or ""))
 
+    def _count_chat_tokens(self, messages: list[dict]) -> int:
+        tokenizer = getattr(self.trainer, "tokenizer", None)
+        if tokenizer is None:
+            return self._count_tokens(self._as_template_value(messages))
+        try:
+            token_ids = tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+            )
+            return int(len(token_ids)) if isinstance(token_ids, list) else self._count_tokens(str(messages))
+        except Exception:
+            return self._count_tokens(self._as_template_value(messages))
+
     def _truncate_prompt_for_inference(self, prompt_text: str) -> tuple[str, int]:
         tokenizer = getattr(self.trainer, "tokenizer", None)
         max_tokens = int(self.per_infer_prompt_max_tokens)
@@ -325,6 +339,57 @@ class TraceWorkflowRunner(WorkflowRunner):
             return tokenizer.decode(kept_ids), int(len(token_ids) - len(kept_ids))
         except Exception:
             return prompt_text, 0
+
+    def _build_truncated_chat_prompt(self, prompt_text: str) -> tuple[list[dict], int, int]:
+        """Build a one-message chat prompt whose templated token length fits rollout.prompt_length."""
+
+        tokenizer = getattr(self.trainer, "tokenizer", None)
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        max_tokens = min(int(self.per_infer_prompt_max_tokens), int(rollout_cfg.get("prompt_length", 4096)))
+        messages = [{"role": "user", "content": str(prompt_text or "")}]
+        chat_tokens = self._count_chat_tokens(messages)
+        if tokenizer is None or max_tokens <= 0 or chat_tokens <= max_tokens:
+            return messages, 0, chat_tokens
+
+        try:
+            content_ids = tokenizer.encode(str(prompt_text or ""), add_special_tokens=False)
+        except TypeError:
+            content_ids = tokenizer.encode(str(prompt_text or ""))
+        except Exception:
+            truncated, trimmed = self._truncate_prompt_for_inference(prompt_text)
+            messages = [{"role": "user", "content": truncated}]
+            return messages, trimmed, self._count_chat_tokens(messages)
+
+        if not isinstance(content_ids, list) or not content_ids:
+            return messages, 0, chat_tokens
+
+        lo, hi = 0, len(content_ids)
+        best_text = ""
+        best_keep = 0
+        best_len = 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            try:
+                candidate = tokenizer.decode(content_ids[:mid], skip_special_tokens=True)
+            except TypeError:
+                candidate = tokenizer.decode(content_ids[:mid])
+            except Exception:
+                candidate = str(prompt_text or "")
+            candidate_messages = [{"role": "user", "content": candidate}]
+            candidate_len = self._count_chat_tokens(candidate_messages)
+            if candidate_len <= max_tokens:
+                best_text = candidate
+                best_keep = mid
+                best_len = candidate_len
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        if not best_text and hi <= 0:
+            best_text = ""
+            best_len = self._count_chat_tokens([{"role": "user", "content": best_text}])
+        trimmed_tokens = max(0, len(content_ids) - max(0, best_keep))
+        return [{"role": "user", "content": best_text}], int(trimmed_tokens), int(best_len)
 
     @staticmethod
     def _has_content(value: Any) -> bool:
@@ -449,12 +514,12 @@ class TraceWorkflowRunner(WorkflowRunner):
         extra_meta: Optional[dict[str, Any]] = None,
     ) -> WorkflowExecutionRecord:
         prompt_text = self._render_template(str(node_cfg.get("prompt_template", "{question}")), prompt_context)
-        prompt_text, trimmed_tokens = self._truncate_prompt_for_inference(prompt_text)
+        raw_messages, trimmed_tokens, prompt_tokens = self._build_truncated_chat_prompt(prompt_text)
         model_id = str(node_cfg["model_id"])
         agent_id = str(node_cfg.get("agent_id", node_id))
         prompt_batch = self.trainer._build_workflow_prompt_batch(
             query_batch,
-            [[{"role": "user", "content": prompt_text}]],
+            [raw_messages],
             agent_id,
         )
         timing_state: dict[str, Any] = {}
@@ -469,7 +534,7 @@ class TraceWorkflowRunner(WorkflowRunner):
         meta = dict(extra_meta or {})
         meta["format_reward"] = float(format_reward)
         meta["format_weight"] = float(dict(node_cfg.get("reward", {})).get("format_weight", 0.0))
-        meta["prompt_tokens"] = int(self._count_tokens(prompt_text))
+        meta["prompt_tokens"] = int(prompt_tokens)
         meta["output_tokens"] = int(self._count_tokens(raw_text))
         meta["prompt_trimmed_tokens"] = int(trimmed_tokens)
         meta["timing"] = {
