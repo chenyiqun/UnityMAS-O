@@ -36,12 +36,19 @@ actor_rollout_ref:
   model:
     path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:SOLVER_VERIFIER_MODEL_PATH,${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}}}
     tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:SOLVER_VERIFIER_MODEL_PATH,${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}}}}
-    use_remove_padding: true
+    use_remove_padding: ${oc.decode:${oc.env:USE_REMOVE_PADDING,true}}
+    enable_activation_offload: ${oc.decode:${oc.env:ACTOR_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
   actor:
     ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
     ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
     use_dynamic_bsz: ${oc.decode:${oc.env:USE_DYNAMIC_BSZ,true}}
+    ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
     entropy_coeff: ${oc.decode:${oc.env:ACTOR_ENTROPY_COEFF,0}}
+    fsdp_config:
+      ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
+      param_offload: ${oc.decode:${oc.env:ACTOR_FSDP_PARAM_OFFLOAD,${oc.env:FSDP_PARAM_OFFLOAD,false}}}
+      optimizer_offload: ${oc.decode:${oc.env:ACTOR_FSDP_OPTIMIZER_OFFLOAD,${oc.env:FSDP_OPTIMIZER_OFFLOAD,false}}}
+      offload_policy: ${oc.decode:${oc.env:ACTOR_FSDP_OFFLOAD_POLICY,${oc.env:FSDP_OFFLOAD_POLICY,false}}}
     optim:
       lr: ${oc.decode:${oc.env:ACTOR_LR,1e-6}}
       lr_warmup_steps: ${oc.decode:${oc.env:ACTOR_LR_WARMUP_STEPS,10}}
@@ -49,6 +56,9 @@ actor_rollout_ref:
   ref:
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
     log_prob_use_dynamic_bsz: ${oc.decode:${oc.env:USE_DYNAMIC_BSZ,true}}
+    ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
+    fsdp_config:
+      ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
   rollout:
     name: ${oc.env:ROLLOUT_NAME,vllm}
     max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,16384}}
@@ -79,7 +89,15 @@ critic:
   model:
     path: ${oc.select:actor_rollout_ref.model.path,null}
     tokenizer_path: ${oc.select:actor_rollout_ref.model.tokenizer_path,null}
+    enable_activation_offload: ${oc.decode:${oc.env:CRITIC_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
+    use_remove_padding: ${oc.decode:${oc.env:USE_REMOVE_PADDING,true}}
+    fsdp_config:
+      ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
+      param_offload: ${oc.decode:${oc.env:CRITIC_FSDP_PARAM_OFFLOAD,${oc.env:FSDP_PARAM_OFFLOAD,false}}}
+      optimizer_offload: ${oc.decode:${oc.env:CRITIC_FSDP_OPTIMIZER_OFFLOAD,${oc.env:FSDP_OPTIMIZER_OFFLOAD,false}}}
+      offload_policy: ${oc.decode:${oc.env:CRITIC_FSDP_OFFLOAD_POLICY,${oc.env:FSDP_OFFLOAD_POLICY,false}}}
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+  ulysses_sequence_parallel_size: ${oc.decode:${oc.env:ULYSSES_SEQUENCE_PARALLEL_SIZE,1}}
 
 algorithm:
   adv_estimator: ${oc.env:ADV_ESTIMATOR,gae}

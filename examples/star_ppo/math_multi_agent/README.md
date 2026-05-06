@@ -69,6 +69,8 @@ Useful overrides:
 - `GPUS_PER_NODE`, `AGENT_GPUS_PER_NODE`
 - `GEN_BATCH_SIZE`, `VAL_BATCH_SIZE`
 - `TEST_FREQ`, `SAVE_FREQ`
+- `ULYSSES_SEQUENCE_PARALLEL_SIZE` for long-response PPO memory reduction
+- `ENABLE_ACTIVATION_OFFLOAD`, `FSDP_PARAM_OFFLOAD`, `FSDP_OPTIMIZER_OFFLOAD`
 
 Print complete validation examples:
 

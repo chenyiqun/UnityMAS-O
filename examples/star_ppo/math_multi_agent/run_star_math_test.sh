@@ -20,6 +20,9 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 AGENT_GPUS_PER_NODE="${AGENT_GPUS_PER_NODE:-8}"
 SHARED_LLM_NNODES="${SHARED_LLM_NNODES:-2}"
 VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
+USE_REMOVE_PADDING="${USE_REMOVE_PADDING:-true}"
+ULYSSES_SEQUENCE_PARALLEL_SIZE="${ULYSSES_SEQUENCE_PARALLEL_SIZE:-4}"
+ENABLE_ACTIVATION_OFFLOAD="${ENABLE_ACTIVATION_OFFLOAD:-false}"
 
 python3 -m verl.experimental.star_ppo.main_ppo \
   --config-name "${CONFIG_NAME}" \
@@ -40,6 +43,16 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   "trainer.llm_engines.0.n_gpus_per_node=${SOLVER_VERIFIER_GPUS_PER_NODE:-${SOLVER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}}" \
   "trainer.llm_engines.1.n_gpus_per_node=${REFINER_FINALIZER_GPUS_PER_NODE:-${REFINER_GPUS_PER_NODE:-${AGENT_GPUS_PER_NODE}}}" \
   "actor_rollout_ref.model.path=${SOLVER_VERIFIER_MODEL_PATH:-${SOLVER_MODEL_PATH:-${AGENT_MODEL_PATH}}}" \
+  "actor_rollout_ref.model.use_remove_padding=${USE_REMOVE_PADDING}" \
+  "critic.model.use_remove_padding=${USE_REMOVE_PADDING}" \
+  "actor_rollout_ref.actor.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "actor_rollout_ref.ref.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "critic.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "critic.model.fsdp_config.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "actor_rollout_ref.model.enable_activation_offload=${ENABLE_ACTIVATION_OFFLOAD}" \
+  "critic.model.enable_activation_offload=${ENABLE_ACTIVATION_OFFLOAD}" \
   "data.train_files=${TRAIN_JSONL}" \
   "data.val_files=${VAL_FILES}" \
   "data.val_batch_size=${VAL_BATCH_SIZE}" \
