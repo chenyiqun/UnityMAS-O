@@ -309,11 +309,17 @@ class TraceWorkflowRunner(WorkflowRunner):
         tokenizer = getattr(self.trainer, "tokenizer", None)
         if tokenizer is None:
             return self._count_tokens(self._as_template_value(messages))
+        apply_chat_template_kwargs = {}
+        try:
+            apply_chat_template_kwargs = dict(self.config.data.get("apply_chat_template_kwargs", {}) or {})
+        except Exception:
+            apply_chat_template_kwargs = {}
         try:
             token_ids = tokenizer.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
                 tokenize=True,
+                **apply_chat_template_kwargs,
             )
             return int(len(token_ids)) if isinstance(token_ids, list) else self._count_tokens(str(messages))
         except Exception:

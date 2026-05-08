@@ -128,6 +128,8 @@ data:
   gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
   val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,128}}
   max_prompt_length: ${oc.decode:${oc.env:DATA_MAX_PROMPT_LENGTH,8192}}
+  apply_chat_template_kwargs:
+    enable_thinking: ${oc.decode:${oc.env:QWEN_ENABLE_THINKING,false}}
   filter_overlong_prompts: ${oc.decode:${oc.env:FILTER_OVERLONG_PROMPTS,false}}
   truncation: left
   custom_cls:
@@ -178,6 +180,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:MATH_SOLVER_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Solver Agent.
           Given a math problem, solve it step by step and provide the final answer.
 
@@ -202,6 +205,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:MATH_VERIFIER_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Verifier Agent.
           Your task is to check whether the given solution correctly solves the math problem.
           Do not rewrite the full solution unless necessary. Focus on identifying errors and giving useful feedback.
@@ -233,6 +237,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:MATH_REFINER_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Refiner Agent.
           Improve the initial solution based on the verifier's feedback.
           If the verifier says the solution is correct, keep the solution but make it clearer and concise.
@@ -265,6 +270,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:MATH_FINALIZER_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Finalizer Agent.
           Produce the final answer based on the problem, the initial solution, the verification feedback, and the refined solution.
           Check consistency and output a clean final solution and final answer.
