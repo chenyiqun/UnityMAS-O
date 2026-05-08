@@ -80,6 +80,8 @@ data:
   val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,128}}
   max_prompt_length: ${oc.decode:${oc.env:DATA_MAX_PROMPT_LENGTH,12288}}
   filter_overlong_prompts: ${oc.decode:${oc.env:FILTER_OVERLONG_PROMPTS,false}}
+  apply_chat_template_kwargs:
+    enable_thinking: ${oc.decode:${oc.env:QWEN_ENABLE_THINKING,false}}
   custom_cls:
     path: pkg://verl.experimental.star_ppo.datasets.code_jsonl_dataset
     name: CodeJsonlDataset
@@ -152,6 +154,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:CODE_PLANNER_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Planner agent in an iterative multi-agent coding workflow.
 
           Original problem/task:
@@ -187,6 +190,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:CODE_CODER_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Coder agent in an iterative multi-agent coding workflow.
 
           Original problem/task:
@@ -236,6 +240,7 @@ star:
         reward:
           format_weight: ${oc.decode:${oc.env:CODE_REFLECTION_FORMAT_WEIGHT,1.0}}
         prompt_template: |
+          /no_think
           You are the Reflection agent in an iterative multi-agent coding workflow.
 
           Original problem/task:
