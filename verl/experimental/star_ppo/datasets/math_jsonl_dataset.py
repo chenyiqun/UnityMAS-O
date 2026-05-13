@@ -127,7 +127,8 @@ class MathJsonlDataset(RLHFDataset):
         unique_id = str(row.get("unique_id") or "").lower()
         stem = Path(data_file).stem.lower()
         parent = Path(data_file).parent.name.lower()
-        joined = " ".join([url, unique_id, stem, parent])
+        path_text = str(data_file).lower()
+        joined = " ".join([url, unique_id, stem, parent, path_text])
 
         if "math-500" in joined or (unique_id.startswith("test/") and row.get("subject") is not None):
             return "math-500"
@@ -139,6 +140,8 @@ class MathJsonlDataset(RLHFDataset):
             return "aime25"
         if "2026_aime" in joined or "aime26" in joined or "aime2026" in joined:
             return "aime26"
+        if "gsm8k" in joined:
+            return "gsm8k"
 
         source_default = Path(data_file).stem
         if source_default.lower() in {"train", "test", "val", "validation", "dev"} and Path(data_file).parent.name:
