@@ -142,6 +142,8 @@ class MathJsonlDataset(RLHFDataset):
             return "aime26"
         if "gsm8k" in joined:
             return "gsm8k"
+        if "deepscaler" in joined or "deepscaler-preview-dataset" in joined:
+            return "deepscaler"
 
         source_default = Path(data_file).stem
         if source_default.lower() in {"train", "test", "val", "validation", "dev"} and Path(data_file).parent.name:
