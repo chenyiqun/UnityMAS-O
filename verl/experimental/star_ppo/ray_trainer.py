@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+import traceback
 import uuid
 import zlib
 from collections import defaultdict
@@ -2047,59 +2048,101 @@ class StarRayTrainer:
         return checkpoint_root
 
     def _save_checkpoint(self, step: int):
+        save_start = time.time()
         checkpoint_root = self._get_checkpoint_root()
         global_step_folder = os.path.join(checkpoint_root, f"global_step_{step}")
         os.makedirs(global_step_folder, exist_ok=True)
 
-        remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
-        max_actor_ckpt_to_keep = (
-            self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+        # Checkpointing an 8B multi-agent run can legitimately take longer than
+        # normal worker RPCs.  If we reuse STAR_WORKER_CALL_TIMEOUT_SECONDS here,
+        # the driver may time out, skip the tracker write, and leave an otherwise
+        # usable checkpoint invisible to auto-resume.  Keep a dedicated checkpoint
+        # timeout; 0 means wait until the worker-side save completes.
+        checkpoint_timeout = str(
+            os.environ.get("STAR_CHECKPOINT_TIMEOUT_SECONDS", os.environ.get("STAR_CKPT_TIMEOUT_SECONDS", "0"))
         )
-        max_critic_ckpt_to_keep = (
-            self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
-        )
+        old_worker_call_timeout = os.environ.get("STAR_WORKER_CALL_TIMEOUT_SECONDS")
+        os.environ["STAR_WORKER_CALL_TIMEOUT_SECONDS"] = checkpoint_timeout
 
-        for model_id, ctx in self.model_contexts.items():
-            model_folder = os.path.join(global_step_folder, model_id)
-            actor_local_path = os.path.join(model_folder, "actor")
-            actor_remote_path = (
-                None
-                if self.config.trainer.default_hdfs_dir is None
-                else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{step}", model_id, "actor")
-            )
-            ctx.actor_wg.save_checkpoint(
-                actor_local_path,
-                actor_remote_path,
-                step,
-                max_ckpt_to_keep=max_actor_ckpt_to_keep,
+        try:
+            print(
+                f"[star] checkpoint save start: step={step} "
+                f"path={global_step_folder} worker_call_timeout={checkpoint_timeout}"
             )
 
-            if self.use_critic and ctx.critic_wg is not None:
-                critic_local_path = os.path.join(model_folder, str(Role.Critic))
-                critic_remote_path = (
+            remove_previous_ckpt_in_save = self.config.trainer.get("remove_previous_ckpt_in_save", False)
+            max_actor_ckpt_to_keep = (
+                self.config.trainer.get("max_actor_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            )
+            max_critic_ckpt_to_keep = (
+                self.config.trainer.get("max_critic_ckpt_to_keep", None) if not remove_previous_ckpt_in_save else 1
+            )
+
+            saved_models = []
+            for model_id, ctx in self.model_contexts.items():
+                model_folder = os.path.join(global_step_folder, model_id)
+                actor_local_path = os.path.join(model_folder, "actor")
+                actor_remote_path = (
                     None
                     if self.config.trainer.default_hdfs_dir is None
-                    else os.path.join(
-                        self.config.trainer.default_hdfs_dir, f"global_step_{step}", model_id, str(Role.Critic)
-                    )
+                    else os.path.join(self.config.trainer.default_hdfs_dir, f"global_step_{step}", model_id, "actor")
                 )
-                ctx.critic_wg.save_checkpoint(
-                    critic_local_path,
-                    critic_remote_path,
+                print(f"[star] checkpoint save actor: step={step} model={model_id} path={actor_local_path}")
+                ctx.actor_wg.save_checkpoint(
+                    actor_local_path,
+                    actor_remote_path,
                     step,
-                    max_ckpt_to_keep=max_critic_ckpt_to_keep,
+                    max_ckpt_to_keep=max_actor_ckpt_to_keep,
                 )
 
-        # save train dataloader cursor/sampler state for strict resume
-        dataloader_local_path = os.path.join(global_step_folder, "data.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
+                model_meta = {"model_id": model_id, "actor_path": actor_local_path}
+                if self.use_critic and ctx.critic_wg is not None:
+                    critic_local_path = os.path.join(model_folder, str(Role.Critic))
+                    critic_remote_path = (
+                        None
+                        if self.config.trainer.default_hdfs_dir is None
+                        else os.path.join(
+                            self.config.trainer.default_hdfs_dir, f"global_step_{step}", model_id, str(Role.Critic)
+                        )
+                    )
+                    print(f"[star] checkpoint save critic: step={step} model={model_id} path={critic_local_path}")
+                    ctx.critic_wg.save_checkpoint(
+                        critic_local_path,
+                        critic_remote_path,
+                        step,
+                        max_ckpt_to_keep=max_critic_ckpt_to_keep,
+                    )
+                    model_meta["critic_path"] = critic_local_path
+                saved_models.append(model_meta)
 
-        star_meta = {"global_step": step, "models": sorted(self.model_contexts.keys())}
-        with open(os.path.join(global_step_folder, "star_meta.json"), "w", encoding="utf-8") as f:
-            json.dump(star_meta, f, ensure_ascii=False, indent=2)
-        with open(os.path.join(checkpoint_root, "latest_checkpointed_iteration.txt"), "w", encoding="utf-8") as f:
-            f.write(str(step))
+            # save train dataloader cursor/sampler state for strict resume
+            dataloader_local_path = os.path.join(global_step_folder, "data.pt")
+            dataloader_state_dict = self.train_dataloader.state_dict()
+            torch.save(dataloader_state_dict, dataloader_local_path)
+
+            duration_s = float(time.time() - save_start)
+            star_meta = {
+                "global_step": step,
+                "models": sorted(self.model_contexts.keys()),
+                "saved_models": saved_models,
+                "completed": True,
+                "duration_s": duration_s,
+                "worker_call_timeout_seconds": float(checkpoint_timeout),
+            }
+            with open(os.path.join(global_step_folder, "star_meta.json"), "w", encoding="utf-8") as f:
+                json.dump(star_meta, f, ensure_ascii=False, indent=2)
+            with open(os.path.join(checkpoint_root, "latest_checkpointed_iteration.txt"), "w", encoding="utf-8") as f:
+                f.write(str(step))
+
+            print(
+                f"[star] checkpoint save done: step={step} "
+                f"path={global_step_folder} duration_s={duration_s:.1f}"
+            )
+        finally:
+            if old_worker_call_timeout is None:
+                os.environ.pop("STAR_WORKER_CALL_TIMEOUT_SECONDS", None)
+            else:
+                os.environ["STAR_WORKER_CALL_TIMEOUT_SECONDS"] = old_worker_call_timeout
 
     def _load_checkpoint(self) -> int:
         resume_mode = self.config.trainer.resume_mode
@@ -2578,8 +2621,17 @@ class StarRayTrainer:
                         if self.config.trainer.save_freq > 0 and (
                             is_last_step or global_step % self.config.trainer.save_freq == 0
                         ):
+                            checkpoint_t0 = time.time()
                             try:
                                 self._save_checkpoint(global_step)
+                                self._log_metrics(
+                                    logger,
+                                    {
+                                        "training/checkpoint_saved": 1.0,
+                                        "training/checkpoint_save_s": float(time.time() - checkpoint_t0),
+                                    },
+                                    global_step,
+                                )
                                 self._mark_progress(stage="train_checkpoint_saved", step=global_step)
                             except Exception as exc:
                                 timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
@@ -2587,11 +2639,13 @@ class StarRayTrainer:
                                     f"[star] checkpoint save failed: step={global_step} "
                                     f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
                                 )
+                                print(traceback.format_exc())
                                 self._log_metrics(
                                     logger,
                                     {
                                         "training/checkpoint_failed": 1.0,
                                         "training/checkpoint_failed_timeout": timeout_flag,
+                                        "training/checkpoint_save_s": float(time.time() - checkpoint_t0),
                                     },
                                     global_step,
                                 )
