@@ -1,0 +1,26 @@
+defaults:
+  - star_math_solver_verifier_refiner_finalizer_independent_trainer
+  - _self_
+
+trainer:
+  experiment_name: ${oc.env:EXPERIMENT_NAME,solver_verifier_refiner_finalizer_shared_qwen3_4b}
+  llm_engines:
+    - model_id: math_shared_llm
+      nnodes: ${oc.decode:${oc.env:MATH_SHARED_NNODES,${oc.env:AGENT_NNODES,4}}}
+      n_gpus_per_node: ${oc.decode:${oc.env:MATH_SHARED_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: ${oc.env:MATH_SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen3-4B}}
+
+star:
+  workflow:
+    name: math_solver_verifier_refiner_finalizer_shared
+    math:
+      solver:
+        model_id: math_shared_llm
+      verifier:
+        model_id: math_shared_llm
+      refiner:
+        model_id: math_shared_llm
+      finalizer:
+        model_id: math_shared_llm
