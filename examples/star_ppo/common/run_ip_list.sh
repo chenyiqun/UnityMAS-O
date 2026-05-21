@@ -19,6 +19,7 @@ ACTIVATE_CONDA="${ACTIVATE_CONDA:-true}"
 LOCAL_IP="${LOCAL_IP:-}"
 CLEANUP_BEFORE_LAUNCH="${CLEANUP_BEFORE_LAUNCH:-true}"
 PYTHON_KILL_PATTERN="${PYTHON_KILL_PATTERN:-/miniconda3/envs/${CONDA_ENV_NAME}/bin/python3.10}"
+LOG_TO_FILE="${LOG_TO_FILE:-true}"
 
 usage() {
   cat <<'USAGE'
@@ -31,6 +32,7 @@ Options:
   --conda-env NAME      Conda env to activate. Default: verl.
   --conda-root DIR      Conda root. Default: $HOME/miniconda3.
   --no-cleanup          Skip ray stop / stale python cleanup before launch.
+  --no-log-file         Do not tee stdout/stderr to logs/star_ppo/run_rank*.log.
   -h, --help            Show this help.
 
 Environment:
@@ -59,6 +61,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-cleanup)
       CLEANUP_BEFORE_LAUNCH="false"
+      shift
+      ;;
+    --no-log-file)
+      LOG_TO_FILE="false"
       shift
       ;;
     -h|--help)
@@ -159,6 +165,15 @@ if [[ "${CLEANUP_BEFORE_LAUNCH}" == "true" ]]; then
   echo "[common/run_ip_list] cleanup stale Ray/Python processes on local rank ${RANK}"
   ray stop --force >/dev/null 2>&1 || true
   pkill -9 -f "${PYTHON_KILL_PATTERN}" >/dev/null 2>&1 || true
+fi
+
+if [[ "${LOG_TO_FILE}" == "true" ]]; then
+  mkdir -p logs/star_ppo
+  TS="$(date +%Y%m%d_%H%M%S)"
+  LOG_FILE="${LOG_FILE:-logs/star_ppo/run_rank${RANK}_${TS}.log}"
+  echo "[common/run_ip_list] writing log to ${LOG_FILE}"
+  stdbuf -oL -eL bash "${SCRIPT_DIR}/run_per_node.sh" "$@" 2>&1 | tee -a "${LOG_FILE}"
+  exit "${PIPESTATUS[0]}"
 fi
 
 exec bash "${SCRIPT_DIR}/run_per_node.sh" "$@"
