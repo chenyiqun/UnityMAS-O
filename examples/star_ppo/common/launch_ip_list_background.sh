@@ -244,10 +244,12 @@ run_remote() {
     echo "----- ${ip} -----"
     printf '%s\n' "${remote_command}"
   elif is_local_ip "${ip}"; then
-    bash -lc "${remote_command}"
+    bash -s <<< "${remote_command}"
   else
+    # Feed the script over stdin so `pkill -f` cannot match the launcher shell's
+    # command line and kill the shell that is still executing this launch.
     # shellcheck disable=SC2086
-    ssh ${SSH_OPTS} "$(ssh_target "${ip}")" "bash -lc $(quote "${remote_command}")"
+    ssh ${SSH_OPTS} "$(ssh_target "${ip}")" "bash -s" <<< "${remote_command}"
   fi
 }
 
