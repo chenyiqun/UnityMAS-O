@@ -2,7 +2,7 @@
 
 UnityMAS-O 是一个基于 [verl](https://github.com/verl-project/verl) 改造的 LLM 多智能体强化学习优化框架。它把传统单策略 RL post-training 扩展到可配置的 multi-agent workflow：用户定义逻辑 agent、workflow 执行图、agent 到物理 LLM 的映射关系，以及面向节点、轮次或整条轨迹的奖励分配规则；框架负责异步执行 workflow、收集结构化轨迹、把奖励归因到对应 agent，再用 PPO 风格的训练流程更新每个物理 LLM。
 
-这份 README 是本仓库的使用入口。原始 Verl 能力仍然保留；UnityMAS-O 的新增代码主要位于 `verl/experimental/star_ppo/` 和 `examples/star_ppo/`。
+仓库仍保留上游 Verl 的训练能力；UnityMAS-O 相关实现主要放在 `verl/experimental/star_ppo/` 和 `examples/star_ppo/`。
 
 <a href="docs/assets/unitymas-o/unity-framework.pdf">
   <img src="docs/assets/unitymas-o/unity-framework.png" alt="UnityMAS-O agent framework" width="100%">
@@ -97,7 +97,7 @@ examples/star_ppo/
 
 ## 环境准备
 
-推荐使用独立的 `verl` conda 环境。下面是当前实验环境使用过的一套安装流程：
+建议从一个干净的 `verl` conda 环境开始。我们实际跑实验时使用的安装流程如下：
 
 ```bash
 cd /path/to/UnityMAS-O
@@ -123,7 +123,7 @@ pip install "trl==0.26.2"
 pip install debugpy==1.8.0
 ```
 
-常用依赖来自 Verl、PyTorch、Ray、vLLM/SGLang、Transformers、Hydra/OmegaConf、datasets 等。不同集群镜像可能已经内置部分依赖；如果你在已有环境上安装，建议仍然检查上面几个关键版本 pin。
+这套环境主要依赖 Verl、PyTorch、Ray、vLLM/SGLang、Transformers、Hydra/OmegaConf 和 datasets。集群镜像里如果已经装过一部分依赖，也建议核对 `numpy`、`transformers`、`trl` 这几个版本，很多兼容性问题都出在这里。
 
 启动前建议清理旧 Ray 进程和旧 Python worker：
 
@@ -517,29 +517,35 @@ UnityMAS-O 复用了 Verl 的核心训练基础设施，包括 Ray 分布式执�
 
 如果只需要原始 Verl 单策略 PPO/GRPO/SFT 功能，仍可使用 `verl/trainer/` 和 `examples/ppo_trainer/` 等原始入口；如果要训练多 agent workflow，请使用 `verl.experimental.star_ppo.main_ppo` 和 `examples/star_ppo/` 下的脚本。
 
-## 技术报告
+## 技术报告与结果
 
-本仓库对应的技术报告是：
+技术报告题为：
 
 ```text
 UnityMAS-O: A General RL Optimization Framework for LLM-Based Multi-Agent Systems
 ```
 
-报告中的主要结论包括：UnityMAS-O 能把 QA/search、M-ASK iterative search、reflective code generation 等手写 workflow 转换成可训练的 MARL 问题；训练后在 QA F1、代码 all-passed rate 和代码验证轮数上均有明显改进，并支持参数共享与独立多模型组之间的可控对比。
+报告里比较系统地验证了三类 workflow：QA/search、M-ASK iterative search 和 reflective code generation。核心结论是，UnityMAS-O 可以把这些手写多智能体流程转成可训练的 MARL 问题；训练后，QA F1、代码 all-passed rate、代码验证轮数都有明显改善，同时也能比较共享参数和独立模型组之间的取舍。
 
-README 中展示的预览图均由技术报告 LaTeX 中的 `\includegraphics` 原始 PDF 文件导出；点击图片可打开对应原始 PDF。
+QA 任务上，训练后的 workflow 在不同模型规模和不同检索流程上都有稳定提升：
 
 <a href="docs/assets/unitymas-o/qa_training_gains_dumbbell.pdf">
   <img src="docs/assets/unitymas-o/qa_training_gains_dumbbell.png" alt="QA training gains" width="100%">
 </a>
 
+M-ASK 的共享参数版本收敛稍慢，但在 HotpotQA 上可以接近独立 4 模型组的效果：
+
 <a href="docs/assets/unitymas-o/mask_3b_shared_vs_independent.pdf">
   <img src="docs/assets/unitymas-o/mask_3b_shared_vs_independent.png" alt="HotpotQA M-ASK shared vs independent" width="100%">
 </a>
 
+代码任务上，plan-code-verify-reflect workflow 在训练后显著提高了 held-out all-passed rate：
+
 <a href="docs/assets/unitymas-o/code_train_test_curves.pdf">
   <img src="docs/assets/unitymas-o/code_train_test_curves.png" alt="Code training and held-out test curves" width="100%">
 </a>
+
+同一组实验还显示，训练后的代码 workflow 更早通过 verifier，平均验证轮数下降：
 
 <a href="docs/assets/unitymas-o/code_test_used_turns.pdf">
   <img src="docs/assets/unitymas-o/code_test_used_turns.png" alt="Average verification turns on held-out code tasks" width="100%">
