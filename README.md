@@ -97,14 +97,33 @@ examples/star_ppo/
 
 ## 环境准备
 
-推荐直接使用已有的 `verl` conda 环境，并在仓库根目录运行：
+推荐使用独立的 `verl` conda 环境。下面是当前实验环境使用过的一套安装流程：
 
 ```bash
 cd /path/to/UnityMAS-O
+
+# 创建 Python 3.10 环境。前面的 printf 用于自动回答 conda 的交互式确认。
+printf 'a\na\nyes\n' | conda create -n verl python=3.10
 conda activate verl
+
+# 安装 vLLM / SGLang / Megatron-Core 相关依赖。
+bash scripts/install_vllm_sglang_mcore_0.7.sh
+
+# 以 editable 方式安装本仓库，便于直接修改代码后运行。
+pip install --no-deps -e .
+
+# 版本固定。numpy 2.x、Transformers/TRL 的不同版本可能影响 Verl/vLLM 兼容性。
+pip install "numpy<2.0"
+pip uninstall transformers -y
+pip install transformers==4.57 --no-cache-dir
+pip uninstall -y trl
+pip install "trl==0.26.2"
+
+# 可选：远程调试用。
+pip install debugpy==1.8.0
 ```
 
-常用依赖来自 Verl、PyTorch、Ray、vLLM/SGLang、Transformers、Hydra/OmegaConf、datasets 等。不同集群镜像可能已经内置依赖；如果需要重新安装，可参考 Verl 原始安装文档和本仓库的 `requirements*.txt`。
+常用依赖来自 Verl、PyTorch、Ray、vLLM/SGLang、Transformers、Hydra/OmegaConf、datasets 等。不同集群镜像可能已经内置部分依赖；如果你在已有环境上安装，建议仍然检查上面几个关键版本 pin。
 
 启动前建议清理旧 Ray 进程和旧 Python worker：
 
