@@ -8,11 +8,11 @@ CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-verl}"
 PYTHON_VERSION="${PYTHON_VERSION:-3.10}"
 
-MINICONDA_INSTALLER="${MINICONDA_INSTALLER:-/mnt/tidal-alsh01/usr/chenyiqun/Miniconda3-latest-Linux-x86_64.sh}"
-INSTALL_STACK_SCRIPT="${INSTALL_STACK_SCRIPT:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl/scripts/install_vllm_sglang_mcore_0.7.sh}"
-VERL_REPO_PATH="${VERL_REPO_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl}"
+MINICONDA_INSTALLER="${MINICONDA_INSTALLER:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/Miniconda3-latest-Linux-x86_64.sh}"
+INSTALL_STACK_SCRIPT="${INSTALL_STACK_SCRIPT:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/research_project/adaptive_joint_optim/rl/verl/scripts/install_vllm_sglang_mcore_0.7.sh}"
+VERL_REPO_PATH="${VERL_REPO_PATH:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/research_project/adaptive_joint_optim/rl/verl}"
 
-PROXY_URL="${PROXY_URL:-10.140.24.177:3128}"
+PROXY_URL="${PROXY_URL:-}"
 
 echo "[setup] preparing conda env: ${CONDA_ENV_NAME}"
 if [[ ! -d "${CONDA_ROOT}" ]]; then
@@ -32,10 +32,12 @@ fi
 
 conda activate "${CONDA_ENV_NAME}"
 
-export http_proxy="${PROXY_URL}"
-export https_proxy="${PROXY_URL}"
-export HTTP_PROXY="${PROXY_URL}"
-export HTTPS_PROXY="${PROXY_URL}"
+if [[ -n "${PROXY_URL}" ]]; then
+  export http_proxy="${PROXY_URL}"
+  export https_proxy="${PROXY_URL}"
+  export HTTP_PROXY="${PROXY_URL}"
+  export HTTPS_PROXY="${PROXY_URL}"
+fi
 
 if [[ -f "${INSTALL_STACK_SCRIPT}" ]]; then
   bash "${INSTALL_STACK_SCRIPT}"
@@ -81,6 +83,8 @@ nvcc --version
 
 pip install "debugpy==1.8.0"
 
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+if [[ -n "${PROXY_URL}" ]]; then
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+fi
 
 echo "[setup] environment is ready: ${CONDA_ENV_NAME}"

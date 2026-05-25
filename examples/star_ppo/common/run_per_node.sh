@@ -16,8 +16,8 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 CONFIG_NAME="${CONFIG_NAME:?CONFIG_NAME is required}"
 PROJECT_NAME="${PROJECT_NAME:-}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
-WANDB_API_KEY_VALUE="${WANDB_API_KEY:-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}"
-WANDB_ENTITY_VALUE="${WANDB_ENTITY:-1046605207-renmin-university-of-china}"
+WANDB_API_KEY_VALUE="${WANDB_API_KEY:-}"
+WANDB_ENTITY_VALUE="${WANDB_ENTITY:-}"
 
 if [[ -z "${HEAD_IP}" ]]; then
   echo "[common/run_per_node] ERROR: HEAD_IP is required"
@@ -69,7 +69,7 @@ fi
 ray stop -f >/dev/null 2>&1 || true
 
 echo "[common/run_per_node] RANK=${RANK} WORLD_SIZE=${WORLD_SIZE} HEAD_IP=${HEAD_IP} CONFIG_NAME=${CONFIG_NAME}"
-echo "[common/run_per_node] wandb entity=${WANDB_ENTITY_VALUE:-<default>} project=${PROJECT_NAME:-<config>} experiment=${EXPERIMENT_NAME:-<config>}"
+echo "[common/run_per_node] wandb entity=${WANDB_ENTITY_VALUE:-<unset>} project=${PROJECT_NAME:-<config>} experiment=${EXPERIMENT_NAME:-<config>}"
 
 if [[ "${RANK}" == "0" ]]; then
   if [[ -n "${WANDB_API_KEY_VALUE}" ]] && command -v wandb >/dev/null 2>&1; then

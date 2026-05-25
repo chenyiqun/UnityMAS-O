@@ -19,25 +19,25 @@ trainer:
       n_gpus_per_node: ${oc.decode:${oc.env:SOLVER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
       strategy: fsdp2
-      model_path: ${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}
+      model_path: ${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
     - model_id: verifier_llm
       nnodes: ${oc.decode:${oc.env:VERIFIER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:VERIFIER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
       strategy: fsdp2
-      model_path: ${oc.env:VERIFIER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}
+      model_path: ${oc.env:VERIFIER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
     - model_id: refiner_llm
       nnodes: ${oc.decode:${oc.env:REFINER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:REFINER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
       strategy: fsdp2
-      model_path: ${oc.env:REFINER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}
+      model_path: ${oc.env:REFINER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
     - model_id: finalizer_llm
       nnodes: ${oc.decode:${oc.env:FINALIZER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:FINALIZER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
       strategy: fsdp2
-      model_path: ${oc.env:FINALIZER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}
+      model_path: ${oc.env:FINALIZER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
   routing:
     policy: epoch_dynamic
     refresh_every_epoch: true
@@ -46,8 +46,8 @@ actor_rollout_ref:
   hybrid_engine: false
   nccl_timeout: ${oc.decode:${oc.env:NCCL_TIMEOUT_SECONDS,1800}}
   model:
-    path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}}
-    tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}}}}
+    path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}}
+    tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}}}
     use_remove_padding: ${oc.decode:${oc.env:USE_REMOVE_PADDING,true}}
     enable_activation_offload: ${oc.decode:${oc.env:ACTOR_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
   actor:
@@ -120,8 +120,8 @@ algorithm:
     kl_coef: ${oc.decode:${oc.env:KL_COEF,0.0}}
 
 data:
-  dataset_root: ${oc.env:DATASET_ROOT,/mnt/tidal-alsh01/usr/chenyiqun/datasets/Math}
-  train_files: ${oc.env:TRAIN_JSONL,/mnt/tidal-alsh01/usr/chenyiqun/datasets/Math/DAPO-Math-17k/data/dapo-math-17k.question.jsonl}
+  dataset_root: ${oc.env:DATASET_ROOT,${oc.env:UNITYMAS_ROOT}/datasets/Math}
+  train_files: ${oc.env:TRAIN_JSONL,${oc.env:UNITYMAS_ROOT}/datasets/Math/DAPO-Math-17k/data/dapo-math-17k.question.jsonl}
   val_files: ${oc.env:VAL_JSONL,${data.dataset_root}/MATH-500/test.jsonl}
   prompt_key: prompt
   train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}

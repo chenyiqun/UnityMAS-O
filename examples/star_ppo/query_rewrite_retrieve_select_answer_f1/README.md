@@ -119,13 +119,13 @@ Use the same command on all pods (rank is auto-routed by `RANK`).
 Default behavior is **run only** (no environment reinstall):
 
 ```bash
-bash -lc 'cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl && bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh'
+bash -lc 'cd ${UNITYMAS_ROOT}/research_project/adaptive_joint_optim/rl/verl && bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh'
 ```
 
 If you need to install environment on fresh nodes, run once with:
 
 ```bash
-bash -lc 'cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl && DO_ENV_SETUP=true bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh'
+bash -lc 'cd ${UNITYMAS_ROOT}/research_project/adaptive_joint_optim/rl/verl && DO_ENV_SETUP=true bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_bootstrap.sh'
 ```
 
 The bootstrap script handles:
@@ -145,7 +145,7 @@ Files:
 Use this same command every time:
 
 ```bash
-bash -lc 'cd /mnt/tidal-alsh01/usr/chenyiqun/research_project/adaptive_joint_optim/rl/verl && bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh'
+bash -lc 'cd ${UNITYMAS_ROOT}/research_project/adaptive_joint_optim/rl/verl && bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh'
 ```
 
 Behavior:
@@ -164,21 +164,21 @@ You can choose one of these methods:
 1) Set head IP once (recommended):
 
 ```bash
-HEAD_IP=10.146.231.133 \
+HEAD_IP=<head-ip> \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh
 ```
 
 2) Use standard PyTorchJob env directly:
 
 ```bash
-MASTER_ADDR=10.146.231.133 MASTER_PORT=6379 \
+MASTER_ADDR=<head-ip> MASTER_PORT=6379 \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh
 ```
 
 3) Auto-sync IP through shared file (no manual worker IP setup):
 
 ```bash
-MASTER_ADDR_FILE=/mnt/tidal-alsh01/usr/chenyiqun/research_project/MARL_Framework/.star_master_addr \
+MASTER_ADDR_FILE=${UNITYMAS_ROOT}/research_project/MARL_Framework/.star_master_addr \
 bash examples/star_ppo/query_rewrite_retrieve_select_answer_f1/run_star_pytorchjob_oneclick.sh
 ```
 

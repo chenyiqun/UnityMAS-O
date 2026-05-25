@@ -6,10 +6,10 @@ CONFIG_NAME="${CONFIG_NAME:-star_math_solver_verifier_refiner_finalizer_trainer}
 PROJECT_NAME="${PROJECT_NAME:-star_math_multi_agent}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-solver_verifier_refiner_finalizer_qwen2_5_7b}"
 
-AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct}"
-TRAIN_JSONL="${TRAIN_JSONL:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/Math/DAPO-Math-17k/data/dapo-math-17k.question.jsonl}"
+AGENT_MODEL_PATH="${AGENT_MODEL_PATH:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}"
+TRAIN_JSONL="${TRAIN_JSONL:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/datasets/Math/DAPO-Math-17k/data/dapo-math-17k.question.jsonl}"
 VAL_FILES="${VAL_FILES:-${VAL_JSONL:-}}"
-VAL_FILES="${VAL_FILES:-/mnt/tidal-alsh01/usr/chenyiqun/datasets/Math/MATH-500/test.jsonl}"
+VAL_FILES="${VAL_FILES:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/datasets/Math/MATH-500/test.jsonl}"
 
 NNODES="${NNODES:-4}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
@@ -40,7 +40,7 @@ TEST_FREQ="${TEST_FREQ:-50}"
 SAVE_FREQ="${SAVE_FREQ:-300}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
-CKPTS_DIR="${CKPTS_DIR:-/mnt/tidal-alsh01/usr/chenyiqun/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}}"
+CKPTS_DIR="${CKPTS_DIR:-${UNITYMAS_ROOT:?Set UNITYMAS_ROOT}/ckpts/${PROJECT_NAME}/${EXPERIMENT_NAME}}"
 
 cmd=(
   python3 -m verl.experimental.star_ppo.main_ppo

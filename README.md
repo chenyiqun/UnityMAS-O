@@ -139,6 +139,30 @@ export WANDB_API_KEY="..."
 export WANDB_ENTITY="..."
 ```
 
+## 启动时需要设置的私有环境变量
+
+仓库里的配置和脚本不应写死个人路径、wandb key 或集群内网地址。运行实验前，请在每个节点的启动命令里显式设置下面这些变量：
+
+```bash
+# 个人/集群存储根目录。原实验环境中的个人存储根目录已统一替换为这个占位变量。
+export UNITYMAS_ROOT="/path/to/your/storage/root"
+
+# Ray head 节点地址。所有节点必须使用同一个 HEAD_IP，只有 RANK 不同。
+export HEAD_IP="<ray-head-ip>"
+
+# wandb。不开 wandb 可以不设置。
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
+
+# RAG/search workflow 需要的检索服务地址池。
+export RETRIEVAL_API_URLS_JSON='["http://retriever.example.com:8000/retrieve"]'
+
+# 可选：只有集群访问外网需要代理时才设置。
+export PROXY_URL="proxy.example.com:3128"
+```
+
+`UNITYMAS_ROOT` 用来拼出默认的数据、模型、仓库和安装脚本路径；`HEAD_IP` / `RETRIEVAL_API_URLS_JSON` / `PROXY_URL` 都与具体集群环境有关，换机器后通常需要重设。不要把真实值提交到仓库里。
+
 ## 多节点启动方式
 
 通用脚本是 `examples/star_ppo/common/run_per_node_background.sh`。需要在每个节点执行一次：
@@ -154,7 +178,7 @@ rank0 会启动 Ray head，等待所有节点加入后启动训练；非 rank0 �
 最小形态：
 
 ```bash
-RANK=0 HEAD_IP=10.0.0.1 WORLD_SIZE=4 \
+RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=4 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
@@ -162,7 +186,7 @@ bash examples/star_ppo/common/run_per_node_background.sh
 worker 节点：
 
 ```bash
-RANK=1 HEAD_IP=10.0.0.1 WORLD_SIZE=4 \
+RANK=1 HEAD_IP=<head-ip> WORLD_SIZE=4 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
@@ -216,7 +240,7 @@ conda activate verl
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 
-RANK=0 HEAD_IP=10.0.0.1 WORLD_SIZE=3 \
+RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=3 \
 CONFIG_NAME=star_code_iterative_plan_code_reflect_trainer \
 PROJECT_NAME="STAR-Code" \
 EXPERIMENT_NAME="deepcoder_marti_iterative_plan_code_reflect_3xQwen3_4B_no_think_sp4" \
@@ -313,7 +337,7 @@ conda activate verl
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 
-RANK=0 HEAD_IP=10.0.0.1 WORLD_SIZE=4 \
+RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=4 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 DATASET_NAME="hotpotqa" \
 STAR_RETRIEVER_RANDOM_ENDPOINT=true \
@@ -366,7 +390,7 @@ conda activate verl
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 
-RANK=0 HEAD_IP=10.0.0.1 WORLD_SIZE=1 \
+RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=1 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_shared_llm_trainer \
 DATASET_NAME="hotpotqa" \
 STAR_RETRIEVER_RANDOM_ENDPOINT=true \

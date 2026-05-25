@@ -70,7 +70,7 @@ critic:
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
 
 data:
-  dataset_root: ${oc.env:DATASET_ROOT,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/verl_format_data}
+  dataset_root: ${oc.env:DATASET_ROOT,${oc.env:UNITYMAS_ROOT}/datasets/data/verl_format_data}
   dataset_name: ${oc.env:DATASET_NAME,hotpotqa}
   train_files: ${oc.env:TRAIN_PARQUET,${data.dataset_root}/${data.dataset_name}/train_verl.parquet}
   val_files: ${oc.env:VAL_PARQUET,${data.dataset_root}/${data.dataset_name}/test_verl.parquet}
@@ -107,7 +107,7 @@ star:
     tools:
       retriever:
         type: query_api_pool
-        api_urls: ["http://10.158.147.72:8000/retrieve"]
+        api_urls: ["http://retriever.example.com:8000/retrieve"]
         timeout_seconds: 5
     graph:
       start_nodes: ["decompose"]

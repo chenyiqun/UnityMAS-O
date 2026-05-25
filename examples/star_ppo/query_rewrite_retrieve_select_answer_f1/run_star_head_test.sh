@@ -16,7 +16,7 @@ SELECT_MODEL_PATH="${SELECT_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
 ANSWER_MODEL_PATH="${ANSWER_MODEL_PATH:-${REWRITE_MODEL_PATH}}"
 REWRITE_MODEL_PATH="${REWRITE_MODEL_PATH:?REWRITE_MODEL_PATH (or AGENT_MODEL_PATH) is required}"
 CONFIG_NAME="${CONFIG_NAME:-star_query_rewrite_retrieve_select_answer_f1_trainer}"
-RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://10.158.147.72:8000/retrieve\"]}"
+RETRIEVAL_API_URLS_JSON="${RETRIEVAL_API_URLS_JSON:-[\"http://retriever.example.com:8000/retrieve\"]}"
 ROLLOUT_NAME="${ROLLOUT_NAME:-vllm}"
 
 ray stop -f >/dev/null 2>&1 || true

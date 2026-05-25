@@ -70,7 +70,7 @@ critic:
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
 
 data:
-  dataset_root: ${oc.env:DATASET_ROOT,/mnt/tidal-alsh01/usr/chenyiqun/datasets/data/code_jsonl}
+  dataset_root: ${oc.env:DATASET_ROOT,${oc.env:UNITYMAS_ROOT}/datasets/data/code_jsonl}
   dataset_name: ${oc.env:DATASET_NAME,codeforces}
   train_files: ${oc.env:TRAIN_JSONL,${data.dataset_root}/${data.dataset_name}/train.jsonl}
   val_files: ${oc.env:VAL_JSONL,${data.dataset_root}/${data.dataset_name}/test.jsonl}

@@ -8,7 +8,7 @@ This workflow trains four math agents with two shared LLM parameter groups:
 The default model path for both shared LLM groups is:
 
 ```bash
-/mnt/tidal-alsh01/usr/chenyiqun/base_models/Qwen/Qwen2.5-7B-Instruct
+${UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct
 ```
 
 By default the launch scripts use 4 total nodes and place each shared LLM group

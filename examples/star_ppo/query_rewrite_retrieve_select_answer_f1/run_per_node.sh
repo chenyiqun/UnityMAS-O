@@ -13,7 +13,7 @@
 #
 # 后台运行示例（带日志）：
 #   TS=$(date +%Y%m%d_%H%M%S)
-#   RANK=0 HEAD_IP=10.146.231.133 WORLD_SIZE=4 nohup stdbuf -oL -eL bash run_per_node.sh \
+#   RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=4 nohup stdbuf -oL -eL bash run_per_node.sh \
 #     > "logs/star_ppo/run_rank0_${TS}.log" 2>&1 < /dev/null &
 #   echo "PID=$! LOG=logs/star_ppo/run_rank0_${TS}.log"
 # =============================================================================
