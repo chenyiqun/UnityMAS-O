@@ -4,7 +4,9 @@ UnityMAS-O 是一个基于 [verl](https://github.com/verl-project/verl) 改造�
 
 这份 README 是本仓库的使用入口。原始 Verl 能力仍然保留；UnityMAS-O 的新增代码主要位于 `verl/experimental/star_ppo/` 和 `examples/star_ppo/`。
 
-![UnityMAS-O agent framework](docs/assets/unitymas-o/unity-framework.pdf)
+<a href="docs/assets/unitymas-o/unity-framework.pdf">
+  <img src="docs/assets/unitymas-o/unity-framework.png" alt="UnityMAS-O agent framework" width="100%">
+</a>
 
 ## 核心思想
 
@@ -27,7 +29,9 @@ math:       solver -> verifier -> refiner -> finalizer
 
 ## 系统架构
 
-![UnityMAS-O distributed training architecture](docs/assets/unitymas-o/system.pdf)
+<a href="docs/assets/unitymas-o/system.pdf">
+  <img src="docs/assets/unitymas-o/system.png" alt="UnityMAS-O distributed training architecture" width="100%">
+</a>
 
 运行时采用 Ray star topology：
 
@@ -152,7 +156,9 @@ logs/star_ppo/run_rank<rank>_<timestamp>.log
 
 ## 支持的主要 workflow
 
-![UnityMAS-O workflow templates](docs/assets/unitymas-o/workflow.pdf)
+<a href="docs/assets/unitymas-o/workflow.pdf">
+  <img src="docs/assets/unitymas-o/workflow.png" alt="UnityMAS-O workflow templates" width="100%">
+</a>
 
 | Workflow | 配置 | 逻辑 agent | 典型 reward |
 | --- | --- | --- | --- |
@@ -502,12 +508,20 @@ UnityMAS-O: A General RL Optimization Framework for LLM-Based Multi-Agent System
 
 报告中的主要结论包括：UnityMAS-O 能把 QA/search、M-ASK iterative search、reflective code generation 等手写 workflow 转换成可训练的 MARL 问题；训练后在 QA F1、代码 all-passed rate 和代码验证轮数上均有明显改进，并支持参数共享与独立多模型组之间的可控对比。
 
-README 中引用的框图和实验图均来自技术报告 LaTeX 中的 `\includegraphics` 原始 PDF 文件。
+README 中展示的预览图均由技术报告 LaTeX 中的 `\includegraphics` 原始 PDF 文件导出；点击图片可打开对应原始 PDF。
 
-![QA training gains](docs/assets/unitymas-o/qa_training_gains_dumbbell.pdf)
+<a href="docs/assets/unitymas-o/qa_training_gains_dumbbell.pdf">
+  <img src="docs/assets/unitymas-o/qa_training_gains_dumbbell.png" alt="QA training gains" width="100%">
+</a>
 
-![HotpotQA M-ASK shared vs independent](docs/assets/unitymas-o/mask_3b_shared_vs_independent.pdf)
+<a href="docs/assets/unitymas-o/mask_3b_shared_vs_independent.pdf">
+  <img src="docs/assets/unitymas-o/mask_3b_shared_vs_independent.png" alt="HotpotQA M-ASK shared vs independent" width="100%">
+</a>
 
-![Code training and held-out test curves](docs/assets/unitymas-o/code_train_test_curves.pdf)
+<a href="docs/assets/unitymas-o/code_train_test_curves.pdf">
+  <img src="docs/assets/unitymas-o/code_train_test_curves.png" alt="Code training and held-out test curves" width="100%">
+</a>
 
-![Average verification turns on held-out code tasks](docs/assets/unitymas-o/code_test_used_turns.pdf)
+<a href="docs/assets/unitymas-o/code_test_used_turns.pdf">
+  <img src="docs/assets/unitymas-o/code_test_used_turns.png" alt="Average verification turns on held-out code tasks" width="100%">
+</a>
