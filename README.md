@@ -132,11 +132,11 @@ ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 ```
 
-如果使用 wandb，请通过环境变量传入：
+如果使用 wandb，请通过环境变量传入，不要把 key 写进脚本或配置文件：
 
 ```bash
-export WANDB_API_KEY="..."
-export WANDB_ENTITY="..."
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
 ```
 
 ## 启动时需要设置的私有环境变量
@@ -175,10 +175,15 @@ export PROXY_URL="proxy.example.com:3128"
 
 rank0 会启动 Ray head，等待所有节点加入后启动训练；非 rank0 节点只启动 Ray worker 并 block。
 
-最小形态：
+最小形态。每个节点都需要先设置 `UNITYMAS_ROOT`；如果使用 wandb，也在这里设置 `WANDB_API_KEY` 和 `WANDB_ENTITY`：
 
 ```bash
-RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=4 \
+export UNITYMAS_ROOT="/path/to/your/storage/root"
+export HEAD_IP="<ray-head-ip>"
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
+
+RANK=0 HEAD_IP="${HEAD_IP}" WORLD_SIZE=4 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
@@ -186,7 +191,12 @@ bash examples/star_ppo/common/run_per_node_background.sh
 worker 节点：
 
 ```bash
-RANK=1 HEAD_IP=<head-ip> WORLD_SIZE=4 \
+export UNITYMAS_ROOT="/path/to/your/storage/root"
+export HEAD_IP="<ray-head-ip>"
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
+
+RANK=1 HEAD_IP="${HEAD_IP}" WORLD_SIZE=4 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
@@ -240,17 +250,22 @@ conda activate verl
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 
-RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=3 \
+export UNITYMAS_ROOT="/path/to/your/storage/root"
+export HEAD_IP="<ray-head-ip>"
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
+
+RANK=0 HEAD_IP="${HEAD_IP}" WORLD_SIZE=3 \
 CONFIG_NAME=star_code_iterative_plan_code_reflect_trainer \
 PROJECT_NAME="STAR-Code" \
 EXPERIMENT_NAME="deepcoder_marti_iterative_plan_code_reflect_3xQwen3_4B_no_think_sp4" \
-TRAIN_JSONL="/path/to/train.jsonl" \
-VAL_JSONL="/path/to/test.jsonl" \
-AGENT_MODEL_PATH="/path/to/Qwen3-4B" \
-PLANNER_MODEL_PATH="/path/to/Qwen3-4B" \
-CODER_MODEL_PATH="/path/to/Qwen3-4B" \
-REFLECTION_MODEL_PATH="/path/to/Qwen3-4B" \
-ACTOR_MODEL_PATH="/path/to/Qwen3-4B" \
+TRAIN_JSONL="${UNITYMAS_ROOT}/datasets/code_datasets/DeepCoder-Preview-Dataset/processed_marti_jsonl/train_shuffled.jsonl" \
+VAL_JSONL="${UNITYMAS_ROOT}/datasets/code_datasets/DeepCoder-Preview-Dataset/processed_marti_jsonl/test_shuffled.jsonl" \
+AGENT_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen3-4B" \
+PLANNER_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen3-4B" \
+CODER_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen3-4B" \
+REFLECTION_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen3-4B" \
+ACTOR_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen3-4B" \
 QWEN_ENABLE_THINKING=false \
 GEN_BATCH_SIZE=64 \
 VAL_BATCH_SIZE=64 \
@@ -337,17 +352,22 @@ conda activate verl
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 
-RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=4 \
+export UNITYMAS_ROOT="/path/to/your/storage/root"
+export HEAD_IP="<ray-head-ip>"
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
+
+RANK=0 HEAD_IP="${HEAD_IP}" WORLD_SIZE=4 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 DATASET_NAME="hotpotqa" \
 STAR_RETRIEVER_RANDOM_ENDPOINT=true \
-RETRIEVAL_API_URLS_JSON='["http://host0:8000/retrieve","http://host0:8001/retrieve"]' \
+RETRIEVAL_API_URLS_JSON='["http://retriever-0.example.com:8000/retrieve","http://retriever-1.example.com:8000/retrieve"]' \
 PROJECT_NAME="M-ASK" \
 EXPERIMENT_NAME="hotpotqa_M-ASK_f1_4x7B" \
-REASONING_MODEL_PATH="/path/to/Qwen2.5-7B-Instruct" \
-SEARCH_MODEL_PATH="/path/to/Qwen2.5-7B-Instruct" \
-SUMMARY_MODEL_PATH="/path/to/Qwen2.5-7B-Instruct" \
-UPDATE_MODEL_PATH="/path/to/Qwen2.5-7B-Instruct" \
+REASONING_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct" \
+SEARCH_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct" \
+SUMMARY_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct" \
+UPDATE_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct" \
 GEN_BATCH_SIZE=128 \
 STAR_MAX_INFLIGHT_QUERIES=128 \
 STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL=32 \
@@ -390,14 +410,19 @@ conda activate verl
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 
-RANK=0 HEAD_IP=<head-ip> WORLD_SIZE=1 \
+export UNITYMAS_ROOT="/path/to/your/storage/root"
+export HEAD_IP="<ray-head-ip>"
+export WANDB_API_KEY="<your-wandb-api-key>"
+export WANDB_ENTITY="<your-wandb-entity>"
+
+RANK=0 HEAD_IP="${HEAD_IP}" WORLD_SIZE=1 \
 CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_shared_llm_trainer \
 DATASET_NAME="hotpotqa" \
 STAR_RETRIEVER_RANDOM_ENDPOINT=true \
-RETRIEVAL_API_URLS_JSON='["http://host0:8000/retrieve","http://host0:8001/retrieve"]' \
+RETRIEVAL_API_URLS_JSON='["http://retriever-0.example.com:8000/retrieve","http://retriever-1.example.com:8000/retrieve"]' \
 PROJECT_NAME="M-ASK" \
 EXPERIMENT_NAME="hotpotqa_M-ASK_f1_3B_shared" \
-SHARED_MODEL_PATH="/path/to/Qwen2.5-3B-Instruct" \
+SHARED_MODEL_PATH="${UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-3B-Instruct" \
 GEN_BATCH_SIZE=128 \
 STAR_MAX_INFLIGHT_QUERIES=128 \
 STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL=32 \
