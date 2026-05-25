@@ -1,16 +1,18 @@
 # UnityMAS-O
 
-UnityMAS-O 是一个基于 [verl](https://github.com/verl-project/verl) 改造的 LLM 多智能体强化学习优化框架。它把传统单策略 RL post-training 扩展到可配置的 multi-agent workflow：用户定义逻辑 agent、workflow 执行图、agent 到物理 LLM 的映射关系，以及面向节点、轮次或整条轨迹的奖励分配规则；框架负责异步执行 workflow、收集结构化轨迹、把奖励归因到对应 agent，再用 PPO 风格的训练流程更新每个物理 LLM。
+Chinese version: [README.zh.md](README.zh.md)
 
-仓库仍保留上游 Verl 的训练能力；UnityMAS-O 相关实现主要放在 `verl/experimental/star_ppo/` 和 `examples/star_ppo/`。
+UnityMAS-O is an LLM multi-agent reinforcement learning optimization framework adapted from [verl](https://github.com/verl-project/verl). It extends conventional single-policy RL post-training into configurable multi-agent workflows: users define logical agents, workflow execution graphs, mappings from agents to physical LLMs, and reward allocation rules over nodes, turns, or full trajectories. The framework executes workflows asynchronously, collects structured traces, assigns rewards back to the corresponding agents, and updates each physical LLM through a PPO-style training pipeline.
+
+The repository still keeps the upstream Verl training stack. UnityMAS-O specific code mainly lives in `verl/experimental/star_ppo/` and `examples/star_ppo/`.
 
 <a href="docs/assets/unitymas-o/unity-framework.pdf">
   <img src="docs/assets/unitymas-o/unity-framework.png" alt="UnityMAS-O agent framework" width="100%">
 </a>
 
-## 核心思想
+## Core Idea
 
-UnityMAS-O 的目标不是只训练一个最终回答模型，而是优化整个 LLM-based multi-agent system。一个任务样本会被展开成多步结构化轨迹，例如：
+UnityMAS-O does not train only a final answer model. It optimizes the whole LLM-based multi-agent system. A task instance is expanded into a multi-step structured trajectory, for example:
 
 ```text
 QA/search:  plan -> search -> retrieve(tool) -> summarize -> update -> answer
@@ -18,40 +20,40 @@ code:       planner -> coder -> verifier(tool) -> reflector -> planner -> ...
 math:       solver -> verifier -> refiner -> finalizer
 ```
 
-框架把多智能体训练拆成四个显式对象：
+The framework makes four objects explicit:
 
-- **Logical agents**：workflow 中的角色，例如 planner、searcher、summarizer、coder、reflector、answerer。
-- **Agent-LLM mapping**：逻辑 agent 到物理模型的映射。可以全共享、全分离，也可以部分共享。
-- **Workflow trace**：每个样本执行时产生的结构化轨迹，包括 agent 输出、工具结果、状态更新、控制流和调试信息。
-- **Reward allocator**：把最终指标、局部格式奖励、轮次增益或工具反馈分配回具体 agent invocation。
+- **Logical agents**: roles in a workflow, such as planner, searcher, summarizer, coder, reflector, and answerer.
+- **Agent-LLM mapping**: the mapping from logical agents to physical models. Agents can fully share one model, use fully separate models, or use partially shared model groups.
+- **Workflow trace**: the structured execution record for each sample, including agent outputs, tool results, state updates, control flow, and debug information.
+- **Reward allocator**: the component that assigns final metrics, local format rewards, turn-level gains, or tool feedback back to concrete agent invocations.
 
-这种设计允许同一个 workflow 在不同参数共享方案下训练。例如 M-ASK 可以用 4 个独立模型组训练，也可以让所有角色共享一个 `shared_agent_llm`；代码 workflow 可以让 planner、coder、reflector 使用三个独立模型组，也可以切换到 shared LLM 配置。
+This design lets the same workflow train under different parameter-sharing schemes. For example, M-ASK can train with four independent model groups, or map all roles to one `shared_agent_llm`; the code workflow can train planner, coder, and reflector with three separate model groups, or switch to a shared LLM configuration.
 
-## 系统架构
+## System Architecture
 
 <a href="docs/assets/unitymas-o/system.pdf">
   <img src="docs/assets/unitymas-o/system.png" alt="UnityMAS-O distributed training architecture" width="100%">
 </a>
 
-运行时采用 Ray star topology：
+Runtime execution follows a Ray star topology:
 
-- 中央 controller 负责 workflow 调度、工具调用、状态转移、reward assembly 和训练协调。
-- 每个物理 LLM 对应一个 model-local worker group，负责 rollout、fat tensor 缓存、ready batch 构造、advantage/logprob/value 计算和 PPO update。
-- controller 只传递轻量的 action/output/metadata；大 tensor 保留在生成它的 worker group 内，降低跨节点通信成本。
-- `phi: logical agent -> model_id` 决定奖励和 rollout 数据最终进入哪个物理模型的训练 buffer。
+- A central controller schedules workflows, calls tools, manages state transitions, assembles rewards, and coordinates training.
+- Each physical LLM has a model-local worker group for rollout, fat tensor caching, ready-batch construction, advantage/logprob/value computation, and PPO updates.
+- The controller sends only lightweight action/output/metadata records. Large tensors stay inside the worker group that produced them, reducing cross-node communication.
+- `phi: logical agent -> model_id` determines which physical model training buffer receives each reward and rollout record.
 
-## 代码结构
+## Code Layout
 
 ```text
 verl/experimental/star_ppo/
-  main_ppo.py                         # UnityMAS-O / STAR PPO 入口
-  ray_trainer.py                      # 多 engine Ray trainer、workflow 执行、reward commit、PPO update
-  star_fsdp_workers.py                # detach actor / async rollout / critic / reward worker
+  main_ppo.py                         # UnityMAS-O / STAR PPO entry point
+  ray_trainer.py                      # multi-engine Ray trainer, workflow execution, reward commit, PPO update
+  star_fsdp_workers.py                # detached actor / async rollout / critic / reward worker
   trajectory_buffer.py                # model-local trajectory buffer
-  types.py                            # engine spec 等基础类型
+  types.py                            # basic types such as engine specs
 
-  config/                             # Hydra 配置
-    star_ppo_trainer.yaml             # 通用 STAR PPO 基础配置
+  config/                             # Hydra configs
+    star_ppo_trainer.yaml             # shared STAR PPO base config
     star_code_iterative_plan_code_reflect_trainer.yaml
     star_code_iterative_plan_code_reflect_shared_llm_trainer.yaml
     star_iterative_plan_search_summary_update_answer_f1_trainer.yaml
@@ -59,23 +61,23 @@ verl/experimental/star_ppo/
     star_math_solver_verifier_refiner_finalizer_*.yaml
     star_query_decompose_retrieve*_trainer.yaml
 
-  workflows/                          # workflow runner 插件
-    base.py                           # WorkflowRunner 接口
+  workflows/                          # workflow runner plugins
+    base.py                           # WorkflowRunner interface
     schema.py                         # WorkflowTrace / WorkflowExecutionRecord / RewardAssignment
     mask_iterative_workflow.py        # M-ASK iterative search workflow
     code_iterative_workflow.py        # plan-code-reflect code workflow
     math_multi_agent_workflow.py      # math multi-agent workflow
-    graph_workflow.py                 # graph-style workflow 支持
+    graph_workflow.py                 # graph-style workflow support
 
-  reward_allocators/                  # reward 分配插件
+  reward_allocators/                  # reward allocation plugins
     base.py
     mask_turn_level.py
     code_turn_level.py
     math_final_answer.py
 
-  tools/                              # 工具接口
+  tools/                              # tool interfaces
     retriever.py                      # retrieval API pool
-    code_verifier.py                  # 本地代码执行/verifier
+    code_verifier.py                  # local code execution/verifier
     math_answer.py
     prompt_builders.py
 
@@ -85,9 +87,9 @@ verl/experimental/star_ppo/
 
 examples/star_ppo/
   common/
-    run_per_node.sh                   # 每个节点启动 Ray head/worker，并在 rank0 启动训练
-    run_per_node_background.sh        # 后台启动，日志写入 logs/star_ppo/
-    run_ip_list.sh                    # 按 IP 列表启动
+    run_per_node.sh                   # start Ray head/worker on each node, launch training on rank 0
+    run_per_node_background.sh        # background launcher, logs go to logs/star_ppo/
+    run_ip_list.sh                    # launch by IP list
     launch_ip_list_background.sh
     launch_kubectl_exec_background.sh
   code_iterative_workflow/README.md
@@ -95,87 +97,87 @@ examples/star_ppo/
   math_multi_agent/README.md
 ```
 
-## 环境准备
+## Environment Setup
 
-建议从一个干净的 `verl` conda 环境开始。我们实际跑实验时使用的安装流程如下：
+Start from a clean `verl` conda environment. The experiments were run with the following setup:
 
 ```bash
 cd /path/to/UnityMAS-O
 
-# 创建 Python 3.10 环境。前面的 printf 用于自动回答 conda 的交互式确认。
+# Create a Python 3.10 environment. The printf prefix answers conda's interactive prompts.
 printf 'a\na\nyes\n' | conda create -n verl python=3.10
 conda activate verl
 
-# 安装 vLLM / SGLang / Megatron-Core 相关依赖。
+# Install vLLM / SGLang / Megatron-Core related dependencies.
 bash scripts/install_vllm_sglang_mcore_0.7.sh
 
-# 以 editable 方式安装本仓库，便于直接修改代码后运行。
+# Install this repository in editable mode, so code changes take effect directly.
 pip install --no-deps -e .
 
-# 版本固定。numpy 2.x、Transformers/TRL 的不同版本可能影响 Verl/vLLM 兼容性。
+# Pin versions. numpy 2.x and different Transformers/TRL versions may break Verl/vLLM compatibility.
 pip install "numpy<2.0"
 pip uninstall transformers -y
 pip install transformers==4.57 --no-cache-dir
 pip uninstall -y trl
 pip install "trl==0.26.2"
 
-# 可选：远程调试用。
+# Optional: remote debugging.
 pip install debugpy==1.8.0
 ```
 
-这套环境主要依赖 Verl、PyTorch、Ray、vLLM/SGLang、Transformers、Hydra/OmegaConf 和 datasets。集群镜像里如果已经装过一部分依赖，也建议核对 `numpy`、`transformers`、`trl` 这几个版本，很多兼容性问题都出在这里。
+The environment mainly depends on Verl, PyTorch, Ray, vLLM/SGLang, Transformers, Hydra/OmegaConf, and datasets. If the cluster image already contains part of the stack, still check the versions of `numpy`, `transformers`, and `trl`; many compatibility issues come from these packages.
 
-启动前建议清理旧 Ray 进程和旧 Python worker：
+Before launching a run, it is usually helpful to clean old Ray processes and Python workers:
 
 ```bash
 ray stop --force >/dev/null 2>&1 || true
 pkill -9 -f "/miniconda3/envs/verl/bin/python3.10" || true
 ```
 
-如果使用 wandb，请通过环境变量传入，不要把 key 写进脚本或配置文件：
+If you use wandb, pass credentials through environment variables. Do not write keys into scripts or config files:
 
 ```bash
 export WANDB_API_KEY="<your-wandb-api-key>"
 export WANDB_ENTITY="<your-wandb-entity>"
 ```
 
-## 启动时需要设置的私有环境变量
+## Private Runtime Variables
 
-仓库里的配置和脚本不应写死个人路径、wandb key 或集群内网地址。运行实验前，请在每个节点的启动命令里显式设置下面这些变量：
+Configs and scripts should not hard-code personal paths, wandb keys, or internal cluster addresses. Before running experiments, set the following variables in the launch environment on every node:
 
 ```bash
-# 个人/集群存储根目录。原实验环境中的个人存储根目录已统一替换为这个占位变量。
+# Personal or cluster storage root. The original private storage root has been replaced by this placeholder.
 export UNITYMAS_ROOT="/path/to/your/storage/root"
 
-# Ray head 节点地址。所有节点必须使用同一个 HEAD_IP，只有 RANK 不同。
+# Ray head node address. All nodes must use the same HEAD_IP; only RANK changes.
 export HEAD_IP="<ray-head-ip>"
 
-# wandb。不开 wandb 可以不设置。
+# wandb. Leave unset if you do not use wandb.
 export WANDB_API_KEY="<your-wandb-api-key>"
 export WANDB_ENTITY="<your-wandb-entity>"
 
-# RAG/search workflow 需要的检索服务地址池。
+# Retriever endpoint pool required by RAG/search workflows.
 export RETRIEVAL_API_URLS_JSON='["http://retriever.example.com:8000/retrieve"]'
 
-# 可选：只有集群访问外网需要代理时才设置。
+# Optional: set only if your cluster needs a proxy for external network access.
 export PROXY_URL="proxy.example.com:3128"
 ```
 
-`UNITYMAS_ROOT` 用来拼出默认的数据、模型、仓库和安装脚本路径；`HEAD_IP` / `RETRIEVAL_API_URLS_JSON` / `PROXY_URL` 都与具体集群环境有关，换机器后通常需要重设。不要把真实值提交到仓库里。
+`UNITYMAS_ROOT` is used to build default paths for data, models, repositories, and installation scripts. `HEAD_IP`, `RETRIEVAL_API_URLS_JSON`, and `PROXY_URL` are cluster-specific and usually need to be reset when moving to a new environment. Do not commit real values to the repository.
 
-## 多节点启动方式
+## Multi-Node Launch
 
-通用脚本是 `examples/star_ppo/common/run_per_node_background.sh`。需要在每个节点执行一次：
+The common launcher is `examples/star_ppo/common/run_per_node_background.sh`. Run it once on each node:
 
-- `HEAD_IP`：rank0 节点 IP，所有节点保持一致。
-- `WORLD_SIZE`：总节点数。
-- `RANK`：当前节点 rank。head 节点为 `0`，其他节点依次为 `1..WORLD_SIZE-1`。
-- `CONFIG_NAME`：选择要运行的 workflow 配置。
-- 其他环境变量用于指定模型、数据、batch size、rollout、timeout、debug 等。
+- `HEAD_IP`: IP address of the rank 0 node. It must be the same on all nodes.
+- `WORLD_SIZE`: total number of nodes.
+- `RANK`: current node rank. The head node is `0`; other nodes are `1..WORLD_SIZE-1`.
+- `CONFIG_NAME`: workflow config name.
+- Other environment variables specify models, data, batch sizes, rollout settings, timeouts, and debug switches.
 
-rank0 会启动 Ray head，等待所有节点加入后启动训练；非 rank0 节点只启动 Ray worker 并 block。
+Rank 0 starts the Ray head, waits for all nodes to join, and then launches training. Non-zero ranks start Ray workers and block.
 
-最小形态。每个节点都需要先设置 `UNITYMAS_ROOT`；如果使用 wandb，也在这里设置 `WANDB_API_KEY` 和 `WANDB_ENTITY`：
+Minimal head-node command. Every node should set `UNITYMAS_ROOT` first; if you use wandb, set `WANDB_API_KEY` and `WANDB_ENTITY` here as well:
 
 ```bash
 export UNITYMAS_ROOT="/path/to/your/storage/root"
@@ -188,7 +190,7 @@ CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
 
-worker 节点：
+Worker node:
 
 ```bash
 export UNITYMAS_ROOT="/path/to/your/storage/root"
@@ -201,36 +203,36 @@ CONFIG_NAME=star_iterative_plan_search_summary_update_answer_f1_trainer \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
 
-日志默认写到：
+Logs are written to:
 
 ```text
 logs/star_ppo/run_rank<rank>_<timestamp>.log
 ```
 
-## 支持的主要 workflow
+## Main Workflows
 
 <a href="docs/assets/unitymas-o/workflow.pdf">
   <img src="docs/assets/unitymas-o/workflow.png" alt="UnityMAS-O workflow templates" width="100%">
 </a>
 
-| Workflow | 配置 | 逻辑 agent | 典型 reward |
+| Workflow | Config | Logical agents | Typical reward |
 | --- | --- | --- | --- |
-| Reflective Code | `star_code_iterative_plan_code_reflect_trainer` | planner, coder, reflector；verifier 是工具 | 第 0 轮使用 verifier pass score，后续轮次使用 pass-score delta；叠加格式奖励 |
-| Reflective Code shared | `star_code_iterative_plan_code_reflect_shared_llm_trainer` | planner/coder/reflector 共享一个物理 LLM | 同上 |
-| M-ASK iterative search | `star_iterative_plan_search_summary_update_answer_f1_trainer` | planning/answer 共享 reasoning LLM，search/summary/update 独立 | planning/answer 使用 absolute F1；search/summary/update 使用 F1 delta |
-| M-ASK shared | `star_iterative_plan_search_summary_update_answer_f1_shared_llm_trainer` | 所有 search workflow 角色共享一个物理 LLM | 同上 |
+| Reflective Code | `star_code_iterative_plan_code_reflect_trainer` | planner, coder, reflector; verifier is a tool | verifier pass score at turn 0, pass-score delta for later turns, plus format reward |
+| Reflective Code shared | `star_code_iterative_plan_code_reflect_shared_llm_trainer` | planner/coder/reflector share one physical LLM | same as above |
+| M-ASK iterative search | `star_iterative_plan_search_summary_update_answer_f1_trainer` | planning/answer share the reasoning LLM; search/summary/update are separate | planning/answer use absolute F1; search/summary/update use F1 delta |
+| M-ASK shared | `star_iterative_plan_search_summary_update_answer_f1_shared_llm_trainer` | all search workflow roles share one physical LLM | same as above |
 | Math multi-agent | `star_math_solver_verifier_refiner_finalizer_trainer` | solver, verifier, refiner, finalizer | final-answer accuracy + format reward |
-| Query decomposition RAG | `star_query_decompose_retrieve_answer_f1_trainer` 等 | query decomposer, answerer, evidence/summarizer 可选 | final-answer F1 + node-level format reward |
+| Query decomposition RAG | `star_query_decompose_retrieve_answer_f1_trainer` and related configs | query decomposer, answerer, optional evidence/summarizer | final-answer F1 + node-level format reward |
 
-## 示例 1：代码生成 reflective workflow
+## Example 1: Reflective Code Generation
 
-这个配置训练三个非共享 LLM agent：
+This config trains three non-shared LLM agents:
 
 - `planner_agent` -> `planner_llm`
 - `coder_agent` -> `coder_llm`
 - `reflection_agent` -> `reflection_llm`
 
-数据可以是 JSON、JSONL 或 Parquet。常见字段：
+The dataset can be JSON, JSONL, or Parquet. Common fields are:
 
 ```json
 {
@@ -242,7 +244,7 @@ logs/star_ppo/run_rank<rank>_<timestamp>.log
 }
 ```
 
-三节点示例：在三个节点上分别把 `RANK` 改成 `0`、`1`、`2`，其余参数保持一致。
+Three-node example: run the same command on the three nodes, changing only `RANK` to `0`, `1`, and `2`.
 
 ```bash
 cd /path/to/UnityMAS-O
@@ -318,33 +320,33 @@ bash examples/star_ppo/common/run_per_node_background.sh \
   critic.model.fsdp_config.ulysses_sequence_parallel_size=4
 ```
 
-关键开关：
+Important switches:
 
-- `CODE_MAX_TURNS`：最多 plan-code-verify-reflect 轮数。
-- `CODE_STOP_ON_ALL_PASSED`：所有 verifier tests 通过后提前停止。
-- `CODE_VERIFY_TIMEOUT_SECONDS`：单次代码执行超时。
-- `CODE_VERIFIER_FAIL_OPEN=false`：verifier 异常时是否放行。训练代码任务通常建议保持 `false`。
-- `STAR_PER_INFER_PROMPT_MAX_TOKENS`：单次 agent prompt 的截断上限。
+- `CODE_MAX_TURNS`: maximum number of plan-code-verify-reflect turns.
+- `CODE_STOP_ON_ALL_PASSED`: stop early once all verifier tests pass.
+- `CODE_VERIFY_TIMEOUT_SECONDS`: timeout for one code execution.
+- `CODE_VERIFIER_FAIL_OPEN=false`: whether verifier failures should be treated as pass-through. For code training, `false` is usually preferred.
+- `STAR_PER_INFER_PROMPT_MAX_TOKENS`: truncation limit for each agent prompt.
 
-## 示例 2：M-ASK iterative search，4 个模型组
+## Example 2: M-ASK Iterative Search, Four Model Groups
 
-这个配置包含 5 个逻辑 agent、4 个物理 LLM：
+This config contains five logical agents and four physical LLMs:
 
-- `planning_agent` 和 `answer_agent` 共享 `reasoning_agent_llm`
-- `search_agent` 使用独立 LLM
-- `summary_agent` 使用独立 LLM
-- `update_agent` 使用独立 LLM
+- `planning_agent` and `answer_agent` share `reasoning_agent_llm`
+- `search_agent` uses a separate LLM
+- `summary_agent` uses a separate LLM
+- `update_agent` uses a separate LLM
 
-数据默认来自：
+By default, data is read from:
 
 ```text
 DATASET_ROOT/<DATASET_NAME>/train_verl.parquet
 DATASET_ROOT/<DATASET_NAME>/test_verl.parquet
 ```
 
-可通过 `TRAIN_PARQUET` 和 `VAL_PARQUET` 覆盖。
+You can override this with `TRAIN_PARQUET` and `VAL_PARQUET`.
 
-四节点示例：在四个节点上分别把 `RANK` 改成 `0`、`1`、`2`、`3`，其余参数保持一致。
+Four-node example: run the same command on four nodes, changing only `RANK` to `0`, `1`, `2`, and `3`.
 
 ```bash
 cd /path/to/UnityMAS-O
@@ -393,16 +395,16 @@ STAR_WORKFLOW_DEBUG_MAX_CHARS=160 \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
 
-M-ASK reward 分配：
+M-ASK reward allocation:
 
-- planning agent：初始答案 `a0` 的 absolute F1。
-- answer agent：每轮临时答案 `at` 的 absolute F1。
-- search/summary/update：共享 `F1(at) - F1(at-1)` 的 marginal improvement。
-- search 输出 `<end>` 时，该 search step 的 task reward 为 0。
+- planning agent: absolute F1 of the initial answer `a0`.
+- answer agent: absolute F1 of each temporary answer `at`.
+- search/summary/update: shared marginal improvement `F1(at) - F1(at-1)`.
+- when search outputs `<end>`, the task reward for that search step is 0.
 
-## 示例 3：M-ASK shared LLM，单模型组
+## Example 3: M-ASK Shared LLM, One Model Group
 
-该配置把 planning/search/summary/update/answer 都映射到一个 `shared_agent_llm`，适合研究参数共享、节省资源或做小模型快速实验。
+This config maps planning/search/summary/update/answer to a single `shared_agent_llm`. It is useful for parameter sharing studies, resource-saving runs, and quick small-model experiments.
 
 ```bash
 cd /path/to/UnityMAS-O
@@ -448,72 +450,72 @@ STAR_WORKFLOW_DEBUG_MAX_CHARS=160 \
 bash examples/star_ppo/common/run_per_node_background.sh
 ```
 
-## 常用环境变量
+## Common Environment Variables
 
-| 变量 | 作用 |
+| Variable | Purpose |
 | --- | --- |
-| `CONFIG_NAME` | Hydra 配置名，不带 `.yaml` |
-| `PROJECT_NAME`, `EXPERIMENT_NAME` | wandb/console tracking 名称 |
-| `RANK`, `HEAD_IP`, `WORLD_SIZE` | 多节点 Ray 启动参数 |
-| `GPUS_PER_NODE`, `CPUS_PER_NODE` | 每节点资源声明 |
-| `AGENT_MODEL_PATH` | 多数配置的通用模型路径 fallback |
-| `ACTOR_MODEL_PATH`, `ACTOR_TOKENIZER_PATH` | Verl actor/ref/critic 的基础模型与 tokenizer |
-| `PLANNER_MODEL_PATH`, `CODER_MODEL_PATH`, `REFLECTION_MODEL_PATH` | code workflow 的三模型路径 |
-| `REASONING_MODEL_PATH`, `SEARCH_MODEL_PATH`, `SUMMARY_MODEL_PATH`, `UPDATE_MODEL_PATH` | M-ASK 非共享配置的模型路径 |
-| `SHARED_MODEL_PATH` | shared LLM 配置的模型路径 |
-| `TRAIN_JSONL`, `VAL_JSONL` | code/math JSONL 数据路径 |
-| `TRAIN_PARQUET`, `VAL_PARQUET`, `DATASET_ROOT`, `DATASET_NAME` | QA/search Verl-format parquet 数据路径 |
-| `GEN_BATCH_SIZE`, `VAL_BATCH_SIZE` | rollout generation batch 和 validation batch |
+| `CONFIG_NAME` | Hydra config name, without `.yaml` |
+| `PROJECT_NAME`, `EXPERIMENT_NAME` | wandb/console tracking names |
+| `RANK`, `HEAD_IP`, `WORLD_SIZE` | multi-node Ray launch parameters |
+| `GPUS_PER_NODE`, `CPUS_PER_NODE` | per-node resource declaration |
+| `AGENT_MODEL_PATH` | common fallback model path for most configs |
+| `ACTOR_MODEL_PATH`, `ACTOR_TOKENIZER_PATH` | base model and tokenizer for Verl actor/ref/critic |
+| `PLANNER_MODEL_PATH`, `CODER_MODEL_PATH`, `REFLECTION_MODEL_PATH` | three model paths for the code workflow |
+| `REASONING_MODEL_PATH`, `SEARCH_MODEL_PATH`, `SUMMARY_MODEL_PATH`, `UPDATE_MODEL_PATH` | model paths for non-shared M-ASK configs |
+| `SHARED_MODEL_PATH` | model path for shared LLM configs |
+| `TRAIN_JSONL`, `VAL_JSONL` | code/math JSONL data paths |
+| `TRAIN_PARQUET`, `VAL_PARQUET`, `DATASET_ROOT`, `DATASET_NAME` | QA/search Verl-format parquet data paths |
+| `GEN_BATCH_SIZE`, `VAL_BATCH_SIZE` | rollout generation batch size and validation batch size |
 | `ACTOR_PPO_MINI_BATCH_SIZE` | PPO mini-batch size |
 | `ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU` | actor micro-batch size |
 | `ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE` | vLLM tensor parallel size |
-| `ROLLOUT_GPU_MEMORY_UTILIZATION` | vLLM 显存比例 |
-| `ROLLOUT_PROMPT_LENGTH`, `ROLLOUT_RESPONSE_LENGTH`, `ROLLOUT_MAX_MODEL_LEN` | rollout 长度控制 |
-| `STAR_MAX_INFLIGHT_QUERIES` | controller 并发执行的 query 数 |
-| `STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL` | 每个 model_id 的并发 rollout 数 |
-| `STAR_LLM_MICROBATCH_MAX_SIZE`, `STAR_LLM_MICROBATCH_MAX_WAIT_MS` | LLM 请求 microbatch 合并 |
-| `STAR_QUERY_TIMEOUT_SECONDS` | 单 query workflow 超时 |
-| `STAR_WORKFLOW_BATCH_TIMEOUT_SECONDS` | 一个 workflow batch 超时 |
-| `STAR_RAY_GET_TIMEOUT_SECONDS`, `STAR_WORKER_CALL_TIMEOUT_SECONDS` | Ray/worker 调用超时 |
-| `STAR_LLM_TIMEOUT_SECONDS`, `STAR_TOOL_TIMEOUT_SECONDS` | LLM/tool 调用超时 |
-| `STAR_WORKFLOW_DEBUG`, `STAR_VAL_DEBUG` | 打印 workflow trace 调试信息 |
+| `ROLLOUT_GPU_MEMORY_UTILIZATION` | vLLM GPU memory fraction |
+| `ROLLOUT_PROMPT_LENGTH`, `ROLLOUT_RESPONSE_LENGTH`, `ROLLOUT_MAX_MODEL_LEN` | rollout length controls |
+| `STAR_MAX_INFLIGHT_QUERIES` | number of concurrent queries executed by the controller |
+| `STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL` | concurrent rollouts per `model_id` |
+| `STAR_LLM_MICROBATCH_MAX_SIZE`, `STAR_LLM_MICROBATCH_MAX_WAIT_MS` | LLM request microbatching |
+| `STAR_QUERY_TIMEOUT_SECONDS` | timeout for one query workflow |
+| `STAR_WORKFLOW_BATCH_TIMEOUT_SECONDS` | timeout for one workflow batch |
+| `STAR_RAY_GET_TIMEOUT_SECONDS`, `STAR_WORKER_CALL_TIMEOUT_SECONDS` | Ray/worker call timeouts |
+| `STAR_LLM_TIMEOUT_SECONDS`, `STAR_TOOL_TIMEOUT_SECONDS` | LLM/tool call timeouts |
+| `STAR_WORKFLOW_DEBUG`, `STAR_VAL_DEBUG` | print workflow trace debug information |
 
-## 数据格式
+## Data Formats
 
 ### Code JSONL
 
-`CodeJsonlDataset` 会读取 `problem/question/query` 作为题面，读取 `tests/test_cases/answer/label/reward_model/extra_info.*` 作为测试用例，读取 `starter_code/extra_info.starter_code` 作为 starter code。
+`CodeJsonlDataset` reads `problem/question/query` as the problem statement, `tests/test_cases/answer/label/reward_model/extra_info.*` as test cases, and `starter_code/extra_info.starter_code` as starter code.
 
-最小示例：
+Minimal example:
 
 ```json
 {"uid":"code/0","problem":"Write a function ...","starter_code":"","tests":[{"input":"1\n","output":"1\n"}]}
 ```
 
-也支持把 `tests` 存成 JSON string。
+`tests` may also be stored as a JSON string.
 
 ### QA / Search Parquet
 
-QA/search 配置默认使用 Verl-format parquet，常用字段包括：
+QA/search configs use Verl-format parquet by default. Common fields include:
 
 - `question` / `query` / `problem` / `extra_info.question`
 - `answer` / `ground_truth` / `extra_info.answer` / `reward_model.ground_truth`
 
-检索工具通过 `RETRIEVAL_API_URLS_JSON` 提供一个或多个 HTTP endpoint。每个 endpoint 需要暴露 `/retrieve` 接口，返回 workflow runner 能消费的候选文档。
+The retrieval tool receives one or more HTTP endpoints through `RETRIEVAL_API_URLS_JSON`. Each endpoint should expose a `/retrieve` API and return candidate documents that the workflow runner can consume.
 
 ### Math JSONL
 
-`MathJsonlDataset` 支持 JSON、JSONL、Parquet，读取 `question/problem/query` 作为题目，读取 `answer/ground_truth/target/reward_model.ground_truth/solution` 作为答案，并会自动推断 `data_source` 以便 validation 分数据集统计。
+`MathJsonlDataset` supports JSON, JSONL, and Parquet. It reads `question/problem/query` as the problem, `answer/ground_truth/target/reward_model.ground_truth/solution` as the answer, and automatically infers `data_source` for per-dataset validation metrics.
 
-## 如何新增一个 workflow
+## Adding a Workflow
 
-新增任务通常只需要动三类文件：
+Adding a new task usually requires three types of files:
 
-1. 在 `verl/experimental/star_ppo/workflows/` 下实现一个 `WorkflowRunner`。
-2. 在 `verl/experimental/star_ppo/reward_allocators/` 下实现一个 `RewardAllocator`。
-3. 在 `verl/experimental/star_ppo/config/` 下增加一个 Hydra YAML，声明 `trainer.llm_engines`、agent 到 `model_id` 的映射、runner、reward allocator、工具和数据路径。
+1. Implement a `WorkflowRunner` under `verl/experimental/star_ppo/workflows/`.
+2. Implement a `RewardAllocator` under `verl/experimental/star_ppo/reward_allocators/`.
+3. Add a Hydra YAML config under `verl/experimental/star_ppo/config/` that declares `trainer.llm_engines`, the agent-to-`model_id` mapping, runner, reward allocator, tools, and data paths.
 
-`WorkflowRunner` 的核心接口：
+Core `WorkflowRunner` interface:
 
 ```python
 class WorkflowRunner:
@@ -521,7 +523,7 @@ class WorkflowRunner:
         ...
 ```
 
-`RewardAllocator` 的核心接口：
+Core `RewardAllocator` interface:
 
 ```python
 class RewardAllocator:
@@ -529,72 +531,72 @@ class RewardAllocator:
         ...
 ```
 
-关键约定：
+Key conventions:
 
-- 每次 trainable LLM 调用都应产生一个 `WorkflowExecutionRecord`，并保留对应 thin/fat trajectory id。
-- tool node 可以进入 trace，但不需要进入 PPO 训练 buffer。
-- reward allocator 最终把 scalar reward 绑定到具体 `WorkflowExecutionRecord`。
-- 只要 reward 能通过 `traj_id` commit 回对应 buffer，PPO trainer 不需要理解具体 workflow 语义。
+- Every trainable LLM call should create a `WorkflowExecutionRecord` and keep its corresponding thin/fat trajectory id.
+- Tool nodes may appear in the trace, but they do not need to enter the PPO training buffer.
+- The reward allocator eventually binds scalar rewards to concrete `WorkflowExecutionRecord`s.
+- As long as rewards can be committed back to the correct buffer through `traj_id`, the PPO trainer does not need to understand workflow-specific semantics.
 
-## 调试与排障
+## Debugging
 
-查看后台日志：
+Inspect background logs:
 
 ```bash
 tail -f logs/star_ppo/run_rank0_*.log
 ```
 
-检查 Ray 集群：
+Check the Ray cluster:
 
 ```bash
 ray status
 ```
 
-常见问题：
+Common issues:
 
-- **非 head 节点未加入**：确认所有节点 `HEAD_IP` 一致，`RANK` 唯一，`WORLD_SIZE` 正确，端口 `6379/8265` 可达。
-- **训练前卡住 waiting alive nodes**：某个 worker 没启动成功，先看对应 rank 日志。
-- **vLLM OOM**：降低 `ROLLOUT_GPU_MEMORY_UTILIZATION`、`ROLLOUT_MAX_NUM_SEQS`、`ROLLOUT_MAX_NUM_BATCHED_TOKENS` 或 `STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL`。
-- **prompt 过长**：降低 `STAR_PER_INFER_PROMPT_MAX_TOKENS`、`DATA_MAX_PROMPT_LENGTH`，或打开/调整 workflow 的 state truncation。
-- **verifier 太慢**：调小 `CODE_VERIFY_MAX_TESTS_PER_EXAMPLE`，调大 `CODE_VERIFY_TIMEOUT_SECONDS`，检查测试用例大小限制。
-- **检索不稳定**：增加 `RETRIEVAL_API_URLS_JSON` endpoint 数量，设置 `STAR_RETRIEVER_RANDOM_ENDPOINT=true`，并检查 retrieval server 超时。
-- **debug 输出太多**：关闭 `STAR_WORKFLOW_DEBUG` / `STAR_VAL_DEBUG`，或调小 `STAR_WORKFLOW_DEBUG_MAX_CHARS`。
+- **Non-head nodes do not join**: make sure all nodes use the same `HEAD_IP`, unique `RANK`s, the correct `WORLD_SIZE`, and reachable ports `6379/8265`.
+- **Training hangs at waiting alive nodes**: at least one worker failed to start; check the corresponding rank log first.
+- **vLLM OOM**: lower `ROLLOUT_GPU_MEMORY_UTILIZATION`, `ROLLOUT_MAX_NUM_SEQS`, `ROLLOUT_MAX_NUM_BATCHED_TOKENS`, or `STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL`.
+- **Prompt too long**: lower `STAR_PER_INFER_PROMPT_MAX_TOKENS` and `DATA_MAX_PROMPT_LENGTH`, or enable/adjust workflow state truncation.
+- **Verifier is too slow**: reduce `CODE_VERIFY_MAX_TESTS_PER_EXAMPLE`, increase `CODE_VERIFY_TIMEOUT_SECONDS`, and check test-case size limits.
+- **Retrieval is unstable**: add more `RETRIEVAL_API_URLS_JSON` endpoints, set `STAR_RETRIEVER_RANDOM_ENDPOINT=true`, and check retrieval server timeout settings.
+- **Too much debug output**: disable `STAR_WORKFLOW_DEBUG` / `STAR_VAL_DEBUG`, or lower `STAR_WORKFLOW_DEBUG_MAX_CHARS`.
 
-## 与 Verl 的关系
+## Relationship to Verl
 
-UnityMAS-O 复用了 Verl 的核心训练基础设施，包括 Ray 分布式执行、FSDP/FSDP2 worker、actor/ref/critic、vLLM rollout、PPO update、tracking 和 checkpoint 机制。在此基础上，本仓库新增了面向 multi-agent workflow 的 controller、routing、trace、reward allocation、model-local trajectory buffer 和多 LLM engine 配置。
+UnityMAS-O reuses Verl's core training infrastructure, including Ray distributed execution, FSDP/FSDP2 workers, actor/ref/critic, vLLM rollout, PPO update, tracking, and checkpointing. On top of that, this repository adds a controller, routing, traces, reward allocation, model-local trajectory buffers, and multi-LLM engine configuration for multi-agent workflows.
 
-如果只需要原始 Verl 单策略 PPO/GRPO/SFT 功能，仍可使用 `verl/trainer/` 和 `examples/ppo_trainer/` 等原始入口；如果要训练多 agent workflow，请使用 `verl.experimental.star_ppo.main_ppo` 和 `examples/star_ppo/` 下的脚本。
+If you only need the original Verl single-policy PPO/GRPO/SFT functionality, you can still use the original entry points under `verl/trainer/` and `examples/ppo_trainer/`. To train multi-agent workflows, use `verl.experimental.star_ppo.main_ppo` and scripts under `examples/star_ppo/`.
 
-## 技术报告与结果
+## Technical Report and Results
 
-技术报告题为：
+The corresponding technical report is titled:
 
 ```text
 UnityMAS-O: A General RL Optimization Framework for LLM-Based Multi-Agent Systems
 ```
 
-报告里比较系统地验证了三类 workflow：QA/search、M-ASK iterative search 和 reflective code generation。核心结论是，UnityMAS-O 可以把这些手写多智能体流程转成可训练的 MARL 问题；训练后，QA F1、代码 all-passed rate、代码验证轮数都有明显改善，同时也能比较共享参数和独立模型组之间的取舍。
+The report evaluates three workflow families: QA/search, M-ASK iterative search, and reflective code generation. The main finding is that UnityMAS-O can turn these manually designed multi-agent workflows into trainable MARL problems. After training, QA F1, code all-passed rate, and code verification turn count improve clearly, while the framework also supports controlled comparisons between shared-parameter and independent-model setups.
 
-QA 任务上，训练后的 workflow 在不同模型规模和不同检索流程上都有稳定提升：
+On QA tasks, the trained workflows improve consistently across model scales and retrieval pipelines:
 
 <a href="docs/assets/unitymas-o/qa_training_gains_dumbbell.pdf">
   <img src="docs/assets/unitymas-o/qa_training_gains_dumbbell.png" alt="QA training gains" width="100%">
 </a>
 
-M-ASK 的共享参数版本收敛稍慢，但在 HotpotQA 上可以接近独立 4 模型组的效果：
+The shared-parameter M-ASK variant converges a little more slowly, but can approach the independent four-model-group setup on HotpotQA:
 
 <a href="docs/assets/unitymas-o/mask_3b_shared_vs_independent.pdf">
   <img src="docs/assets/unitymas-o/mask_3b_shared_vs_independent.png" alt="HotpotQA M-ASK shared vs independent" width="100%">
 </a>
 
-代码任务上，plan-code-verify-reflect workflow 在训练后显著提高了 held-out all-passed rate：
+For code generation, the plan-code-verify-reflect workflow substantially improves held-out all-passed rate after training:
 
 <a href="docs/assets/unitymas-o/code_train_test_curves.pdf">
   <img src="docs/assets/unitymas-o/code_train_test_curves.png" alt="Code training and held-out test curves" width="100%">
 </a>
 
-同一组实验还显示，训练后的代码 workflow 更早通过 verifier，平均验证轮数下降：
+The same experiment also shows that the trained code workflow passes the verifier earlier, reducing the average number of verification turns:
 
 <a href="docs/assets/unitymas-o/code_test_used_turns.pdf">
   <img src="docs/assets/unitymas-o/code_test_used_turns.png" alt="Average verification turns on held-out code tasks" width="100%">
