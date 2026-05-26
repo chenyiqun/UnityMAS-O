@@ -8,12 +8,11 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
-from verl.experimental.one_step_off_policy.utils import need_critic
 from verl.experimental.star_ppo.ray_trainer import StarRayTrainer
 from verl.experimental.star_ppo.types import EngineSpec
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
 from verl.trainer.ppo.reward import load_reward_manager
-from verl.trainer.ppo.utils import Role, need_reference_policy
+from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
 
