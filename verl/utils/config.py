@@ -86,7 +86,15 @@ def validate_config(
     # number of GPUs total
     n_gpus = config.trainer.n_gpus_per_node * config.trainer.nnodes
 
-    if not config.actor_rollout_ref.actor.use_dynamic_bsz:
+    topology = str(OmegaConf.select(config, "trainer.topology") or "").strip().lower()
+    is_star_topology = topology == "star"
+
+    # STAR topology routes samples to per-model rollout/update queues and enforces
+    # divisibility at update time, after streaming rewards have produced ready
+    # trajectories. The single-policy global batch check below is therefore not
+    # applicable to STAR configs, especially for smoke tests and sparse ready
+    # queues where runtime drop_last handles the final batch shape.
+    if not config.actor_rollout_ref.actor.use_dynamic_bsz and not is_star_topology:
         if config.actor_rollout_ref.actor.strategy == "megatron":
             model_parallel_size = (
                 config.actor_rollout_ref.actor.megatron.tensor_model_parallel_size
