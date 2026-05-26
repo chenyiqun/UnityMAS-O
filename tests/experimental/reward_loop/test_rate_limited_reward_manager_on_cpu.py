@@ -13,10 +13,10 @@
 # limitations under the License.
 
 import asyncio
-import logging
 import os.path
 import time
 
+import numpy as np
 import pytest
 import torch
 from omegaconf import DictConfig
@@ -135,8 +135,11 @@ def create_test_data_proto(tokenizer, response_text: str, ground_truth: str, dat
         }
     )
 
-    # Wrap non-tensor values in lists to match batch dimension
-    data.non_tensor_batch = {"data_source": [data_source], "reward_model": [{"ground_truth": ground_truth}]}
+    # Wrap non-tensor values in numpy arrays to match batch dimension
+    data.non_tensor_batch = {
+        "data_source": np.array([data_source], dtype=object),
+        "reward_model": np.array([{"ground_truth": ground_truth}], dtype=object),
+    }
 
     return data
 
@@ -165,7 +168,7 @@ class TestRateLimitedRewardManager:
     @pytest.mark.asyncio
     async def test_basic_reward_computation(self, tokenizer):
         """Test basic reward computation without rate limiting."""
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
 
         RateLimitedRewardManager.init_class(config, tokenizer)
         manager = RateLimitedRewardManager(config=config, tokenizer=tokenizer, compute_score=mock_async_reward_function)
@@ -186,7 +189,7 @@ class TestRateLimitedRewardManager:
         # Set RPM limit to 60 (1 request per second)
         config = DictConfig(
             {
-                "reward_model": {
+                "reward": {
                     "max_concurrent": 10,
                     "max_rpm": 60,  # 1 request per second
                     "timeout": 10.0,
@@ -222,7 +225,7 @@ class TestRateLimitedRewardManager:
         # With 2000 tokens per request, that's 0.05 req/sec or 20 seconds per request
         config = DictConfig(
             {
-                "reward_model": {
+                "reward": {
                     "max_concurrent": 10,
                     "max_tpm": 6000,  # 100 tokens per second
                     "estimated_tokens_per_request": 2000,  # Each request = 2000 tokens
@@ -256,7 +259,7 @@ class TestRateLimitedRewardManager:
         """Test concurrent request limiting."""
         config = DictConfig(
             {
-                "reward_model": {
+                "reward": {
                     "max_concurrent": 2,  # Only 2 concurrent requests
                     "timeout": 10.0,
                 }
@@ -289,7 +292,7 @@ class TestRateLimitedRewardManager:
         """Test timeout handling for slow API."""
         config = DictConfig(
             {
-                "reward_model": {
+                "reward": {
                     "max_concurrent": 10,
                     "timeout": 0.5,  # 500ms timeout
                 }
@@ -311,7 +314,7 @@ class TestRateLimitedRewardManager:
     @pytest.mark.asyncio
     async def test_error_handling(self, tokenizer):
         """Test error handling for failing API."""
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
 
         RateLimitedRewardManager.init_class(config, tokenizer)
         manager = RateLimitedRewardManager(config=config, tokenizer=tokenizer, compute_score=mock_failing_api_function)
@@ -330,7 +333,7 @@ class TestRateLimitedRewardManager:
     @pytest.mark.asyncio
     async def test_dict_result_format(self, tokenizer):
         """Test handling of dict return format from reward function."""
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
 
         RateLimitedRewardManager.init_class(config, tokenizer)
         manager = RateLimitedRewardManager(config=config, tokenizer=tokenizer, compute_score=mock_dict_result_function)
@@ -347,7 +350,7 @@ class TestRateLimitedRewardManager:
     @pytest.mark.asyncio
     async def test_sync_reward_function(self, tokenizer):
         """Test that synchronous reward functions work correctly."""
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
 
         RateLimitedRewardManager.init_class(config, tokenizer)
         manager = RateLimitedRewardManager(config=config, tokenizer=tokenizer, compute_score=mock_sync_reward_function)
@@ -364,7 +367,7 @@ class TestRateLimitedRewardManager:
         """Test all three rate limiting layers together."""
         config = DictConfig(
             {
-                "reward_model": {
+                "reward": {
                     "max_concurrent": 2,
                     "max_rpm": 120,  # 2 requests per second
                     "max_tpm": 12000,  # 200 tokens per second
@@ -398,7 +401,7 @@ class TestRateLimitedRewardManager:
     @pytest.mark.asyncio
     async def test_correct_vs_incorrect_answers(self, tokenizer):
         """Test scoring of correct vs incorrect answers."""
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
 
         RateLimitedRewardManager.init_class(config, tokenizer)
         manager = RateLimitedRewardManager(config=config, tokenizer=tokenizer, compute_score=mock_async_reward_function)
@@ -419,7 +422,7 @@ class TestRateLimitedRewardManager:
         """Test high throughput with many concurrent requests."""
         config = DictConfig(
             {
-                "reward_model": {
+                "reward": {
                     "max_concurrent": 20,
                     "max_rpm": 6000,  # 100 requests per second
                     "timeout": 10.0,
@@ -459,7 +462,7 @@ class TestRateLimitedRewardManager:
     @pytest.mark.asyncio
     async def test_class_initialization_once(self, tokenizer):
         """Test that class initialization only happens once."""
-        config = DictConfig({"reward_model": {"max_concurrent": 5, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 5, "timeout": 10.0}})
 
         # Initialize multiple times
         RateLimitedRewardManager.init_class(config, tokenizer)
@@ -470,32 +473,6 @@ class TestRateLimitedRewardManager:
 
         # Should be the same object
         assert first_semaphore is second_semaphore
-
-    def test_warn_when_rate_limits_are_ignored_due_to_prior_init(self, tokenizer, caplog):
-        """Warn when a new config attempts to change global RPM/TPM after the class has been initialized."""
-        caplog.set_level(logging.WARNING)
-
-        # First instantiation without a config (legacy signature) initializes global limiters with defaults.
-        _ = RateLimitedRewardManager(
-            tokenizer=tokenizer,
-            compute_score=mock_async_reward_function,
-            num_examine=0,
-            reward_fn_key="data_source",
-        )
-
-        # Second instantiation attempts to set RPM limits, but will be ignored due to global initialization.
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "max_rpm": 60, "timeout": 10.0}})
-        _ = RateLimitedRewardManager(
-            config=config,
-            tokenizer=tokenizer,
-            compute_score=mock_async_reward_function,
-        )
-
-        assert any(
-            "RateLimitedRewardManager has already been initialized" in record.getMessage()
-            and "ignored" in record.getMessage()
-            for record in caplog.records
-        ), "Expected a warning when attempting to change global rate limits after initialization."
 
     @pytest.mark.asyncio
     async def test_extra_info_handling(self, tokenizer):
@@ -508,7 +485,7 @@ class TestRateLimitedRewardManager:
             received_extra_info.update(extra_info)
             return 1.0
 
-        config = DictConfig({"reward_model": {"max_concurrent": 10, "timeout": 10.0}})
+        config = DictConfig({"reward": {"max_concurrent": 10, "timeout": 10.0}})
 
         RateLimitedRewardManager.init_class(config, tokenizer)
         manager = RateLimitedRewardManager(
@@ -516,7 +493,7 @@ class TestRateLimitedRewardManager:
         )
 
         data = create_test_data_proto(tokenizer, "answer", "answer")
-        data.non_tensor_batch["extra_info"] = [{"custom_field": "test_value"}]
+        data.non_tensor_batch["extra_info"] = np.array([{"custom_field": "test_value"}], dtype=object)
 
         await manager.run_single(data)
 

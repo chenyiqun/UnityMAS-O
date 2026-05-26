@@ -21,7 +21,6 @@ from typing import Any, Optional
 
 import numpy as np
 import ray
-from ray.exceptions import GetTimeoutError
 from ray.experimental.state.api import get_actor
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, PlacementGroupSchedulingStrategy
@@ -29,7 +28,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 from verl.protocol import DataProto, _padding_size_key
 from verl.single_controller.base import ClassWithInitArgs, ResourcePool, Worker, WorkerGroup
 from verl.single_controller.base.decorator import MAGIC_ATTR, Dispatch
-from verl.utils.device import get_device_name
+from verl.utils.device import get_device_name, is_torch_npu_available
 from verl.utils.py_functional import temp_env_var
 
 __all__ = ["Worker"]
@@ -53,16 +52,7 @@ def func_generator(self, method_name, dispatch_fn, collect_fn, execute_fn, block
             padding_count = kwargs.pop(_padding_size_key, 0)
             output = execute_fn(method_name, *args, **kwargs)
             if blocking:
-                timeout_s = float(os.environ.get("STAR_WORKER_CALL_TIMEOUT_SECONDS", "0"))
-                try:
-                    if timeout_s > 0:
-                        output = ray.get(output, timeout=timeout_s)
-                    else:
-                        output = ray.get(output)
-                except GetTimeoutError as exc:
-                    raise TimeoutError(
-                        f"WorkerGroup call timed out: method={method_name} timeout_s={timeout_s}"
-                    ) from exc
+                output = ray.get(output)
             output = collect_fn(self, output)
             if padding_count > 0:
                 if isinstance(output, DataProto):
@@ -97,11 +87,25 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
 
 
 @ray.remote
-def get_master_addr_port() -> tuple[str, str]:
+def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
     addr = ray.util.get_node_ip_address().strip("[]")
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        port = sock.getsockname()[1]
+
+    if master_port_range is None:
+        with socket.socket() as s:
+            s.bind(("", 0))
+            port = s.getsockname()[1]
+    else:
+        port = master_port_range[0]
+        while port < master_port_range[1]:
+            try:
+                with socket.socket() as s:
+                    s.bind(("", port))
+                    break
+            except OSError:
+                port += 1  # Increment port number if already in use
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+        else:
+            raise RuntimeError(f"Could not find a free port in range {master_port_range}")
     return addr, str(port)
 
 
@@ -182,6 +186,7 @@ class ResourcePoolManager:
 
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[int, str]
+    max_colocate_count: int = 3
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
 
     def create_resource_pool(self):
@@ -198,7 +203,10 @@ class ResourcePoolManager:
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes,
+                use_gpu=True,
+                max_colocate_count=self.max_colocate_count,
+                name_prefix=resource_pool_name,
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -290,7 +298,8 @@ def split_resource_pool(
         start_bundle_idx_list = np.cumsum([0] + split_size_list[:-1])
 
     # ensure resource_pool.pgs has been initialized
-    placement_groups = resource_pool.get_placement_groups()
+    device = "npu" if is_torch_npu_available(check_device=False) else "cuda"
+    placement_groups = resource_pool.get_placement_groups(device_name=device)
     split_resource_pools = [
         SubRayResourcePool(
             process_on_nodes=resource_pool.store,
@@ -439,6 +448,7 @@ class RayWorkerGroup(WorkerGroup):
         self._master_addr = kwargs.pop("master_addr", None)
         self._master_port = kwargs.pop("master_port", None)
         self.use_gpu = kwargs.pop("use_gpu", resource_pool.use_gpu if resource_pool is not None else True)
+        self._ray_master_port_range = kwargs.pop("master_port_range", None)
         super().__init__(resource_pool=resource_pool, **kwargs)
         self.ray_cls_with_init = ray_cls_with_init
         self.name_prefix = get_random_string(length=6) if name_prefix is None else name_prefix
@@ -505,7 +515,7 @@ class RayWorkerGroup(WorkerGroup):
         self._workers = workers
         self._world_size = len(workers)
 
-    def _get_master_addr_port(self, pg, bundle_index=0):
+    def _get_master_addr_port(self, pg, bundle_index=0, master_port_range=None):
         """Get master addr and port for this worker group"""
         if self._master_addr is None and self._master_port is None:
             self._master_addr, self._master_port = ray.get(
@@ -513,7 +523,7 @@ class RayWorkerGroup(WorkerGroup):
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg, placement_group_bundle_index=bundle_index
                     ),
-                ).remote()
+                ).remote(master_port_range=master_port_range)
             )
         elif self._master_addr is not None and self._master_port is not None:
             logger.debug(f"{self._master_addr=} {self._master_port=}")
@@ -523,7 +533,14 @@ class RayWorkerGroup(WorkerGroup):
                 "or neither should be provided to use Ray's default assignment."
             )
 
-    def _init_with_resource_pool(self, resource_pool, ray_cls_with_init, bin_pack, detached, worker_env=None):
+    def _init_with_resource_pool(
+        self,
+        resource_pool,
+        ray_cls_with_init,
+        bin_pack,
+        detached,
+        worker_env=None,
+    ):
         """Initialize the worker group by creating new workers from a resource pool.
 
         Args:
@@ -533,7 +550,6 @@ class RayWorkerGroup(WorkerGroup):
             detached: Whether workers should be detached
         """
         self.resource_pool = resource_pool
-
         strategy = "PACK"
         if bin_pack:
             strategy = "STRICT_PACK"
@@ -547,7 +563,7 @@ class RayWorkerGroup(WorkerGroup):
         for pg_idx, pg in enumerate(sort_placement_group_by_node_ip(pgs)):
             assert local_world_size <= pg.bundle_count, f"when generating for {self.name_prefix}, for the "
             if pg_idx == 0:
-                self._get_master_addr_port(pg)
+                self._get_master_addr_port(pg, bundle_index=0, master_port_range=self._ray_master_port_range)
 
             for local_rank in range(local_world_size):
                 rank += 1
@@ -581,7 +597,8 @@ class RayWorkerGroup(WorkerGroup):
         local_world_size = resource_pool.store[0]
         self._get_master_addr_port(
             pgs[resource_pool.start_bundle_index // local_world_size],
-            resource_pool.start_bundle_index % local_world_size,
+            bundle_index=resource_pool.start_bundle_index % local_world_size,
+            master_port_range=self._ray_master_port_range,
         )
         for curr_rank in range(resource_pool.start_bundle_index, resource_pool.start_bundle_index + world_size):
             pg_idx = curr_rank // local_world_size

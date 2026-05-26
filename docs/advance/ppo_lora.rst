@@ -1,7 +1,7 @@
 RL(HF) algorithms with LoRA Support
 ===========================================
 
-Last updated: 12/17/2025.
+Last updated: 02/03/2026.
 
 We support LoRA (Low-Rank Adaptation) for reinforcement learning algorithms such as PPO, GRPO, and others.
 
@@ -25,10 +25,10 @@ FSDP Backend Usage Guide
 
 1. Lora is available in the `verl.trainer.ppo.ray_trainer.RayPPOTrainer`. Examples are provided via the `verl.trainer.main_ppo` entry point.
 
-2. Currently, LoRA is supported via huggingface peft, only with fsdp/fsdp2 and vllm backend (sglang support coming soon).
+2. LoRA is supported via huggingface peft with fsdp/fsdp2 and both vllm and sglang rollout backends.
 
 - `strategy=fsdp` or `strategy=fsdp2`
-- `rollout.name=vllm`
+- `rollout.name=vllm` or `rollout.name=sglang`
 
 3. Required configurations for LoRA:
 
@@ -42,6 +42,9 @@ FSDP Backend Usage Guide
 - `actor_rollout_ref.model.lora_adapter_path`: string, path to a pretrained LoRA adapter directory. 
    If provided, loads existing adapter instead of creating new one. Enables multi-stage training from previously saved adapters.
    Directory need contain `adapter_model.safetensors` and `adapter_config.json`.
+- `actor_rollout_ref.model.lora.merge`: bool, whether to merge LoRA adapters into the base model weights before transferring to the rollout engine (vLLM or SGLang).
+   If True, LoRA adapters are merged into base weights and full merged weights are synced. If False, only LoRA adapter deltas are transferred natively.
+   For SGLang, ``merge=True`` is currently required. Native adapter loading (``merge=False``) for SGLang is planned.
 
 5. Recommend options:
 
@@ -62,7 +65,7 @@ Megatron Backend Usage Guide
 
 You need to install and enable Megatron-Bridge for Megatron LoRA support.
 
-Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `this commit <https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/83a7c1134c562d8c6decd10a1f0a6e6a7a8a3a44>`_ or later for proper support, and use the following settings to enable Megatron-Bridge:
+Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `this commit <https://github.com/NVIDIA-NeMo/Megatron-Bridge/commit/0a21da47ecfc609e546e790b901f1657808717b5>`_ or later for proper support, and use the following settings to enable Megatron-Bridge:
 
 - ``actor_rollout_ref.actor.megatron.use_mbridge=True``
 - ``actor_rollout_ref.actor.megatron.vanilla_mbridge=False``
@@ -137,6 +140,10 @@ Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `th
         # Path to pre-trained LoRA adapter weights (null to train from scratch)
         adapter_path: null
 
+        # Whether to fully shard LoRA adapters. Defaults to False
+        # https://docs.vllm.ai/en/latest/api/vllm/config/lora/#vllm.config.lora.LoRAConfig.fully_sharded_loras
+        fully_sharded_loras: bool
+
         # VLMLoRA additionally allows the user to specify whether the language or vision models should be frozen.
         # For example, a common finetuning workload for multimodal models is to apply adapters to language model and fully
         # finetune the vision model.
@@ -144,7 +151,7 @@ Make sure you use Megatron-Bridge later than 0.2.0, and we recommended using `th
         freeze_vision_projection: True
         freeze_language_model: True
 
-LoRA training experiment with Qwen3-8B on 8 * H200 single node comparing FSDP and Megatron backend (script adapted from examples/grpo_trainer/run_qwen2-7b_math_megatron_lora.sh):
+LoRA training experiment with Qwen3-8B on 8 * H200 single node comparing FSDP and Megatron backend (script adapted from examples/tuning/lora/run_qwen3_8b_fsdp.sh):
 
 .. image:: https://github.com/user-attachments/assets/0482f423-01a3-4e52-a7ee-8b9cd79b7b1a
 .. image:: https://github.com/user-attachments/assets/6ce10400-8164-47d8-90a6-c1bf002fb9e8
@@ -199,10 +206,10 @@ For end-to-end examples, refer to the scripts below:
 
 **FSDP Examples:**
 
-- LoRA training from scratch: examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora.sh
-- LoRA training from adapter path: examples/grpo_trainer/run_qwen2_5-3b_gsm8k_grpo_lora_from_adapter.sh
+- LoRA training from scratch: examples/tuning/lora/run_qwen3_8b_fsdp.sh
+- LoRA training from adapter path: examples/tuning/lora/run_qwen3_8b_from_adapter_fsdp.sh
+- LoRA training for VLMs: examples/tuning/lora/run_qwen2_5_vl_7b_fsdp.sh
 
 **Megatron Examples:**
 
-- LoRA training with Dense: examples/grpo_trainer/run_qwen2-7b_math_megatron_lora.sh
-- LoRA training with MoE: examples/grpo_trainer/run_qwen3moe-30b_megatron_lora.sh
+- LoRA training with MoE: examples/tuning/lora/run_qwen3_30b_a3b_megatron.sh

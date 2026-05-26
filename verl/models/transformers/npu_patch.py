@@ -23,7 +23,10 @@ from transformers.activations import ACT2FN
 from transformers.models.qwen2 import modeling_qwen2
 from transformers.models.qwen2_5_vl import modeling_qwen2_5_vl
 from transformers.models.qwen3 import modeling_qwen3
+from transformers.models.qwen3_5 import modeling_qwen3_5
+from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe
 from transformers.models.qwen3_moe import modeling_qwen3_moe
+from transformers.models.qwen3_next import modeling_qwen3_next
 from transformers.models.qwen3_vl import modeling_qwen3_vl
 from transformers.models.qwen3_vl_moe import modeling_qwen3_vl_moe
 from transformers.utils import logging
@@ -51,6 +54,34 @@ def apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1)
     q_embed = torch_npu.npu_rotary_mul(q, cos, sin)
     k_embed = torch_npu.npu_rotary_mul(k, cos, sin)
     return q_embed.to(q.dtype), k_embed.to(k.dtype)
+
+
+def qwen3_next_rms_norm_forward_npu(self, x):
+    return torch_npu.npu_rms_norm(x.float(), 1.0 + self.weight.float(), epsilon=self.eps)[0].type_as(x)
+
+
+def qwen3_next_rms_norm_forward_gated_npu(self, hidden_states, gate=None):
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    hidden_states = torch_npu.npu_rms_norm(hidden_states, self.weight.float(), epsilon=self.variance_epsilon)[0]
+    hidden_states = hidden_states * F.silu(gate.to(torch.float32))
+    return hidden_states.to(input_dtype)
+
+
+def qwen3_next_apply_rotary_pos_emb_npu(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+
+    # Keep half or full tensor for later concatenation
+    rotary_dim = cos.shape[-1]
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+
+    q_embed = torch_npu.npu_rotary_mul(q_rot, cos, sin).to(q.dtype)
+    k_embed = torch_npu.npu_rotary_mul(k_rot, cos, sin).to(k.dtype)
+    q_embed = torch.cat([q_embed, q_pass], dim=-1)
+    k_embed = torch.cat([k_embed, k_pass], dim=-1)
+    return q_embed, k_embed
 
 
 class NPUGmmFunction(torch.autograd.Function):
@@ -105,9 +136,13 @@ class NPUGmmFunction(torch.autograd.Function):
         return dx, dw, None, None
 
 
-def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) -> torch.Tensor:
-    """NPU optimized implementation for `forward` in Qwen3MoeSparseMoeBlock."""
-    # hidden_states: (batch_size, sequence_length, hidden_size)
+def _qwen3_sparse_moe_routed_forward_npu(self, hidden_states: torch.Tensor):
+    """
+    Shared NPU routed-expert path for Qwen3Moe/Qwen3Next sparse MoE blocks.
+
+    Returns:
+        tuple: (flattened_input, routed_hidden_states, router_logits)
+    """
     hidden_dim = hidden_states.shape[-1]
     hidden_states = hidden_states.view(-1, hidden_dim)
     # router_logits: (batch * sequence_length, n_experts)
@@ -138,8 +173,28 @@ def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) ->
     act_res = torch_npu.npu_swiglu(torch.cat([gate_res, up_res], dim=-1))
     down_res = NPUGmmFunction.apply(act_res, w3, tokens_per_expert)
 
-    final_hidden_states = torch_npu.npu_moe_token_unpermute(down_res, row_ids_map, probs=routing_weights)
+    routed_hidden_states = torch_npu.npu_moe_token_unpermute(down_res, row_ids_map, probs=routing_weights)
 
+    return hidden_states, routed_hidden_states, router_logits
+
+
+def qwen3_moe_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    """NPU optimized implementation for `forward` in Qwen3MoeSparseMoeBlock."""
+    output_shape = hidden_states.shape
+    _, routed_hidden_states, router_logits = _qwen3_sparse_moe_routed_forward_npu(self, hidden_states)
+    final_hidden_states = routed_hidden_states.reshape(output_shape)
+    return final_hidden_states, router_logits
+
+
+def qwen3_next_sparse_moe_block_forward_npu(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    """NPU optimized implementation for `forward` in Qwen3NextSparseMoeBlock."""
+    output_shape = hidden_states.shape
+    hidden_states, routed_hidden_states, router_logits = _qwen3_sparse_moe_routed_forward_npu(self, hidden_states)
+
+    shared_expert_output = self.shared_expert(hidden_states)
+    shared_expert_output = torch.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+
+    final_hidden_states = (routed_hidden_states + shared_expert_output).reshape(output_shape)
     return final_hidden_states, router_logits
 
 
@@ -226,10 +281,32 @@ class NPUQwen3VLMoeTextSparseMoeBlock(nn.Module):
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
         routing_weights = routing_weights.to(router_logits.dtype)
         hidden_states = hidden_states.reshape(batch_size, -1, self.hidden_size)
-        if not self.training:
-            routing_weights = torch.zeros_like(router_logits).scatter_(1, router_indices, routing_weights)
+        routing_weights = torch.zeros_like(router_logits).scatter_(1, router_indices, routing_weights)
         routed_out = self.experts(hidden_states, routing_weights, router_indices)
         return routed_out
+
+
+def qwen3_5_moe_experts_forward_npu(
+    self,
+    hidden_states: torch.Tensor,
+    top_k_index: torch.Tensor,
+    top_k_weights: torch.Tensor,
+) -> torch.Tensor:
+    selected_experts = top_k_index
+    routing_weights = top_k_weights
+    gate_up_proj = self.gate_up_proj.permute(0, 2, 1).contiguous()
+    down_proj = self.down_proj.permute(0, 2, 1).contiguous()
+    permuted_hidden_states, row_ids_map = torch_npu.npu_moe_token_permute(
+        hidden_states, selected_experts.to(torch.int32)
+    )
+    tokens_per_expert = torch.histc(selected_experts, bins=self.num_experts, min=0, max=self.num_experts)
+    intermediate_hidden_states = NPUGmmFunction.apply(permuted_hidden_states, gate_up_proj, tokens_per_expert)
+    intermediate_activations = torch_npu.npu_swiglu(intermediate_hidden_states, dim=-1)
+    output = NPUGmmFunction.apply(intermediate_activations, down_proj, tokens_per_expert)
+    final_hidden_states = torch_npu.npu_moe_token_unpermute(
+        output.to(routing_weights.dtype), row_ids_map, probs=routing_weights
+    )
+    return final_hidden_states.to(hidden_states.dtype)
 
 
 # Patches for Qwen2 Model
@@ -238,7 +315,10 @@ modeling_qwen2.Qwen2MLP.forward = silu_forward_npu
 modeling_qwen2.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
 
 # Patches for Qwen2.5-VL Model
-modeling_qwen2_5_vl.Qwen2RMSNorm.forward = rms_norm_forward_npu
+if hasattr(modeling_qwen2_5_vl, "Qwen2RMSNorm"):
+    modeling_qwen2_5_vl.Qwen2RMSNorm.forward = rms_norm_forward_npu
+else:
+    modeling_qwen2_5_vl.Qwen2_5_VLRMSNorm.forward = rms_norm_forward_npu
 modeling_qwen2_5_vl.Qwen2_5_VLMLP.forward = silu_forward_npu
 
 # Patches for Qwen3 Model
@@ -259,3 +339,20 @@ modeling_qwen3_vl.Qwen3VLTextMLP.forward = silu_forward_npu
 modeling_qwen3_vl_moe.Qwen3VLMoeTextSparseMoeBlock = NPUQwen3VLMoeTextSparseMoeBlock
 modeling_qwen3_vl_moe.Qwen3VLMoeTextRMSNorm.forward = rms_norm_forward_npu
 modeling_qwen3_vl_moe.apply_rotary_pos_emb = apply_rotary_pos_emb_npu
+
+# Patches for Qwen3 Next Model
+modeling_qwen3_next.Qwen3NextSparseMoeBlock.forward = qwen3_next_sparse_moe_block_forward_npu
+modeling_qwen3_next.Qwen3NextRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+modeling_qwen3_next.Qwen3NextRMSNorm.forward = qwen3_next_rms_norm_forward_npu
+modeling_qwen3_next.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+# Patches for Qwen3.5 Model
+modeling_qwen3_5.Qwen3_5RMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+modeling_qwen3_5.Qwen3_5RMSNorm.forward = qwen3_next_rms_norm_forward_npu
+modeling_qwen3_5.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu
+
+# Patches for Qwen3.5 MoE Model
+modeling_qwen3_5_moe.Qwen3_5MoeExperts.forward = qwen3_5_moe_experts_forward_npu
+modeling_qwen3_5_moe.Qwen3_5MoeRMSNormGated.forward = qwen3_next_rms_norm_forward_gated_npu
+modeling_qwen3_5_moe.Qwen3_5MoeRMSNorm.forward = qwen3_next_rms_norm_forward_npu
+modeling_qwen3_5_moe.apply_rotary_pos_emb = qwen3_next_apply_rotary_pos_emb_npu

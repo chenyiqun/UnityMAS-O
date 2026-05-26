@@ -31,11 +31,14 @@ class CheckpointConfig(BaseConfig):
             Options: 'model', 'optimizer', 'extra', 'hf_model'.
         load_contents (list[str]): Contents to load from checkpoint. Defaults to same as save_contents.
         async_save (bool): Whether to save checkpoints asynchronously. Only implemented for Megatron as of now.
+        strict (bool): Whether to perform strict validation during weight export
     """
 
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    mbridge_config: dict[str, Any] = field(default_factory=dict)
+    strict: bool = True
 
 
 @dataclass
@@ -92,38 +95,3 @@ class ModuleConfig(BaseConfig):
 
     path: Optional[str] = None
     name: Optional[str] = None
-
-
-@dataclass
-class RewardManagerConfig(BaseConfig):
-    """Configuration for reward manager.
-
-        A reward manager defines the mechanism of computing rule-based reward and handling different reward sources.
-
-    Args:
-        source (str): Source of the reward manager. Options: ``"register"``, ``"importlib"``. Default: ``"register"``.
-        name (str, optional):
-            - When ``source`` is ``"register"``, the name is used in `get_reward_manager_cls(name)``.
-                See ``verl/experimental/reward/reward_manager.py`` for options. Default: ``"naive"``.
-            - When ``source`` is ``"importlib"``, the name is used in ``getattr(module, name)``,
-                e.g., ``"DAPORewardManager"``.
-        module (ModuleConfig, optional): Optional configuration for the external module defining the reward manager,
-    """
-
-    source: str = "register"
-    name: str = "naive"
-    module: Optional[ModuleConfig] = field(default_factory=ModuleConfig)
-
-    def __post_init__(self):
-        super().__post_init__()
-        if self.source == "register":
-            from verl.workers.reward_manager.registry import REWARD_MANAGER_REGISTRY
-
-            assert self.name in REWARD_MANAGER_REGISTRY, (
-                f"Reward manager is not registered: {self.name=} ,{REWARD_MANAGER_REGISTRY.keys()=}"
-            )
-        elif self.source == "importlib":
-            # NOTE: The existence is not checked since it depends on which machine the config is initialized on.
-            assert self.module is not None and self.module.path is not None, (
-                "When source is importlib, module.path should be set."
-            )

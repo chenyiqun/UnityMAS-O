@@ -42,19 +42,19 @@ class RemoteRewardManager(RewardManagerBase):
     """
     The reward manager.
     Some errors exist when using default thread pool to compute reward score, e.g., math-verify.
-    https://github.com/volcengine/verl/issues/3407
+    https://github.com/verl-project/verl/issues/3407
     To avoid the above issues, we use a separate process to compute reward score.
     Moreover, process may be more suitable for cpu-intensive requests.
     """
 
-    def __init__(self, config, tokenizer, compute_score=None, reward_router_address=None, reward_model_tokenizer=None):
-        super().__init__(config, tokenizer)
+    def __init__(self, config, tokenizer, compute_score, reward_router_address=None, reward_model_tokenizer=None):
+        super().__init__(config, tokenizer, compute_score)
         self.compute_score = compute_score or default_compute_score
         self.is_async_reward_score = inspect.iscoroutinefunction(self.compute_score)
         assert not self.is_async_reward_score, "Async reward score is not supported in remote reward manager. "
         self.reward_router_address = reward_router_address
         self.reward_model_tokenizer = reward_model_tokenizer
-        num_reward_workers = config.reward_model.num_workers
+        num_reward_workers = config.reward.num_workers
         # in the rollout & reward parallel mode
         # the sum of final reward workers will be agent_loop_workers * num_reward_workers
         self.reward_worker = [
@@ -73,7 +73,7 @@ class RemoteRewardManager(RewardManagerBase):
         return next(self.reward_worker_pool)
 
     async def run_single(self, data: DataProto) -> dict:
-        assert len(data) == 1, "Only support single data item"
+        data = data[-1:]  # for multi-sequence outputs, we only compute reward based on the last sequence
         data_item = data[0]
         response_ids = data_item.batch["responses"]
         response_length = response_ids.shape[-1]

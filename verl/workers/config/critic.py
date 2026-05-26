@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,11 +21,25 @@ from verl.base_config import BaseConfig
 from verl.trainer.config import BaseModelConfig, CheckpointConfig
 from verl.utils.profiler import ProfilerConfig
 
-from .engine import FSDPEngineConfig, McoreEngineConfig
+from .engine import (
+    FSDPEngineConfig,
+    McoreEngineConfig,
+    MindSpeedEngineConfig,
+    TorchtitanEngineConfig,
+    VeOmniEngineConfig,
+)
 from .model import HFModelConfig
 from .optimizer import OptimizerConfig
 
-__all__ = ["CriticConfig", "FSDPCriticConfig", "McoreCriticConfig", "FSDPCriticModelCfg"]
+__all__ = [
+    "CriticConfig",
+    "FSDPCriticConfig",
+    "McoreCriticConfig",
+    "TorchTitanCriticConfig",
+    "FSDPCriticModelCfg",
+    "MindSpeedCriticConfig",
+    "VeOmniCriticConfig",
+]
 
 
 @dataclass
@@ -59,6 +72,7 @@ class CriticConfig(BaseConfig):
         "ppo_micro_batch_size_per_gpu",
         "ppo_mini_batch_size",
         "ppo_micro_batch_size",
+        "engine",
         "model_config",
     }
 
@@ -81,26 +95,13 @@ class CriticConfig(BaseConfig):
     ppo_micro_batch_size: Optional[int] = None
     engine: BaseConfig = field(default_factory=BaseConfig)
     optim: OptimizerConfig = field(default_factory=OptimizerConfig)
-    # deprecate model to favor model_config
-    model: BaseModelConfig = field(default_factory=BaseModelConfig)
-    model_config: HFModelConfig = None
+    model: HFModelConfig = None
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     profiler: ProfilerConfig = field(default_factory=ProfilerConfig)
-    nccl_timeout: int = 600
 
     def __post_init__(self):
         """Validate critic configuration parameters."""
         assert self.strategy != MISSING
-
-        if self.model_config is None:
-            warnings.warn("using model in Critic Config is deprecated, please use model_config instead", stacklevel=2)
-            self.model_config = HFModelConfig(
-                path=self.model.path,
-                tokenizer_path=self.model.tokenizer_path,
-                override_config=self.model.override_config,
-                external_lib=self.model.external_lib,
-                trust_remote_code=self.model.trust_remote_code,
-            )
 
         if not self.use_dynamic_bsz:
             self._check_mutually_exclusive(self.ppo_micro_batch_size, self.ppo_micro_batch_size_per_gpu, "critic")
@@ -175,6 +176,11 @@ class McoreCriticConfig(CriticConfig):
         """Validate Megatron critic configuration with runtime parameters."""
         super().validate(n_gpus, train_batch_size)
 
+    def __post_init__(self):
+        """Validate Megatron critic configuration parameters."""
+        super().__post_init__()
+        self.engine = self.megatron
+
 
 @dataclass
 class FSDPCriticConfig(CriticConfig):
@@ -195,6 +201,7 @@ class FSDPCriticConfig(CriticConfig):
     }
 
     strategy: str = "fsdp"
+    fsdp: FSDPEngineConfig = field(default_factory=FSDPEngineConfig)
     forward_micro_batch_size: int = 1
     forward_micro_batch_size_per_gpu: int = 1
     ulysses_sequence_parallel_size: int = 1
@@ -203,6 +210,11 @@ class FSDPCriticConfig(CriticConfig):
     def __post_init__(self):
         """Validate FSDP critic configuration parameters."""
         super().__post_init__()
+        self.engine = self.fsdp
+        # Sync strategy to engine config so engine_workers can pick the right FSDP version.
+        # EngineConfig.strategy defaults to None, so without this, engine_workers.py always
+        # falls back to FSDP1 even when critic.strategy="fsdp2".
+        object.__setattr__(self.engine, "strategy", self.strategy)
 
         if self.strategy in {"fsdp", "fsdp2"}:
             if self.ulysses_sequence_parallel_size > 1:
@@ -223,6 +235,26 @@ class FSDPCriticConfig(CriticConfig):
                         f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
                         f"ulysses_sequence_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
                     )
+
+
+@dataclass
+class TorchTitanCriticConfig(CriticConfig):
+    """Configuration for TorchTitan-based critic model training.
+
+    The inheritance from CriticConfig provides all base critic configuration plus TorchTitan-specific settings.
+
+    Args:
+        strategy (str): Training strategy set to 'torchtitan' for TorchTitan parallelism.
+        torchtitan (TorchtitanEngineConfig): Configuration for TorchTitan engine settings.
+    """
+
+    strategy: str = "torchtitan"
+    torchtitan: TorchtitanEngineConfig = field(default_factory=TorchtitanEngineConfig)
+
+    def __post_init__(self):
+        """Validate TorchTitan critic configuration parameters."""
+        super().__post_init__()
+        self.engine = self.torchtitan
 
 
 @dataclass
@@ -251,3 +283,60 @@ class FSDPCriticModelCfg(BaseModelConfig):
     target_modules: str | list[str] = "all-linear"
     # TiledMLP configuration for memory-efficient MLP computation
     tiled_mlp: dict = field(default_factory=lambda: {"enabled": False, "num_shards": 4})
+
+
+@dataclass
+class MindSpeedCriticConfig(CriticConfig):
+    """Configuration for mindspeed-based critic model training.
+
+    The inheritance from CriticConfig provides all base critic configuration plus mindspeed-specific settings.
+
+    Args:
+        nccl_timeout (int): NCCL timeout in seconds for distributed operations.
+        mindspeed (Dict[str, Any]): mindspeed-specific parallelism settings.
+        load_weight (bool): Whether to load initial weights.
+    """
+
+    strategy: str = "mindspeed"
+    nccl_timeout: int = 600
+    mindspeed: MindSpeedEngineConfig = field(default_factory=MindSpeedEngineConfig)
+    load_weight: bool = True
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate mindspeed critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)
+
+
+@dataclass
+class VeOmniCriticConfig(CriticConfig):
+    """Configuration for VeOmni-based critic model training.
+
+    Uses VeOmni's FSDP2 + sequence parallelism engine for the value model,
+    mirroring VeOmniActorConfig but for the critic role.
+
+    Args:
+        strategy (str): Training strategy set to 'veomni'.
+        veomni (VeOmniEngineConfig): VeOmni engine configuration.
+    """
+
+    strategy: str = "veomni"
+    veomni: VeOmniEngineConfig = field(default_factory=VeOmniEngineConfig)
+    grad_clip: float = 1.0
+
+    def __post_init__(self):
+        """Set engine to VeOmni config."""
+        super().__post_init__()
+        self.engine = self.veomni
+
+    def validate(self, n_gpus: int, train_batch_size: int):
+        """Validate VeOmni critic configuration with runtime parameters."""
+        super().validate(n_gpus, train_batch_size)
+
+        if not self.use_dynamic_bsz:
+            sp_size = self.veomni.ulysses_parallel_size
+            if self.ppo_micro_batch_size is not None:
+                if self.ppo_micro_batch_size * sp_size < n_gpus:
+                    raise ValueError(
+                        f"critic.ppo_micro_batch_size ({self.ppo_micro_batch_size}) * "
+                        f"veomni.ulysses_parallel_size ({sp_size}) must be >= n_gpus ({n_gpus})"
+                    )
