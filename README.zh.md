@@ -224,6 +224,20 @@ logs/star_ppo/run_rank<rank>_<timestamp>.log
 | Math multi-agent | `star_math_solver_verifier_refiner_finalizer_trainer` | solver, verifier, refiner, finalizer | final-answer accuracy + format reward |
 | Query decomposition RAG | `star_query_decompose_retrieve_answer_f1_trainer` 等 | query decomposer, answerer, evidence/summarizer 可选 | final-answer F1 + node-level format reward |
 
+## 任务与 Benchmark 进展
+
+当前仓库优先覆盖可验证的 workflow：奖励可以来自答案匹配、检索问答指标、可执行测试或规则化 grader。下面的表格区分了已经完成/报告的实验、已经实现但还在扩展的方向，以及后续计划覆盖的任务。
+
+| 状态 | 任务类型 | Workflow / 设置 | Benchmark 或数据集 | 主要指标 / 说明 |
+| --- | --- | --- | --- | --- |
+| 已完成 / 已报告 | Retrieval-augmented QA | Query Decompose -> Retrieve -> Answer；Query Decompose -> Retrieve -> Evidence -> Answer | Natural Questions (NQ), HotpotQA | normalized answer F1；比较 RL 训练前后在不同模型规模下的提升 |
+| 已完成 / 已报告 | Iterative agentic search | M-ASK: Plan -> Search -> Summary -> Update -> Answer；支持独立模型组和共享参数版本 | Natural Questions (NQ), HotpotQA | normalized answer F1；turn-level F1 / F1-delta reward；包含 HotpotQA 3B shared vs independent 对比 |
+| 已完成 / 已报告 | Reflective code generation | Iterative Plan -> Code -> Verify(tool) -> Reflect，最多三轮 | DeepCoder-style 可验证编程任务；处理后的 train/test split 来源包括 TACO-Verified、PrimeIntellect SYNTHETIC-1 和 LiveCodeBench v5 | executable-test pass rate、held-out all-passed rate、平均 verifier 轮数 |
+| 已实现 / 扩展中 | Math reasoning | Solver -> Verifier -> Refiner -> Finalizer | DeepScaleR-style 训练数据；MATH-500、AIME24、AIME25、AIME26、AMC23 | final-answer accuracy + format reward；配置和数据适配器已在仓库中，更多实验正在扩展 |
+| 计划 / 进行中 | Embodied-agent tasks | 工具/环境交互式 workflow | ALFWorld | task success / completion rate；用于验证长程环境交互任务 |
+| 计划 / 进行中 | Web-interaction tasks | search/browse/shop 交互式 workflow | WebShop | WebShop reward 或 success score；用于验证网页动作和工具调用的 credit assignment |
+| 计划 / 进行中 | Software-engineering tasks | 多 agent issue localization、coding、verification、repair | SWE-bench | resolved issue rate / test pass rate；用于验证长程代码仓库级 workflow |
+
 ## 示例 1：代码生成 reflective workflow
 
 这个配置训练三个非共享 LLM agent：

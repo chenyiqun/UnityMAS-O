@@ -224,6 +224,20 @@ logs/star_ppo/run_rank<rank>_<timestamp>.log
 | Math multi-agent | `star_math_solver_verifier_refiner_finalizer_trainer` | solver, verifier, refiner, finalizer | final-answer accuracy + format reward |
 | Query decomposition RAG | `star_query_decompose_retrieve_answer_f1_trainer` and related configs | query decomposer, answerer, optional evidence/summarizer | final-answer F1 + node-level format reward |
 
+## Tasks and Benchmarks
+
+The current repository focuses on verifiable workflows where task rewards can be computed from answer matching, retrieval QA metrics, executable tests, or rule-based graders. The table below separates completed/reported experiments from tasks that are implemented or planned for future expansion.
+
+| Status | Task family | Workflow / setting | Benchmarks or datasets | Main metrics / notes |
+| --- | --- | --- | --- | --- |
+| Completed / reported | Retrieval-augmented QA | Query Decompose -> Retrieve -> Answer; Query Decompose -> Retrieve -> Evidence -> Answer | Natural Questions (NQ), HotpotQA | Normalized answer F1; before/after multi-agent RL comparison across model scales |
+| Completed / reported | Iterative agentic search | M-ASK: Plan -> Search -> Summary -> Update -> Answer; independent and shared-parameter variants | Natural Questions (NQ), HotpotQA | Normalized answer F1; turn-level F1 and F1-delta reward; includes HotpotQA shared vs independent 3B comparison |
+| Completed / reported | Reflective code generation | Iterative Plan -> Code -> Verify(tool) -> Reflect, up to three turns | DeepCoder-style verifiable programming tasks; processed train/test split derived from TACO-Verified, PrimeIntellect SYNTHETIC-1, and LiveCodeBench v5 | Executable-test pass rate, held-out all-passed rate, and average verifier turns |
+| Implemented / expanding | Math reasoning | Solver -> Verifier -> Refiner -> Finalizer | DeepScaleR-style training data; MATH-500, AIME24, AIME25, AIME26, AMC23 | Final-answer accuracy and format reward; configs/dataset adapters are present, broader experiments are being expanded |
+| Planned / ongoing | Embodied-agent tasks | Tool/environment-interaction workflows | ALFWorld | Task success / completion rate; intended to test long-horizon environment interaction |
+| Planned / ongoing | Web-interaction tasks | Search/browse/shop interaction workflows | WebShop | WebShop reward or success score; intended to test web action and tool-use credit assignment |
+| Planned / ongoing | Software-engineering tasks | Multi-agent issue localization, coding, verification, and repair | SWE-bench | Resolved issue rate / test pass rate; intended to test long-horizon codebase-level workflows |
+
 ## Example 1: Reflective Code Generation
 
 This config trains three non-shared LLM agents:
