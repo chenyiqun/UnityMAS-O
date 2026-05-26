@@ -89,12 +89,7 @@ class StarTaskRunner:
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
 
-        reward_fn = load_reward_manager(
-            config,
-            tokenizer,
-            num_examine=0,
-            **config.reward_model.get("reward_kwargs", {}),
-        )
+        reward_fn = load_reward_manager(config, tokenizer)
 
         train_dataset = create_rl_dataset(
             config.data.train_files,
