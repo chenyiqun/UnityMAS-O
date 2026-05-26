@@ -9,17 +9,14 @@ import torch
 from ray.util.collective import collective
 
 from verl import DataProto
-from verl.experimental.one_step_off_policy.fsdp_workers import (
-    CriticWorker,
-    DetachActorWorker,
-    DetachAsyncRolloutWorker,
-    RewardModelWorker,
-)
+from verl.experimental.separation.engine_workers import DetachActorWorker
 from verl.experimental.star_ppo.trajectory_buffer import TrajectoryBuffer, TrajectoryEntry
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils.device import get_torch_device
 from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from verl.utils.ray_utils import get_event_loop
+from verl.workers.config.engine import TrainingWorkerConfig
+from verl.workers.engine_workers import TrainingWorker
 
 __all__ = [
     "StarDetachActorWorker",
@@ -77,6 +74,54 @@ def _get_vllm_inference_model(rollout):
     return None
 
 
+DetachAsyncRolloutWorker = DetachActorWorker
+
+
+class CriticWorker(TrainingWorker):
+    """Compatibility wrapper exposing the old STAR critic worker surface."""
+
+    def __init__(self, config):
+        self.critic_config = config
+        worker_config = TrainingWorkerConfig(
+            model_type="value_model",
+            model_config=config.model,
+            engine_config=config.engine,
+            optimizer_config=config.optim,
+            checkpoint_config=config.checkpoint,
+            profiler_config=getattr(config, "profiler", None),
+        )
+        super().__init__(config=worker_config)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        return self.reset()
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    def compute_values(self, data):
+        return self.infer_batch(data)
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
+    def update_critic(self, data):
+        import verl.utils.tensordict_utils as tu
+
+        ppo_mini_batch_size = self.critic_config.ppo_mini_batch_size
+        ppo_epochs = self.critic_config.ppo_epochs
+        seed = self.critic_config.data_loader_seed
+        shuffle = self.critic_config.shuffle
+        tu.assign_non_tensor(
+            data,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=ppo_epochs,
+            seed=seed,
+            dataloader_kwargs={"shuffle": shuffle},
+        )
+        return self.train_mini_batch(data)
+
+
+RewardModelWorker = TrainingWorker
+
+
 class StarDetachActorWorker(DetachActorWorker):
     """Actor worker alias for star PPO."""
 
@@ -84,6 +129,20 @@ class StarDetachActorWorker(DetachActorWorker):
         super().__init__(config=config, role=role)
         self._weight_sync_group_name = "actor_rollout"
         self._weight_sync_mode = "collective"
+
+    def _get_actor_params(self):
+        assert self._is_actor
+        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+        return dict(per_tensor_param)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_actor_weights_info(self):
+        assert self._is_actor
+        if hasattr(self, "_weights_info"):
+            return self._weights_info
+        params = self._get_actor_params()
+        self._weights_info = [(key, tensor.size(), tensor.dtype) for key, tensor in params.items()]
+        return self._weights_info
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_weight_sync_group_name(self, group_name: str):
@@ -98,7 +157,7 @@ class StarDetachActorWorker(DetachActorWorker):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
         assert hasattr(self, "_weights_info") and self._weights_info is not None
 
-        if self._is_actor and self._is_offload_param:
+        if self._is_actor and getattr(self, "_is_offload_param", False):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         params = self._get_actor_params() if self._is_actor else None
 
@@ -161,7 +220,7 @@ class StarDetachActorWorker(DetachActorWorker):
                         elif rollout_name == "sglang":
                             if inference_model is not None:
                                 loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
-            if self._is_actor and self._is_offload_param:
+            if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
             return
@@ -177,7 +236,7 @@ class StarDetachActorWorker(DetachActorWorker):
                     yield key, tensor
 
             loop.run_until_complete(self.rollout.update_weights(_iter_collective_weights()))
-            if self._is_actor and self._is_offload_param:
+            if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
             return
@@ -204,7 +263,7 @@ class StarDetachActorWorker(DetachActorWorker):
                     if inference_model is not None:
                         loop.run_until_complete(self.update_weights(inference_model, [(key, tensor)]))
 
-        if self._is_actor and self._is_offload_param:
+        if self._is_actor and getattr(self, "_is_offload_param", False):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         get_torch_device().empty_cache()
 
@@ -733,7 +792,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
         assert hasattr(self, "_weights_info") and self._weights_info is not None
 
-        if self._is_actor and self._is_offload_param:
+        if self._is_actor and getattr(self, "_is_offload_param", False):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
         params = self._get_actor_params() if self._is_actor else None
 
@@ -796,7 +855,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                         elif rollout_name == "sglang":
                             if inference_model is not None:
                                 loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
-            if self._is_actor and self._is_offload_param:
+            if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
             return
@@ -812,7 +871,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                     yield key, tensor
 
             loop.run_until_complete(self.rollout.update_weights(_iter_collective_weights()))
-            if self._is_actor and self._is_offload_param:
+            if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
             return
@@ -839,6 +898,6 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                     if inference_model is not None:
                         loop.run_until_complete(self.update_weights(inference_model, [(key, tensor)]))
 
-        if self._is_actor and self._is_offload_param:
+        if self._is_actor and getattr(self, "_is_offload_param", False):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
         get_torch_device().empty_cache()
