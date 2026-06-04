@@ -43,6 +43,7 @@ class ModelWorkerContext:
     resource_pool: RayResourcePool
     actor_wg: RayWorkerGroup
     rollout_wg: RayWorkerGroup
+    llm_server_manager: Optional[Any] = None
     rollout_manager: Optional[Any] = None
     critic_wg: Optional[RayWorkerGroup] = None
     ref_policy_wg: Optional[RayWorkerGroup] = None
@@ -56,6 +57,14 @@ class RolloutMicrobatchRequest:
     timing_state: Optional[dict[str, Any]]
     future: asyncio.Future
     enqueue_ts: float
+
+
+class _StarAsyncRolloutManagerAdapter:
+    def __init__(self, manager):
+        self._manager = manager
+
+    async def generate_sequences_async(self, prompts: DataProto) -> DataProto:
+        return await self._manager.generate_sequences(prompts)
 
 
 class StarRayTrainer:
@@ -446,10 +455,17 @@ class StarRayTrainer:
             actor_rollout_cfg = actor_rollout_cfg_by_model_id[spec.model_id]
             rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode") or "async")
             if rollout_mode == "async":
-                from verl.experimental.one_step_off_policy.agent_loop.agent_loop import OneStepOffAgentLoopManager
+                from verl.experimental.agent_loop import AgentLoopManager
+                from verl.workers.rollout.llm_server import LLMServerManager
 
                 manager_cfg = self._build_manager_cfg_for_model(actor_rollout_cfg)
-                ctx.rollout_manager = OneStepOffAgentLoopManager(config=manager_cfg, worker_group=ctx.rollout_wg)
+                ctx.llm_server_manager = LLMServerManager.create(config=manager_cfg, worker_group=ctx.rollout_wg)
+                agent_loop_manager = AgentLoopManager.create(
+                    config=manager_cfg,
+                    llm_client=ctx.llm_server_manager.get_client(),
+                    reward_loop_worker_handles=None,
+                )
+                ctx.rollout_manager = _StarAsyncRolloutManagerAdapter(agent_loop_manager)
                 print(f"[star] async rollout manager ready model={spec.model_id}")
 
             self._init_weight_sync_group(spec.model_id, ctx)
