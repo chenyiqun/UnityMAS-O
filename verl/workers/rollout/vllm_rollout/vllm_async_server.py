@@ -1096,4 +1096,7 @@ class vLLMReplica(RolloutReplica):
 
     def _get_server_name_prefix(self) -> str:
         """Return the Ray actor name prefix (e.g. 'vllm_')."""
+        custom_prefix = self.config.get("custom", {}).get("server_name_prefix", None)
+        if custom_prefix:
+            return str(custom_prefix)
         return "vllm_"
