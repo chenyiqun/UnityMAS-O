@@ -291,6 +291,32 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         self._weight_sync_group_name = "actor_rollout"
         self._weight_sync_mode = "collective"
 
+    def _register_star_rollout_dispatch_info(self):
+        rollout = getattr(self, "rollout", None)
+        if rollout is not None and hasattr(rollout, "replica_rank") and hasattr(rollout, "rollout_rank"):
+            dp_rank = int(rollout.replica_rank)
+            is_collect = int(rollout.rollout_rank) == 0
+        else:
+            rollout_cfg = self.config.rollout
+            infer_tp = int(rollout_cfg.tensor_model_parallel_size) * int(rollout_cfg.data_parallel_size)
+            infer_pp = int(rollout_cfg.pipeline_model_parallel_size)
+            infer_world_size = infer_tp * infer_pp
+            dp_rank = int(torch.distributed.get_rank()) // infer_world_size
+            is_collect = int(torch.distributed.get_rank()) % infer_world_size == 0
+
+        try:
+            self._register_dispatch_collect_info("rollout", dp_rank=dp_rank, is_collect=is_collect)
+        except ValueError as exc:
+            if "has been registered" not in str(exc):
+                raise
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        result = super().init_model()
+        if getattr(self, "_is_rollout", False):
+            self._register_star_rollout_dispatch_info()
+        return result
+
     def _decode_action_text(self, response_tokens: torch.Tensor) -> str:
         if response_tokens is None:
             return ""
