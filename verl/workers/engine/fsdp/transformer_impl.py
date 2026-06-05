@@ -24,7 +24,6 @@ from typing import Callable, ContextManager, Optional
 
 import torch
 import torch.distributed
-from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp.api import FullStateDictConfig, ShardedStateDictConfig, StateDictType
@@ -299,12 +298,12 @@ class FSDPEngine(BaseEngine):
         return module
 
     def _build_lora_module(self, module):
+        from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+
         module.enable_input_require_grads()
 
         lora_adapter_path = getattr(self.model_config, "lora_adapter_path", None)
         if lora_adapter_path is not None:
-            from peft import PeftModel
-
             from verl.utils.fs import copy_to_local
 
             print(f"Loading pre-trained LoRA adapter to from: {lora_adapter_path}")
