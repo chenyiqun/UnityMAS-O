@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 
 from packaging import version as vs
@@ -41,14 +42,10 @@ if package_version is None:
 elif is_npu_available:
     # sleep_mode=2 is not supported on vllm-ascend for now, will remove this restriction when this ability is ready.
     VLLM_SLEEP_LEVEL = 1
-    from vllm import LLM
-    from vllm.distributed import parallel_state
 elif vs.parse(package_version) >= vs.parse("0.7.0"):
     vllm_version = package_version
     if vs.parse(package_version) >= vs.parse("0.8.5"):
         VLLM_SLEEP_LEVEL = 2
-    from vllm import LLM
-    from vllm.distributed import parallel_state
 else:
     if vs.parse(package_version) in [vs.parse("0.5.4"), vs.parse("0.6.3")]:
         raise ValueError(
@@ -62,3 +59,13 @@ else:
         )
 
 __all__ = ["LLM", "parallel_state"]
+
+
+def __getattr__(name):
+    if name == "LLM":
+        from vllm import LLM
+
+        return LLM
+    if name == "parallel_state":
+        return import_module("vllm.distributed.parallel_state")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
