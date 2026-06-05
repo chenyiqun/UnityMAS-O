@@ -50,7 +50,7 @@ python3 -m verl.experimental.star_ppo.main_ppo \
   "critic.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
   "actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
   "actor_rollout_ref.ref.fsdp_config.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
-  "critic.model.fsdp_config.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
+  "critic.fsdp.ulysses_sequence_parallel_size=${ULYSSES_SEQUENCE_PARALLEL_SIZE}" \
   "actor_rollout_ref.model.enable_activation_offload=${ENABLE_ACTIVATION_OFFLOAD}" \
   "critic.model.enable_activation_offload=${ENABLE_ACTIVATION_OFFLOAD}" \
   "data.train_files=${TRAIN_JSONL}" \
