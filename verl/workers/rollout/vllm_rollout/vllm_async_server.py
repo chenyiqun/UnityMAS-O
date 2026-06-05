@@ -57,7 +57,10 @@ _VLLM_VERSION = version.parse(vllm.__version__)
 
 
 if _VLLM_VERSION > version.parse("0.11.0"):
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    try:
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+    except ModuleNotFoundError:
+        from vllm.utils import FlexibleArgumentParser
 
     if _VLLM_VERSION == version.parse("0.12.0"):
         from vllm.entrypoints.harmony_utils import get_encoding
