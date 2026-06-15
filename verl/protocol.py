@@ -42,6 +42,8 @@ from verl.utils.transferqueue_utils import BatchMeta, KVBatchMeta
 
 __all__ = ["DataProto", "union_tensor_dict"]
 
+_DATAPROTO_POP_MISSING = object()
+
 with contextlib.suppress(Exception):
     tensordict.set_lazy_legacy(False).set()
     if parse_version(tensordict.__version__) < parse_version("0.10.0"):
@@ -718,21 +720,50 @@ class DataProto:
         # Return a new DataProto object
         return type(self)(batch=sliced_batch, non_tensor_batch=sliced_non_tensor, meta_info=self.meta_info)
 
-    def pop(self, batch_keys=None, non_tensor_batch_keys=None, meta_info_keys=None) -> "DataProto":
-        """Pop a subset of the DataProto via `batch_keys` and `meta_info_keys`
+    def pop(
+        self,
+        batch_keys=None,
+        non_tensor_batch_keys=_DATAPROTO_POP_MISSING,
+        meta_info_keys=None,
+    ) -> Any:
+        """Pop data from the DataProto.
+
+        This preserves the legacy subset-pop API:
+
+            data.pop(batch_keys=["input_ids"], meta_info_keys=["uid"])
+
+        It also supports dict-like pop semantics for compatibility with
+        TensorDict helpers used by newer worker code:
+
+            data.pop("no_lora_adapter", default)
 
         Args:
-            batch_keys (list, optional): a list of strings indicating the keys in batch to pop
-            meta_info_keys (list, optional): a list of keys indicating the meta info to pop
+            batch_keys (list or str, optional): keys in batch to pop, or a single dict-like key
+            non_tensor_batch_keys (list, optional): keys in non_tensor_batch to pop, or the dict-like default
+            meta_info_keys (list, optional): keys indicating the meta info to pop
 
         Returns:
-            DataProto: the DataProto with the poped batch_keys and meta_info_keys
+            DataProto for the legacy subset-pop API, otherwise the popped value.
         """
+        if isinstance(batch_keys, str):
+            key = batch_keys
+            default = non_tensor_batch_keys
+
+            if self.batch is not None and key in self.batch.keys():
+                return self.batch.pop(key)
+            if key in self.non_tensor_batch:
+                return self.non_tensor_batch.pop(key)
+            if key in self.meta_info:
+                return self.meta_info.pop(key)
+            if default is not _DATAPROTO_POP_MISSING:
+                return default
+            raise KeyError(key)
+
         if batch_keys is None:
             batch_keys = []
         if meta_info_keys is None:
             meta_info_keys = []
-        if non_tensor_batch_keys is None:
+        if non_tensor_batch_keys is _DATAPROTO_POP_MISSING or non_tensor_batch_keys is None:
             non_tensor_batch_keys = []
 
         tensors = {}

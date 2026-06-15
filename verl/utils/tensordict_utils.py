@@ -690,9 +690,10 @@ def get(tensordict: TensorDict, key: str, default=None) -> Any:
         return output
     elif isinstance(output, NonTensorStack):
         return output.tolist()
-    else:
-        assert isinstance(output, NonTensorData)
+    elif isinstance(output, NonTensorData):
         return output.data
+    else:
+        return output
 
 
 def get_keys(tensordict: TensorDict, keys: Iterable[str]) -> TensorDict:
@@ -764,9 +765,10 @@ def pop(tensordict: TensorDict, key: str, default=None) -> Any:
         return output
     elif isinstance(output, NonTensorStack):
         return output.tolist()
-    else:
-        assert isinstance(output, NonTensorData)
+    elif isinstance(output, NonTensorData):
         return output.data
+    else:
+        return output
 
 
 def pop_keys(tensordict: TensorDict, keys: Iterable[str]) -> TensorDict:

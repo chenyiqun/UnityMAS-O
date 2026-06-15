@@ -367,6 +367,21 @@ def test_pop():
     assert dataset.meta_info.keys() == {"1"}
 
 
+def test_pop_dict_like_compatibility():
+    obs = torch.randn(2, 3)
+    labels = ["a", "b"]
+    dataset = DataProto.from_dict(tensors={"obs": obs}, non_tensors={"labels": labels}, meta_info={"flag": False})
+    missing = object()
+
+    assert tu.pop(dataset, "missing", missing) is missing
+    assert torch.equal(tu.pop(dataset, "obs"), obs)
+    assert (tu.pop(dataset, "labels") == labels).all()
+    assert tu.pop(dataset, "flag") is False
+
+    with pytest.raises(KeyError):
+        dataset.pop("missing")
+
+
 def test_repeat():
     # Create a DataProto object with some batch and non-tensor data
     obs = torch.tensor([[1, 2], [3, 4], [5, 6]])
