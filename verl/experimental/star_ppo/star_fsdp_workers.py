@@ -27,6 +27,7 @@ __all__ = [
 
 
 _LOCAL_PAIR_END = "__star_local_pair_end__"
+_LOCAL_PAIR_ERROR = "__star_local_pair_error__"
 _LOCAL_PAIR_CHANNELS = {}
 _LOCAL_PAIR_CHANNELS_LOCK = threading.Lock()
 
@@ -191,27 +192,42 @@ class StarDetachActorWorker(DetachActorWorker):
         if sync_mode == "local_pair":
             channel = _get_local_pair_channel(group_name)
             if self._is_actor:
-                try:
-                    for key, shape, dtype in self._weights_info:
-                        assert key in params
-                        origin_data = params[key]
-                        if hasattr(origin_data, "full_tensor"):
-                            origin_data = origin_data.full_tensor()
-                        tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-                        tensor.copy_(origin_data)
-                        channel.put((key, tensor))
-                finally:
-                    channel.put((_LOCAL_PAIR_END, None))
+                def _produce_local_pair_weights():
+                    try:
+                        for key, shape, dtype in self._weights_info:
+                            assert key in params
+                            origin_data = params[key]
+                            if hasattr(origin_data, "full_tensor"):
+                                origin_data = origin_data.full_tensor()
+                            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                            tensor.copy_(origin_data)
+                            channel.put((key, tensor))
+                    except BaseException as exc:
+                        channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
+                    finally:
+                        channel.put((_LOCAL_PAIR_END, None))
+                        if getattr(self, "_is_offload_param", False):
+                            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                        get_torch_device().empty_cache()
+
+                threading.Thread(target=_produce_local_pair_weights, daemon=True).start()
+                return
             else:
                 def _iter_local_pair_weights():
                     for expected_key, _, _ in self._weights_info:
                         recv_key, tensor = channel.get()
+                        if recv_key == _LOCAL_PAIR_ERROR:
+                            raise RuntimeError(f"local_pair actor producer failed: {tensor}")
+                        if recv_key == _LOCAL_PAIR_END:
+                            raise RuntimeError(f"local_pair weight stream ended before {expected_key}")
                         if recv_key != expected_key:
                             raise RuntimeError(
                                 f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
                             )
                         yield expected_key, tensor
                     end_key, _ = channel.get()
+                    if end_key == _LOCAL_PAIR_ERROR:
+                        raise RuntimeError("local_pair actor producer failed after all expected weights")
                     if end_key != _LOCAL_PAIR_END:
                         raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
 
@@ -856,27 +872,42 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         if sync_mode == "local_pair":
             channel = _get_local_pair_channel(group_name)
             if self._is_actor:
-                try:
-                    for key, shape, dtype in self._weights_info:
-                        assert key in params
-                        origin_data = params[key]
-                        if hasattr(origin_data, "full_tensor"):
-                            origin_data = origin_data.full_tensor()
-                        tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-                        tensor.copy_(origin_data)
-                        channel.put((key, tensor))
-                finally:
-                    channel.put((_LOCAL_PAIR_END, None))
+                def _produce_local_pair_weights():
+                    try:
+                        for key, shape, dtype in self._weights_info:
+                            assert key in params
+                            origin_data = params[key]
+                            if hasattr(origin_data, "full_tensor"):
+                                origin_data = origin_data.full_tensor()
+                            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                            tensor.copy_(origin_data)
+                            channel.put((key, tensor))
+                    except BaseException as exc:
+                        channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
+                    finally:
+                        channel.put((_LOCAL_PAIR_END, None))
+                        if getattr(self, "_is_offload_param", False):
+                            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+                        get_torch_device().empty_cache()
+
+                threading.Thread(target=_produce_local_pair_weights, daemon=True).start()
+                return
             else:
                 def _iter_local_pair_weights():
                     for expected_key, _, _ in self._weights_info:
                         recv_key, tensor = channel.get()
+                        if recv_key == _LOCAL_PAIR_ERROR:
+                            raise RuntimeError(f"local_pair actor producer failed: {tensor}")
+                        if recv_key == _LOCAL_PAIR_END:
+                            raise RuntimeError(f"local_pair weight stream ended before {expected_key}")
                         if recv_key != expected_key:
                             raise RuntimeError(
                                 f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
                             )
                         yield expected_key, tensor
                     end_key, _ = channel.get()
+                    if end_key == _LOCAL_PAIR_ERROR:
+                        raise RuntimeError("local_pair actor producer failed after all expected weights")
                     if end_key != _LOCAL_PAIR_END:
                         raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
 
