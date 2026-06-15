@@ -145,6 +145,10 @@ class StarDetachActorWorker(DetachActorWorker):
         return self._weights_info
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_actor_weights_info(self, weights_info):
+        self._weights_info = weights_info
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_weight_sync_group_name(self, group_name: str):
         self._weight_sync_group_name = str(group_name)
 
@@ -316,6 +320,10 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         if getattr(self, "_is_rollout", False):
             self._register_star_rollout_dispatch_info()
         return result
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_actor_weights_info(self, weights_info):
+        self._weights_info = weights_info
 
     def _decode_action_text(self, response_tokens: torch.Tensor) -> str:
         if response_tokens is None:

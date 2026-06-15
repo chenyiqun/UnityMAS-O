@@ -502,12 +502,36 @@ class StarRayTrainer:
                 _post_init_model(spec)
 
     def _init_weight_sync_group(self, model_id: str, ctx: ModelWorkerContext):
-        weights_info = ctx.actor_wg.get_actor_weights_info()[0]
-        ctx.rollout_wg.set_actor_weights_info(weights_info)
+        def _call_wg_method(wg: RayWorkerGroup, method_names: list[str], *args):
+            for method_name in method_names:
+                if hasattr(wg, method_name):
+                    return getattr(wg, method_name)(*args)
+            raise AttributeError(
+                f"{type(wg).__name__} has none of methods={method_names}; "
+                f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'actor' in name]}"
+            )
+
+        weights_info = _call_wg_method(
+            ctx.actor_wg,
+            ["get_actor_weights_info", "actor_get_actor_weights_info"],
+        )[0]
+        _call_wg_method(
+            ctx.rollout_wg,
+            ["set_actor_weights_info", "rollout_set_actor_weights_info", "actor_set_actor_weights_info"],
+            weights_info,
+        )
 
         group_name = f"actor_rollout_{model_id}"
-        ctx.actor_wg.set_weight_sync_group_name(group_name)
-        ctx.rollout_wg.set_weight_sync_group_name(group_name)
+        _call_wg_method(
+            ctx.actor_wg,
+            ["set_weight_sync_group_name", "actor_set_weight_sync_group_name"],
+            group_name,
+        )
+        _call_wg_method(
+            ctx.rollout_wg,
+            ["set_weight_sync_group_name", "rollout_set_weight_sync_group_name", "actor_set_weight_sync_group_name"],
+            group_name,
+        )
 
         actor_rollout_workers = ctx.actor_wg.workers + ctx.rollout_wg.workers
         n_workers = len(actor_rollout_workers)
@@ -557,13 +581,21 @@ class StarRayTrainer:
             mode == "local_pair" or ((mode in {"auto", "stateless"}) and not collective_ready)
         )
         if use_local_pair:
-            ctx.actor_wg.set_weight_sync_mode("local_pair")
-            ctx.rollout_wg.set_weight_sync_mode("local_pair")
+            _call_wg_method(ctx.actor_wg, ["set_weight_sync_mode", "actor_set_weight_sync_mode"], "local_pair")
+            _call_wg_method(
+                ctx.rollout_wg,
+                ["set_weight_sync_mode", "rollout_set_weight_sync_mode", "actor_set_weight_sync_mode"],
+                "local_pair",
+            )
             print(f"[star] local_pair weight sync ready model={model_id} group={group_name}")
             return
 
-        ctx.actor_wg.set_weight_sync_mode("collective")
-        ctx.rollout_wg.set_weight_sync_mode("collective")
+        _call_wg_method(ctx.actor_wg, ["set_weight_sync_mode", "actor_set_weight_sync_mode"], "collective")
+        _call_wg_method(
+            ctx.rollout_wg,
+            ["set_weight_sync_mode", "rollout_set_weight_sync_mode", "actor_set_weight_sync_mode"],
+            "collective",
+        )
 
         need_stateless = self.device_name == "npu" and (mode in {"auto", "stateless"} or not collective_ready)
         if need_stateless:
@@ -599,8 +631,20 @@ class StarRayTrainer:
                 raise last_err
 
     def _sync_rollout_weights(self, model_id: str, ctx: ModelWorkerContext):
-        actor_refs = ctx.actor_wg.sync_rollout_weights()
-        rollout_refs = ctx.rollout_wg.sync_rollout_weights()
+        def _call_wg_method(wg: RayWorkerGroup, method_names: list[str]):
+            for method_name in method_names:
+                if hasattr(wg, method_name):
+                    return getattr(wg, method_name)()
+            raise AttributeError(
+                f"{type(wg).__name__} has none of methods={method_names}; "
+                f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
+            )
+
+        actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
+        rollout_refs = _call_wg_method(
+            ctx.rollout_wg,
+            ["sync_rollout_weights", "rollout_sync_rollout_weights", "actor_sync_rollout_weights"],
+        )
         self._ray_get_with_timeout(
             [actor_refs, rollout_refs],
             timeout_s=self._weight_sync_timeout_seconds,
