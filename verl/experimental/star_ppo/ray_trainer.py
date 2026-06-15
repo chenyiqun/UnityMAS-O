@@ -1744,12 +1744,35 @@ class StarRayTrainer:
         return {k: sums[k] / max(1, counts[k]) for k in sums}
 
     def _get_dp_size(self, worker_group, role: str) -> int:
-        if role not in worker_group._dispatch_info:
-            dp_rank_mapping = worker_group._query_dispatch_info(role)
-            worker_group._dispatch_info[role] = dp_rank_mapping
-        else:
-            dp_rank_mapping = worker_group._dispatch_info[role]
-        return max(dp_rank_mapping) + 1
+        fallback = max(
+            1,
+            int(
+                getattr(worker_group, "world_size", 0)
+                or len(getattr(worker_group, "workers", []) or [])
+                or 1
+            ),
+        )
+        try:
+            dispatch_info = getattr(worker_group, "_dispatch_info", {})
+            if role not in dispatch_info:
+                dp_rank_mapping = worker_group._query_dispatch_info(role)
+                dispatch_info[role] = dp_rank_mapping
+            else:
+                dp_rank_mapping = dispatch_info[role]
+        except Exception as exc:
+            print(
+                f"[star] failed to query dispatch dp size role={role}; "
+                f"fallback={fallback}; err={type(exc).__name__}: {exc}"
+            )
+            return fallback
+
+        if isinstance(dp_rank_mapping, int):
+            return max(1, dp_rank_mapping + 1)
+        try:
+            values = [int(x) for x in dp_rank_mapping]
+        except TypeError:
+            return fallback
+        return max(1, max(values) + 1) if values else fallback
 
     @staticmethod
     def _empty_batch() -> DataProto:

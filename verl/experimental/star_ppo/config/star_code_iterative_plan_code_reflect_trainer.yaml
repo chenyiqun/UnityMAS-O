@@ -49,6 +49,8 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
   rollout:
     name: ${oc.env:ROLLOUT_NAME,vllm}
+    dtype: ${oc.env:ROLLOUT_DTYPE,bfloat16}
+    enforce_eager: ${oc.decode:${oc.env:ROLLOUT_ENFORCE_EAGER,true}}
     max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,16384}}
     tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,2}}
     free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
@@ -57,7 +59,11 @@ actor_rollout_ref:
     gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.40}}
     max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,8192}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
+    enable_chunked_prefill: ${oc.decode:${oc.env:ROLLOUT_ENABLE_CHUNKED_PREFILL,false}}
     enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
+    engine_kwargs:
+      vllm:
+        disable_custom_all_reduce: ${oc.decode:${oc.env:ROLLOUT_DISABLE_CUSTOM_ALL_REDUCE,true}}
     checkpoint_engine:
       update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,3072}}
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,2}}
