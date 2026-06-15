@@ -1,3 +1,4 @@
+import asyncio
 import os
 import threading
 import time
@@ -61,6 +62,27 @@ def _get_local_pair_channel(group_name: str) -> _LocalPairChannel:
             chan = _LocalPairChannel()
             _LOCAL_PAIR_CHANNELS[group_name] = chan
         return chan
+
+
+def _run_coro_blocking(coro_factory):
+    loop = get_event_loop()
+    if not loop.is_running():
+        return loop.run_until_complete(coro_factory())
+
+    result = {}
+
+    def _runner():
+        try:
+            result["value"] = asyncio.run(coro_factory())
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 def _get_vllm_inference_model(rollout):
@@ -232,14 +254,18 @@ class StarDetachActorWorker(DetachActorWorker):
                         raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
 
                 if rollout_name == "vllm" and use_vllm_server_adapter:
-                    loop.run_until_complete(self.rollout.update_weights(_iter_local_pair_weights()))
+                    _run_coro_blocking(lambda: self.rollout.update_weights(_iter_local_pair_weights()))
                 else:
                     for expected_key, tensor in _iter_local_pair_weights():
                         if rollout_name == "vllm":
                             inference_model.load_weights([(expected_key, tensor)])
                         elif rollout_name == "sglang":
                             if inference_model is not None:
-                                loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
+                                _run_coro_blocking(
+                                    lambda weights=[(expected_key, tensor)]: self.update_weights(
+                                        inference_model, weights
+                                    )
+                                )
             if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
@@ -255,7 +281,7 @@ class StarDetachActorWorker(DetachActorWorker):
                         collective.broadcast(tensor, src_rank=0, group_name=group_name)
                     yield key, tensor
 
-            loop.run_until_complete(self.rollout.update_weights(_iter_collective_weights()))
+            _run_coro_blocking(lambda: self.rollout.update_weights(_iter_collective_weights()))
             if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
@@ -281,7 +307,9 @@ class StarDetachActorWorker(DetachActorWorker):
                     inference_model.load_weights([(key, tensor)])
                 elif rollout_name == "sglang":
                     if inference_model is not None:
-                        loop.run_until_complete(self.update_weights(inference_model, [(key, tensor)]))
+                        _run_coro_blocking(
+                            lambda weights=[(key, tensor)]: self.update_weights(inference_model, weights)
+                        )
 
         if self._is_actor and getattr(self, "_is_offload_param", False):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
@@ -912,14 +940,18 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                         raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
 
                 if rollout_name == "vllm" and use_vllm_server_adapter:
-                    loop.run_until_complete(self.rollout.update_weights(_iter_local_pair_weights()))
+                    _run_coro_blocking(lambda: self.rollout.update_weights(_iter_local_pair_weights()))
                 else:
                     for expected_key, tensor in _iter_local_pair_weights():
                         if rollout_name == "vllm":
                             inference_model.load_weights([(expected_key, tensor)])
                         elif rollout_name == "sglang":
                             if inference_model is not None:
-                                loop.run_until_complete(self.update_weights(inference_model, [(expected_key, tensor)]))
+                                _run_coro_blocking(
+                                    lambda weights=[(expected_key, tensor)]: self.update_weights(
+                                        inference_model, weights
+                                    )
+                                )
             if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
@@ -935,7 +967,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                         collective.broadcast(tensor, src_rank=0, group_name=group_name)
                     yield key, tensor
 
-            loop.run_until_complete(self.rollout.update_weights(_iter_collective_weights()))
+            _run_coro_blocking(lambda: self.rollout.update_weights(_iter_collective_weights()))
             if self._is_actor and getattr(self, "_is_offload_param", False):
                 offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             get_torch_device().empty_cache()
@@ -961,7 +993,9 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                     inference_model.load_weights([(key, tensor)])
                 elif rollout_name == "sglang":
                     if inference_model is not None:
-                        loop.run_until_complete(self.update_weights(inference_model, [(key, tensor)]))
+                        _run_coro_blocking(
+                            lambda weights=[(key, tensor)]: self.update_weights(inference_model, weights)
+                        )
 
         if self._is_actor and getattr(self, "_is_offload_param", False):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
