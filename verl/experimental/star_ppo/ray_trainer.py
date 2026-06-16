@@ -29,12 +29,14 @@ from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_response_mask
 from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy
+from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.device import get_nccl_backend
 from verl.utils.import_utils import load_extern_object
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
 from verl.utils.tracking import Tracking
+from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
 
 @dataclass
@@ -1962,6 +1964,102 @@ class StarRayTrainer:
         )
         return batch
 
+    @staticmethod
+    def _to_ppo_worker_batch(batch: DataProto):
+        """Convert STAR's padded driver batch to the no-padding worker format."""
+        loss_mask = None
+        if batch.batch is not None and "loss_mask" in batch.batch.keys():
+            loss_mask = batch.batch["loss_mask"]
+
+        batch_td = left_right_2_no_padding(batch.to_tensordict())
+        if loss_mask is not None:
+            batch_td["loss_mask"] = loss_mask
+        return batch_td
+
+    @staticmethod
+    def _extract_worker_metrics(output) -> dict[str, float]:
+        try:
+            metrics = tu.get(output, "metrics")
+        except Exception:
+            metrics = None
+        if metrics is None and isinstance(output, DataProto):
+            metrics = output.meta_info.get("metrics", {})
+        return metrics or {}
+
+    def _compute_old_log_prob_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
+        batch_td = self._to_ppo_worker_batch(batch)
+        calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=False,
+            calculate_sum_pi_squared=calculate_sum_pi_squared,
+            compute_loss=False,
+        )
+
+        output = ctx.actor_wg.compute_log_prob(batch_td)
+        log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td).float()
+        result = {"old_log_probs": log_probs}
+
+        routed_experts = tu.get(output, "routed_experts")
+        if routed_experts is not None:
+            result["routed_experts"] = routed_experts
+        sum_pi_squared = tu.get(output, "sum_pi_squared") if calculate_sum_pi_squared else None
+        if sum_pi_squared is not None:
+            result["sum_pi_squared"] = no_padding_2_padding(sum_pi_squared, batch_td).float()
+
+        return DataProto.from_tensordict(tu.get_tensordict(result))
+
+    def _compute_ref_log_prob_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
+        batch_td = self._to_ppo_worker_batch(batch)
+        tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
+        output = ctx.ref_policy_wg.compute_ref_log_prob(batch_td)
+        log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td).float()
+        return DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": log_probs}))
+
+    def _compute_values_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
+        batch_td = self._to_ppo_worker_batch(batch)
+        tu.assign_non_tensor(batch_td, compute_loss=False)
+        output = ctx.critic_wg.compute_values(batch_td)
+        values = no_padding_2_padding(tu.get(output, "values"), batch_td).float()
+        return DataProto.from_tensordict(tu.get_tensordict({"values": values}))
+
+    def _update_critic_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
+        batch_td = self._to_ppo_worker_batch(batch)
+        ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        tu.assign_non_tensor(
+            batch_td,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=self.config.critic.ppo_epochs,
+            seed=self.config.critic.data_loader_seed,
+            dataloader_kwargs={"shuffle": self.config.critic.shuffle},
+        )
+        output = ctx.critic_wg.update_critic(batch_td)
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": self._extract_worker_metrics(output)})
+
+    def _update_actor_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        batch.meta_info["multi_turn"] = rollout_cfg.multi_turn.enable
+        batch.meta_info["temperature"] = rollout_cfg.temperature
+
+        batch_td = self._to_ppo_worker_batch(batch)
+        actor_cfg = self.config.actor_rollout_ref.actor
+        calculate_entropy = actor_cfg.calculate_entropy or (actor_cfg.entropy_coeff != 0.0)
+        ppo_mini_batch_size = actor_cfg.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        tu.assign_non_tensor(
+            batch_td,
+            calculate_entropy=calculate_entropy,
+            distillation_use_topk=False,
+            global_batch_size=ppo_mini_batch_size,
+            mini_batch_size=ppo_mini_batch_size,
+            epochs=actor_cfg.ppo_epochs,
+            seed=actor_cfg.data_loader_seed,
+            dataloader_kwargs={"shuffle": actor_cfg.shuffle},
+            compute_loss=True,
+        )
+        output = ctx.actor_wg.update_actor(batch_td)
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": self._extract_worker_metrics(output)})
+
     def _build_ready_train_batch_from_local_buffer(self, model_id: str, max_items: int = 0) -> DataProto:
         local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
         if local_buffer is None:
@@ -2069,17 +2167,15 @@ class StarRayTrainer:
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-        old_log_prob = ctx.actor_wg.compute_log_prob(batch)
-        if "entropys" in old_log_prob.batch.keys():
-            old_log_prob.batch.pop("entropys")
+        old_log_prob = self._compute_old_log_prob_for_model(ctx, batch)
         batch = batch.union(old_log_prob)
 
         if self.use_reference_policy and ctx.ref_policy_wg is not None:
-            ref_log_prob = ctx.ref_policy_wg.compute_ref_log_prob(batch)
+            ref_log_prob = self._compute_ref_log_prob_for_model(ctx, batch)
             batch = batch.union(ref_log_prob)
 
         if self.use_critic and ctx.critic_wg is not None:
-            values = ctx.critic_wg.compute_values(batch)
+            values = self._compute_values_for_model(ctx, batch)
             batch = batch.union(values)
 
         if self.config.algorithm.use_kl_in_reward and "ref_log_prob" in batch.batch.keys():
@@ -2117,16 +2213,13 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/agent/{agent_id}/samples"] = float(np.sum(mask))
 
         if self.use_critic and ctx.critic_wg is not None:
-            critic_output = ctx.critic_wg.update_critic(batch)
+            critic_output = self._update_critic_for_model(ctx, batch)
             critic_metrics = reduce_metrics(critic_output.meta_info.get("metrics", {}))
             for key, val in critic_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
 
         if self.config.trainer.critic_warmup <= global_step:
-            rollout_cfg = self.config.actor_rollout_ref.rollout
-            batch.meta_info["multi_turn"] = rollout_cfg.multi_turn.enable
-            batch.meta_info["temperature"] = rollout_cfg.temperature
-            actor_output = ctx.actor_wg.update_actor(batch)
+            actor_output = self._update_actor_for_model(ctx, batch)
             actor_metrics = reduce_metrics(actor_output.meta_info.get("metrics", {}))
             for key, val in actor_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
