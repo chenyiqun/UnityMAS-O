@@ -382,6 +382,29 @@ def test_pop_dict_like_compatibility():
         dataset.pop("missing")
 
 
+def test_dataproto_dict_like_key_access_and_assignment():
+    obs = torch.randn(2, 3)
+    labels = ["a", "b"]
+    dataset = DataProto.from_dict(tensors={"obs": obs}, non_tensors={"labels": labels}, meta_info={"flag": False})
+
+    assert "obs" in dataset
+    assert "labels" in dataset
+    assert "flag" in dataset
+    assert "missing" not in dataset
+    assert dataset.keys() == {"obs", "labels", "flag"}
+    assert torch.equal(tu.get(dataset, "obs"), obs)
+    assert (tu.get(dataset, "labels") == labels).all()
+    assert tu.get(dataset, "flag") is False
+    assert tu.get(dataset, "missing", "default") == "default"
+
+    for key, val in {"use_remove_padding": True, "max_token_len_per_gpu": 128}.items():
+        if key not in dataset.keys():
+            tu.assign_non_tensor(dataset, **{key: val})
+
+    assert dataset.meta_info["use_remove_padding"] is True
+    assert dataset.meta_info["max_token_len_per_gpu"] == 128
+
+
 def test_repeat():
     # Create a DataProto object with some batch and non-tensor data
     obs = torch.tensor([[1, 2], [3, 4], [5, 6]])

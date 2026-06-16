@@ -342,6 +342,28 @@ class DataProto:
         else:
             return 0
 
+    def keys(self):
+        """Return the union of tensor, non-tensor, and metadata keys."""
+        keys = set()
+        if self.batch is not None:
+            keys.update(self.batch.keys())
+        keys.update(self.non_tensor_batch.keys())
+        keys.update(self.meta_info.keys())
+        return keys
+
+    def __contains__(self, key):
+        return key in self.keys()
+
+    def get(self, key, default=None):
+        """Dict-like lookup across tensor, non-tensor, and metadata fields."""
+        if self.batch is not None and key in self.batch.keys():
+            return self.batch.get(key)
+        if key in self.non_tensor_batch:
+            return self.non_tensor_batch[key]
+        if key in self.meta_info:
+            return self.meta_info[key]
+        return default
+
     def __getitem__(self, item):
         """
         Enhanced indexing for DataProto objects.

@@ -23,6 +23,10 @@ from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 
+def _is_dataproto_like(data) -> bool:
+    return all(hasattr(data, attr) for attr in ("batch", "non_tensor_batch", "meta_info"))
+
+
 def assign_non_tensor_data(tensor_dict: TensorDict, key, val):
     """Assign a single non-tensor value to a TensorDict.
 
@@ -94,6 +98,20 @@ def assign_non_tensor(tensor_dict: TensorDict, **kwargs):
         ...     turn_scores=[[], [0.5, 0.8], [0.9]]  # Nested list
         ... )
     """
+    if _is_dataproto_like(tensor_dict):
+        for key, val in kwargs.items():
+            if isinstance(val, NonTensorData):
+                tensor_dict.meta_info[key] = val.data
+            elif isinstance(val, NonTensorStack):
+                tensor_dict.non_tensor_batch[key] = np.array(val.tolist(), dtype=object)
+            elif isinstance(val, np.ndarray):
+                tensor_dict.non_tensor_batch[key] = val
+            elif isinstance(val, list) and len(val) == len(tensor_dict):
+                tensor_dict.non_tensor_batch[key] = np.array(val, dtype=object)
+            else:
+                tensor_dict.meta_info[key] = val
+        return tensor_dict
+
     assert isinstance(tensor_dict, TensorDict), "input dict must be a TensorDict"
     for key, val in kwargs.items():
         if isinstance(val, (NonTensorData | NonTensorStack)):
