@@ -64,13 +64,22 @@ def _with_routing_replay_flag(enabled: bool):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, data: TensorDict, *args, **kwargs):
+            data = _ensure_tensordict(data)
             if self.enable_routing_replay:
-                tu.assign_non_tensor_data(data, "enable_routing_replay", enabled)
+                tu.assign_non_tensor(data, enable_routing_replay=enabled)
             return func(self, data, *args, **kwargs)
 
         return wrapper
 
     return decorator
+
+
+def _ensure_tensordict(data):
+    if isinstance(data, TensorDict):
+        return data
+    if hasattr(data, "to_tensordict"):
+        return data.to_tensordict()
+    return data
 
 
 class TrainingWorker(Worker, DistProfilerExtension):
@@ -240,6 +249,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
+        data = _ensure_tensordict(data)
         maybe_fix_3d_position_ids(data)
         batch_size_per_dp = data.shape[0]
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
@@ -378,6 +388,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def infer_batch(self, data: TensorDict) -> TensorDict:
+        data = _ensure_tensordict(data)
         # add mfu calculator
         global_token_num = tu.get(data, key="global_token_num")
         compute_loss = tu.get(data, key="compute_loss", default=True)
