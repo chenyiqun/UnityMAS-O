@@ -858,13 +858,19 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             last_pos = torch.clamp(last_pos, min=0)
             token_level_scores[torch.arange(bsz), last_pos] = reward_scalar
 
+        extra_tensors = {
+            "token_level_scores": token_level_scores,
+            "token_level_rewards": token_level_scores.clone(),
+            "reward": reward_scalar,
+            "done": torch.tensor([e.done for e in entries], dtype=torch.bool),
+        }
+        if "loss_mask" not in batch.batch.keys():
+            extra_tensors["loss_mask"] = (
+                response_mask.clone() if response_mask is not None else torch.ones_like(responses, dtype=torch.bool)
+            )
+
         extra = DataProto.from_dict(
-            tensors={
-                "token_level_scores": token_level_scores,
-                "token_level_rewards": token_level_scores.clone(),
-                "reward": reward_scalar,
-                "done": torch.tensor([e.done for e in entries], dtype=torch.bool),
-            },
+            tensors=extra_tensors,
             non_tensors={
                 "traj_id": np.array([e.traj_id for e in entries], dtype=object),
                 "query_id": np.array([e.query_id for e in entries], dtype=object),

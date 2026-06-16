@@ -1956,13 +1956,19 @@ class StarRayTrainer:
             last_pos = torch.clamp(last_pos, min=0)
             token_level_scores[torch.arange(bsz), last_pos] = reward_scalar
 
+        extra_tensors = {
+            "token_level_scores": token_level_scores,
+            "token_level_rewards": token_level_scores.clone(),
+            "reward": reward_scalar,
+            "done": torch.tensor([entry.done for entry in entries], dtype=torch.bool),
+        }
+        if "loss_mask" not in batch.batch.keys():
+            extra_tensors["loss_mask"] = (
+                response_mask.clone() if response_mask is not None else torch.ones_like(responses, dtype=torch.bool)
+            )
+
         extra = DataProto.from_dict(
-            tensors={
-                "token_level_scores": token_level_scores,
-                "token_level_rewards": token_level_scores.clone(),
-                "reward": reward_scalar,
-                "done": torch.tensor([entry.done for entry in entries], dtype=torch.bool),
-            },
+            tensors=extra_tensors,
             non_tensors={
                 "traj_id": np.array([entry.traj_id for entry in entries], dtype=object),
                 "query_id": np.array([entry.query_id for entry in entries], dtype=object),
@@ -2012,6 +2018,8 @@ class StarRayTrainer:
 
         if "response_mask" not in batch.batch.keys():
             batch.batch["response_mask"] = compute_response_mask(batch)
+        if "loss_mask" not in batch.batch.keys():
+            batch.batch["loss_mask"] = batch.batch["response_mask"].clone()
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
