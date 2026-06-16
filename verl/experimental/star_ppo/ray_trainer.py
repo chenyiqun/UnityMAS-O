@@ -35,6 +35,7 @@ from verl.utils.device import get_nccl_backend
 from verl.utils.import_utils import load_extern_object
 from verl.utils import omega_conf_to_dataclass
 from verl.utils.metric import reduce_metrics
+from verl.utils.py_functional import rename_dict
 from verl.utils.tracking import Tracking
 from verl.workers.utils.padding import left_right_2_no_padding, no_padding_2_padding
 
@@ -1986,6 +1987,16 @@ class StarRayTrainer:
             metrics = output.meta_info.get("metrics", {})
         return metrics or {}
 
+    @staticmethod
+    def _prefix_worker_update_metrics(metrics: dict, prefix: str, mfu_metric_key: str) -> dict:
+        metrics = dict(metrics or {})
+        if not any(str(key).startswith(prefix) for key in metrics):
+            metrics = rename_dict(metrics, prefix)
+        worker_mfu_key = f"{prefix}mfu"
+        if worker_mfu_key in metrics:
+            metrics[mfu_metric_key] = metrics.pop(worker_mfu_key)
+        return metrics
+
     def _compute_old_log_prob_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         batch_td = self._to_ppo_worker_batch(batch)
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
@@ -2035,7 +2046,12 @@ class StarRayTrainer:
             dataloader_kwargs={"shuffle": self.config.critic.shuffle},
         )
         output = ctx.critic_wg.update_critic(batch_td)
-        return DataProto.from_single_dict(data={}, meta_info={"metrics": self._extract_worker_metrics(output)})
+        metrics = self._prefix_worker_update_metrics(
+            self._extract_worker_metrics(output),
+            prefix="critic/",
+            mfu_metric_key="perf/mfu/critic",
+        )
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
     def _update_actor_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         rollout_cfg = self.config.actor_rollout_ref.rollout
@@ -2058,7 +2074,12 @@ class StarRayTrainer:
             compute_loss=True,
         )
         output = ctx.actor_wg.update_actor(batch_td)
-        return DataProto.from_single_dict(data={}, meta_info={"metrics": self._extract_worker_metrics(output)})
+        metrics = self._prefix_worker_update_metrics(
+            self._extract_worker_metrics(output),
+            prefix="actor/",
+            mfu_metric_key="perf/mfu/actor",
+        )
+        return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
     def _build_ready_train_batch_from_local_buffer(self, model_id: str, max_items: int = 0) -> DataProto:
         local_buffer = self._local_traj_buffers_by_model.get(model_id, None)

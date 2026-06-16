@@ -175,18 +175,22 @@ class CriticWorker(TrainingWorker):
     def update_critic(self, data):
         import verl.utils.tensordict_utils as tu
 
-        ppo_mini_batch_size = self.critic_config.ppo_mini_batch_size
-        ppo_epochs = self.critic_config.ppo_epochs
-        seed = self.critic_config.data_loader_seed
-        shuffle = self.critic_config.shuffle
-        tu.assign_non_tensor(
-            data,
-            global_batch_size=ppo_mini_batch_size,
-            mini_batch_size=ppo_mini_batch_size,
-            epochs=ppo_epochs,
-            seed=seed,
-            dataloader_kwargs={"shuffle": shuffle},
-        )
+        # Newer PPO call sites pass these train_mini_batch controls explicitly,
+        # e.g. scaling mini-batch sizes by rollout.n. Preserve those values and
+        # only provide defaults for legacy STAR callers.
+        defaults = {}
+        if tu.get(data, "global_batch_size") is None:
+            defaults["global_batch_size"] = self.critic_config.ppo_mini_batch_size
+        if tu.get(data, "mini_batch_size") is None:
+            defaults["mini_batch_size"] = self.critic_config.ppo_mini_batch_size
+        if tu.get(data, "epochs") is None:
+            defaults["epochs"] = self.critic_config.ppo_epochs
+        if tu.get(data, "seed") is None:
+            defaults["seed"] = self.critic_config.data_loader_seed
+        if tu.get(data, "dataloader_kwargs") is None:
+            defaults["dataloader_kwargs"] = {"shuffle": self.critic_config.shuffle}
+        if defaults:
+            tu.assign_non_tensor(data, **defaults)
         return self.train_mini_batch(data)
 
 
