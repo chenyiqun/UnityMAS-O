@@ -15,6 +15,7 @@ from verl.experimental.star_ppo.trajectory_buffer import TrajectoryBuffer, Traje
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils.device import get_torch_device
 from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
+from verl.utils.model import convert_weight_keys
 from verl.utils.ray_utils import get_event_loop
 from verl.workers.config.engine import TrainingWorkerConfig
 from verl.workers.engine_workers import TrainingWorker
@@ -97,6 +98,23 @@ def _get_vllm_inference_model(rollout):
     return None
 
 
+def _get_actor_weights_info_from_state_dict(actor_worker):
+    """Return HF-keyed weight metadata without materializing full FSDP/DTensor params."""
+    engine = getattr(actor_worker.actor, "engine", None)
+    module = getattr(engine, "module", None)
+    if module is None:
+        return None
+
+    peft_model = getattr(module, "_fsdp_wrapped_module", module)
+    model_config = getattr(engine, "model_config", None)
+    lora_config = getattr(model_config, "lora", {}) or {}
+    if hasattr(peft_model, "peft_config") and not lora_config.get("merge", False):
+        return None
+
+    params = convert_weight_keys(module.state_dict(), peft_model)
+    return [(key, tensor.size(), tensor.dtype) for key, tensor in params.items()]
+
+
 DetachAsyncRolloutWorker = DetachActorWorker
 
 
@@ -163,8 +181,10 @@ class StarDetachActorWorker(DetachActorWorker):
         assert self._is_actor
         if hasattr(self, "_weights_info"):
             return self._weights_info
-        params = self._get_actor_params()
-        self._weights_info = [(key, tensor.size(), tensor.dtype) for key, tensor in params.items()]
+        self._weights_info = _get_actor_weights_info_from_state_dict(self)
+        if self._weights_info is None:
+            params = self._get_actor_params()
+            self._weights_info = [(key, tensor.size(), tensor.dtype) for key, tensor in params.items()]
         return self._weights_info
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
