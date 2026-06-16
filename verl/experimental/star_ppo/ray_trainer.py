@@ -640,16 +640,36 @@ class StarRayTrainer:
                 f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
             )
 
-        actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
-        rollout_refs = _call_wg_method(
+        prepare_refs = _call_wg_method(
             ctx.rollout_wg,
-            ["sync_rollout_weights", "rollout_sync_rollout_weights", "actor_sync_rollout_weights"],
+            ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
         )
         self._ray_get_with_timeout(
-            [actor_refs, rollout_refs],
+            [prepare_refs],
             timeout_s=self._weight_sync_timeout_seconds,
-            op_name=f"sync_rollout_weights(model={model_id})",
+            op_name=f"prepare_rollout_weight_sync(model={model_id})",
         )
+        try:
+            actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
+            rollout_refs = _call_wg_method(
+                ctx.rollout_wg,
+                ["sync_rollout_weights", "rollout_sync_rollout_weights", "actor_sync_rollout_weights"],
+            )
+            self._ray_get_with_timeout(
+                [actor_refs, rollout_refs],
+                timeout_s=self._weight_sync_timeout_seconds,
+                op_name=f"sync_rollout_weights(model={model_id})",
+            )
+        finally:
+            finish_refs = _call_wg_method(
+                ctx.rollout_wg,
+                ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
+            )
+            self._ray_get_with_timeout(
+                [finish_refs],
+                timeout_s=self._weight_sync_timeout_seconds,
+                op_name=f"finish_rollout_weight_sync(model={model_id})",
+            )
 
     def _ensure_routing_fields(self, batch: DataProto):
         bsz = len(batch)

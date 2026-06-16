@@ -112,7 +112,37 @@ def _get_actor_weights_info_from_state_dict(actor_worker):
         return None
 
     params = convert_weight_keys(module.state_dict(), peft_model)
-    return [(key, tensor.size(), tensor.dtype) for key, tensor in params.items()]
+    return [
+        (
+            key,
+            tensor.size(),
+            # FSDP get_per_tensor_param materializes DTensor weights as bf16.
+            torch.bfloat16 if hasattr(tensor, "full_tensor") else tensor.dtype,
+        )
+        for key, tensor in params.items()
+    ]
+
+
+def _prepare_rollout_memory_for_weight_sync(worker):
+    if not getattr(worker, "_is_rollout", False):
+        return
+    rollout = getattr(worker, "rollout", None)
+    if rollout is None or not getattr(worker.config.rollout, "free_cache_engine", False):
+        return
+    if hasattr(rollout, "release"):
+        _run_coro_blocking(lambda: rollout.release())
+    if hasattr(rollout, "resume"):
+        _run_coro_blocking(lambda: rollout.resume(tags=["weights"]))
+
+
+def _restore_rollout_memory_after_weight_sync(worker):
+    if not getattr(worker, "_is_rollout", False):
+        return
+    rollout = getattr(worker, "rollout", None)
+    if rollout is None or not getattr(worker.config.rollout, "free_cache_engine", False):
+        return
+    if hasattr(rollout, "resume"):
+        _run_coro_blocking(lambda: rollout.resume(tags=["kv_cache"]))
 
 
 DetachAsyncRolloutWorker = DetachActorWorker
@@ -176,6 +206,22 @@ class StarDetachActorWorker(DetachActorWorker):
         per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
         return dict(per_tensor_param)
 
+    def _iter_actor_params(self):
+        assert self._is_actor
+        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+        return iter(per_tensor_param)
+
+    def _next_actor_param(self, params_iter, expected_key, expected_dtype):
+        try:
+            key, tensor = next(params_iter)
+        except StopIteration as exc:
+            raise RuntimeError(f"actor weight stream ended before {expected_key}") from exc
+        if key != expected_key:
+            raise RuntimeError(f"actor weight stream order mismatch: got {key}, expected {expected_key}")
+        if tensor.dtype != expected_dtype:
+            tensor = tensor.to(expected_dtype, non_blocking=True)
+        return tensor
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def get_actor_weights_info(self):
         assert self._is_actor
@@ -183,8 +229,7 @@ class StarDetachActorWorker(DetachActorWorker):
             return self._weights_info
         self._weights_info = _get_actor_weights_info_from_state_dict(self)
         if self._weights_info is None:
-            params = self._get_actor_params()
-            self._weights_info = [(key, tensor.size(), tensor.dtype) for key, tensor in params.items()]
+            self._weights_info = [(key, tensor.size(), tensor.dtype) for key, tensor in self._iter_actor_params()]
         return self._weights_info
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -200,13 +245,20 @@ class StarDetachActorWorker(DetachActorWorker):
         self._weight_sync_mode = str(mode).strip().lower()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def prepare_rollout_weight_sync(self):
+        _prepare_rollout_memory_for_weight_sync(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def finish_rollout_weight_sync(self):
+        _restore_rollout_memory_after_weight_sync(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
         assert hasattr(self, "_weights_info") and self._weights_info is not None
 
         if self._is_actor and getattr(self, "_is_offload_param", False):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        params = self._get_actor_params() if self._is_actor else None
 
         rollout_name = self.config.rollout.name
         inference_model = None
@@ -231,18 +283,14 @@ class StarDetachActorWorker(DetachActorWorker):
         loop = get_event_loop()
         group_name = getattr(self, "_weight_sync_group_name", "actor_rollout")
         sync_mode = str(getattr(self, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
+        params_iter = self._iter_actor_params() if self._is_actor else None
         if sync_mode == "local_pair":
             channel = _get_local_pair_channel(group_name)
             if self._is_actor:
                 def _produce_local_pair_weights():
                     try:
                         for key, shape, dtype in self._weights_info:
-                            assert key in params
-                            origin_data = params[key]
-                            if hasattr(origin_data, "full_tensor"):
-                                origin_data = origin_data.full_tensor()
-                            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-                            tensor.copy_(origin_data)
+                            tensor = self._next_actor_param(params_iter, key, dtype)
                             channel.put((key, tensor))
                     except BaseException as exc:
                         channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
@@ -308,14 +356,10 @@ class StarDetachActorWorker(DetachActorWorker):
             return
 
         for key, shape, dtype in self._weights_info:
-            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor:
-                assert key in params
-                origin_data = params[key]
-                if hasattr(origin_data, "full_tensor"):
-                    origin_data = origin_data.full_tensor()
-                if torch.distributed.get_rank() == 0:
-                    tensor.copy_(origin_data)
+                tensor = self._next_actor_param(params_iter, key, dtype)
+            else:
+                tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
 
             if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
                 self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
@@ -885,6 +929,30 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
     def set_weight_sync_mode(self, mode: str):
         self._weight_sync_mode = str(mode).strip().lower()
 
+    def _iter_actor_params(self):
+        assert self._is_actor
+        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+        return iter(per_tensor_param)
+
+    def _next_actor_param(self, params_iter, expected_key, expected_dtype):
+        try:
+            key, tensor = next(params_iter)
+        except StopIteration as exc:
+            raise RuntimeError(f"actor weight stream ended before {expected_key}") from exc
+        if key != expected_key:
+            raise RuntimeError(f"actor weight stream order mismatch: got {key}, expected {expected_key}")
+        if tensor.dtype != expected_dtype:
+            tensor = tensor.to(expected_dtype, non_blocking=True)
+        return tensor
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def prepare_rollout_weight_sync(self):
+        _prepare_rollout_memory_for_weight_sync(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def finish_rollout_weight_sync(self):
+        _restore_rollout_memory_after_weight_sync(self)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self):
         assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
@@ -892,7 +960,6 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
 
         if self._is_actor and getattr(self, "_is_offload_param", False):
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
-        params = self._get_actor_params() if self._is_actor else None
 
         rollout_name = self.config.rollout.name
         inference_model = None
@@ -917,18 +984,14 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         loop = get_event_loop()
         group_name = getattr(self, "_weight_sync_group_name", "actor_rollout")
         sync_mode = str(getattr(self, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
+        params_iter = self._iter_actor_params() if self._is_actor else None
         if sync_mode == "local_pair":
             channel = _get_local_pair_channel(group_name)
             if self._is_actor:
                 def _produce_local_pair_weights():
                     try:
                         for key, shape, dtype in self._weights_info:
-                            assert key in params
-                            origin_data = params[key]
-                            if hasattr(origin_data, "full_tensor"):
-                                origin_data = origin_data.full_tensor()
-                            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-                            tensor.copy_(origin_data)
+                            tensor = self._next_actor_param(params_iter, key, dtype)
                             channel.put((key, tensor))
                     except BaseException as exc:
                         channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
@@ -994,14 +1057,10 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             return
 
         for key, shape, dtype in self._weights_info:
-            tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
             if self._is_actor:
-                assert key in params
-                origin_data = params[key]
-                if hasattr(origin_data, "full_tensor"):
-                    origin_data = origin_data.full_tensor()
-                if torch.distributed.get_rank() == 0:
-                    tensor.copy_(origin_data)
+                tensor = self._next_actor_param(params_iter, key, dtype)
+            else:
+                tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
 
             if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
                 self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
