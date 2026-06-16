@@ -1938,6 +1938,30 @@ class StarRayTrainer:
             )
         return batch
 
+    def _ensure_ppo_engine_inputs(self, batch: DataProto) -> DataProto:
+        batch = self._ensure_ppo_masks(batch)
+        if batch.batch is None or len(batch) == 0:
+            return batch
+
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        temperature = rollout_cfg.get("temperature", 1.0)
+        if temperature is None:
+            temperature = 1.0
+
+        ref_tensor = batch.batch.get("responses", None)
+        if ref_tensor is None:
+            ref_tensor = batch.batch.get("input_ids", None)
+        if ref_tensor is None:
+            raise RuntimeError("STAR PPO batch is missing both responses and input_ids; cannot set temperature")
+
+        batch.batch["temperature"] = torch.full(
+            (len(batch),),
+            float(temperature),
+            dtype=torch.float32,
+            device=ref_tensor.device,
+        )
+        return batch
+
     def _build_ready_train_batch_from_local_buffer(self, model_id: str, max_items: int = 0) -> DataProto:
         local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
         if local_buffer is None:
@@ -2041,7 +2065,7 @@ class StarRayTrainer:
         if len(batch) == 0:
             return metrics
 
-        batch = self._ensure_ppo_masks(batch)
+        batch = self._ensure_ppo_engine_inputs(batch)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
