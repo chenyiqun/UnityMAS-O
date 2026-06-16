@@ -3,7 +3,7 @@ import os
 import threading
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
@@ -812,6 +812,16 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         suffix = f", ...+{len(fat_list) - max_items}" if len(fat_list) > max_items else ""
         return "[" + "; ".join(items) + suffix + "]"
 
+    @staticmethod
+    def _ready_loss_mask_tensor(
+        batch: DataProto, response_mask: Optional[torch.Tensor], responses: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        if batch.batch is not None and "loss_mask" in batch.batch.keys():
+            return None
+        if response_mask is not None:
+            return response_mask.clone()
+        return torch.ones_like(responses, dtype=torch.bool)
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def build_ready_train_batch(self, max_items: int = 0) -> DataProto:
         entries = self._traj_buffer.pop_ready(
@@ -864,10 +874,9 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             "reward": reward_scalar,
             "done": torch.tensor([e.done for e in entries], dtype=torch.bool),
         }
-        if "loss_mask" not in batch.batch.keys():
-            extra_tensors["loss_mask"] = (
-                response_mask.clone() if response_mask is not None else torch.ones_like(responses, dtype=torch.bool)
-            )
+        loss_mask = self._ready_loss_mask_tensor(batch, response_mask, responses)
+        if loss_mask is not None:
+            extra_tensors["loss_mask"] = loss_mask
 
         extra = DataProto.from_dict(
             tensors=extra_tensors,

@@ -1912,6 +1912,32 @@ class StarRayTrainer:
         suffix = f", ...+{len(fat_list) - max_items}" if len(fat_list) > max_items else ""
         return "[" + "; ".join(items) + suffix + "]"
 
+    @staticmethod
+    def _ready_loss_mask_tensor(
+        batch: DataProto, response_mask: Optional[torch.Tensor], responses: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        if batch.batch is not None and "loss_mask" in batch.batch.keys():
+            return None
+        if response_mask is not None:
+            return response_mask.clone()
+        return torch.ones_like(responses, dtype=torch.bool)
+
+    @staticmethod
+    def _ensure_ppo_masks(batch: DataProto) -> DataProto:
+        if batch.batch is None or len(batch) == 0:
+            return batch
+        if "response_mask" not in batch.batch.keys():
+            batch.batch["response_mask"] = compute_response_mask(batch)
+        if "loss_mask" not in batch.batch.keys():
+            batch.batch["loss_mask"] = batch.batch["response_mask"].clone()
+        if tuple(batch.batch["loss_mask"].shape) != tuple(batch.batch["response_mask"].shape):
+            raise RuntimeError(
+                "STAR PPO batch has inconsistent response/loss mask shapes: "
+                f"response_mask={tuple(batch.batch['response_mask'].shape)} "
+                f"loss_mask={tuple(batch.batch['loss_mask'].shape)}"
+            )
+        return batch
+
     def _build_ready_train_batch_from_local_buffer(self, model_id: str, max_items: int = 0) -> DataProto:
         local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
         if local_buffer is None:
@@ -1962,10 +1988,9 @@ class StarRayTrainer:
             "reward": reward_scalar,
             "done": torch.tensor([entry.done for entry in entries], dtype=torch.bool),
         }
-        if "loss_mask" not in batch.batch.keys():
-            extra_tensors["loss_mask"] = (
-                response_mask.clone() if response_mask is not None else torch.ones_like(responses, dtype=torch.bool)
-            )
+        loss_mask = self._ready_loss_mask_tensor(batch, response_mask, responses)
+        if loss_mask is not None:
+            extra_tensors["loss_mask"] = loss_mask
 
         extra = DataProto.from_dict(
             tensors=extra_tensors,
@@ -2016,10 +2041,7 @@ class StarRayTrainer:
         if len(batch) == 0:
             return metrics
 
-        if "response_mask" not in batch.batch.keys():
-            batch.batch["response_mask"] = compute_response_mask(batch)
-        if "loss_mask" not in batch.batch.keys():
-            batch.batch["loss_mask"] = batch.batch["response_mask"].clone()
+        batch = self._ensure_ppo_masks(batch)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
@@ -2045,7 +2067,7 @@ class StarRayTrainer:
             for key, val in kl_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
         else:
-            if "token_level_rewards" not in batch.batch and "token_level_scores" in batch.batch:
+            if "token_level_rewards" not in batch.batch.keys() and "token_level_scores" in batch.batch.keys():
                 batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
         batch = compute_advantage(
