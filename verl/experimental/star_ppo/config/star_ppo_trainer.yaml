@@ -27,6 +27,7 @@ star:
     max_inflight_queries: 64
     max_parallel_rollouts_per_model: 32
     query_timeout_seconds: 0
+    query_timeout_drop: false
     tool_timeout_seconds: 0
   buffer:
     max_items: 100000

@@ -74,6 +74,7 @@ star:
     name: mask_iterative_turn_level
     llm_timeout_seconds: ${oc.decode:${oc.env:STAR_LLM_TIMEOUT_SECONDS,0}}
     query_timeout_seconds: ${oc.decode:${oc.env:STAR_QUERY_TIMEOUT_SECONDS,0}}
+    query_timeout_drop: ${oc.decode:${oc.env:STAR_QUERY_TIMEOUT_DROP,false}}
     tool_timeout_seconds: ${oc.decode:${oc.env:STAR_TOOL_TIMEOUT_SECONDS,0}}
     max_inflight_queries: ${oc.decode:${oc.env:STAR_MAX_INFLIGHT_QUERIES,128}}
     max_parallel_rollouts_per_model: ${oc.decode:${oc.env:STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL,32}}

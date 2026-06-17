@@ -72,6 +72,15 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.query_timeout_seconds = float(
             self.workflow_cfg.get("query_timeout_seconds", os.environ.get("STAR_QUERY_TIMEOUT_SECONDS", 0))
         )
+        query_timeout_drop = self.workflow_cfg.get(
+            "query_timeout_drop",
+            os.environ.get("STAR_QUERY_TIMEOUT_DROP", "false"),
+        )
+        self.query_timeout_drop = (
+            str(query_timeout_drop).strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(query_timeout_drop, str)
+            else bool(query_timeout_drop)
+        )
         self.tool_timeout_seconds = float(
             self.workflow_cfg.get("tool_timeout_seconds", os.environ.get("STAR_TOOL_TIMEOUT_SECONDS", 0))
         )
@@ -95,13 +104,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         self.outcome_cfg = self.graph_cfg.get("outcome_reward", {"type": "em", "source": "", "weight": 1.0})
         self.tools = self._build_tools()
         self._validate_graph()
-        rollout_cfg = self.config.actor_rollout_ref.rollout
-        prompt_len_cfg = int(rollout_cfg.get("prompt_length", 4096))
-        trunc_margin = int(self.workflow_cfg.get("prompt_truncation_margin", 128))
-        self.per_infer_prompt_max_tokens = max(256, prompt_len_cfg - trunc_margin)
-        self.per_infer_prompt_max_tokens = int(
-            self.workflow_cfg.get("per_infer_prompt_max_tokens", self.per_infer_prompt_max_tokens)
-        )
+        self.per_infer_prompt_max_tokens = self._rollout_prompt_token_budget(self.config, self.workflow_cfg)
         debug_cfg = dict(self.workflow_cfg.get("debug", {}))
         env_debug = str(os.environ.get("STAR_WORKFLOW_DEBUG", "")).strip().lower()
         self.debug_enabled = bool(debug_cfg.get("enabled", False)) or env_debug in {"1", "true", "yes", "on"}
@@ -1021,7 +1024,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         query_id = str(self._extract_from_batch(query_batch, "query_id") or "")
         query_start = time.perf_counter()
         try:
-            if self.query_timeout_seconds > 0:
+            if self.query_timeout_seconds > 0 and self.query_timeout_drop:
                 return await asyncio.wait_for(
                     self._run_one_query(
                         query_batch,
@@ -1078,7 +1081,7 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "query_elapsed_s": float(time.perf_counter() - query_start),
                 "dropped": True,
                 "drop_reason": "query_timeout",
-                "drop_error": str(exc),
+                "drop_error": f"{type(exc).__name__}: {exc}",
                 "drop_query_id": query_id,
             }
         except Exception as exc:

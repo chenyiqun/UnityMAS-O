@@ -36,6 +36,15 @@ class TraceWorkflowRunner(WorkflowRunner):
         self.query_timeout_seconds = float(
             self.workflow_cfg.get("query_timeout_seconds", os.environ.get("STAR_QUERY_TIMEOUT_SECONDS", 0))
         )
+        query_timeout_drop = self.workflow_cfg.get(
+            "query_timeout_drop",
+            os.environ.get("STAR_QUERY_TIMEOUT_DROP", "false"),
+        )
+        self.query_timeout_drop = (
+            str(query_timeout_drop).strip().lower() in {"1", "true", "yes", "on"}
+            if isinstance(query_timeout_drop, str)
+            else bool(query_timeout_drop)
+        )
         self.tool_timeout_seconds = float(
             self.workflow_cfg.get("tool_timeout_seconds", os.environ.get("STAR_TOOL_TIMEOUT_SECONDS", 0))
         )
@@ -56,13 +65,7 @@ class TraceWorkflowRunner(WorkflowRunner):
                 ],
             )
         )
-        rollout_cfg = self.config.actor_rollout_ref.rollout
-        prompt_len_cfg = int(rollout_cfg.get("prompt_length", 4096))
-        trunc_margin = int(self.workflow_cfg.get("prompt_truncation_margin", 128))
-        self.per_infer_prompt_max_tokens = max(256, prompt_len_cfg - trunc_margin)
-        self.per_infer_prompt_max_tokens = int(
-            self.workflow_cfg.get("per_infer_prompt_max_tokens", self.per_infer_prompt_max_tokens)
-        )
+        self.per_infer_prompt_max_tokens = self._rollout_prompt_token_budget(self.config, self.workflow_cfg)
         debug_cfg = dict(self.workflow_cfg.get("debug", {}))
         env_debug = str(os.environ.get("STAR_WORKFLOW_DEBUG", "")).strip().lower()
         self.debug_enabled = bool(debug_cfg.get("enabled", False)) or env_debug in {"1", "true", "yes", "on"}
@@ -803,7 +806,7 @@ class TraceWorkflowRunner(WorkflowRunner):
         async with query_sem:
             query_start = time.perf_counter()
             try:
-                if self.query_timeout_seconds > 0:
+                if self.query_timeout_seconds > 0 and self.query_timeout_drop:
                     trace = await asyncio.wait_for(
                         self.run_query(
                             query_batch,
@@ -824,7 +827,7 @@ class TraceWorkflowRunner(WorkflowRunner):
                 return trace
             except asyncio.TimeoutError as exc:
                 logger.warning("[trace-workflow] query timeout dropped idx=%s err=%r", query_local_idx, exc)
-                trace = self._empty_trace(query_batch, reason="query_timeout", error=str(exc))
+                trace = self._empty_trace(query_batch, reason="query_timeout", error=f"{type(exc).__name__}: {exc}")
                 trace.metrics["workflow/timing/query_s_mean"] = float(time.perf_counter() - query_start)
                 return trace
             except Exception as exc:
