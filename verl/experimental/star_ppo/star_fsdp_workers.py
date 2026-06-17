@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import uuid
+from functools import partial
 from typing import Any, Optional
 
 import numpy as np
@@ -24,7 +25,6 @@ __all__ = [
     "StarDetachActorWorker",
     "StarDetachAsyncRolloutWorker",
     "CriticWorker",
-    "RewardModelWorker",
 ]
 
 
@@ -123,6 +123,248 @@ def _get_actor_weights_info_from_state_dict(actor_worker):
     ]
 
 
+def _rollout_base_sync_done(worker) -> bool:
+    if hasattr(worker, "base_sync_done"):
+        return bool(worker.base_sync_done)
+    load_format = getattr(getattr(worker.config, "rollout", {}), "load_format", "")
+    return "dummy" not in str(load_format)
+
+
+def _set_rollout_base_sync_done(worker, done: bool) -> None:
+    worker.base_sync_done = bool(done)
+    if done:
+        worker._weight_sync_needs_lora_base_sync = False
+
+
+def _actor_per_tensor_param(worker, base_sync_done: bool = True):
+    kwargs = {"base_sync_done": base_sync_done}
+    rollout_cfg = getattr(worker.config, "rollout", {})
+    kwargs["layered_summon"] = getattr(worker, "layered_summon", rollout_cfg.get("layered_summon", False))
+    return worker.actor.engine.get_per_tensor_param(**kwargs)
+
+
+def _weights_info_from_params(params_iter):
+    return [(key, tensor.size(), tensor.dtype) for key, tensor in params_iter]
+
+
+def _build_actor_weights_info_payload(actor_worker):
+    state_dict_info = _get_actor_weights_info_from_state_dict(actor_worker)
+    if state_dict_info is not None:
+        return {"weights_info": state_dict_info, "base_sync_done": True, "peft_config": None}
+
+    params_iter, peft_config = _actor_per_tensor_param(actor_worker, base_sync_done=True)
+    payload = {
+        "weights_info": _weights_info_from_params(params_iter),
+        "base_sync_done": True,
+        "peft_config": peft_config,
+    }
+    if peft_config is not None and not _rollout_base_sync_done(actor_worker):
+        base_params_iter, base_peft_config = _actor_per_tensor_param(actor_worker, base_sync_done=False)
+        payload.update(
+            {
+                "base_weights_info": _weights_info_from_params(base_params_iter),
+                "base_sync_done": False,
+                "needs_lora_base_sync": True,
+                "peft_config": base_peft_config or peft_config,
+            }
+        )
+    return payload
+
+
+def _apply_actor_weights_info(worker, weights_info):
+    if isinstance(weights_info, dict) and "weights_info" in weights_info:
+        worker._weights_info = weights_info["weights_info"]
+        worker._weight_sync_base_weights_info = weights_info.get("base_weights_info", None)
+        worker._weight_sync_peft_config = weights_info.get("peft_config", None)
+        worker._weight_sync_needs_lora_base_sync = bool(weights_info.get("needs_lora_base_sync", False))
+        if "base_sync_done" in weights_info:
+            worker.base_sync_done = bool(weights_info["base_sync_done"])
+    else:
+        worker._weights_info = weights_info
+        worker._weight_sync_base_weights_info = None
+        worker._weight_sync_peft_config = None
+        worker._weight_sync_needs_lora_base_sync = False
+
+    rollout = getattr(worker, "rollout", None)
+    if rollout is not None and getattr(worker, "_weight_sync_peft_config", None) is not None:
+        rollout.sleep_level = 1
+
+
+def _weight_sync_phases(worker):
+    peft_config = getattr(worker, "_weight_sync_peft_config", None)
+    base_info = getattr(worker, "_weight_sync_base_weights_info", None)
+    needs_base = (
+        peft_config is not None
+        and base_info is not None
+        and (getattr(worker, "_weight_sync_needs_lora_base_sync", False) or not _rollout_base_sync_done(worker))
+    )
+    if needs_base:
+        return [
+            ("base", base_info, False),
+            ("adapter", worker._weights_info, True),
+        ]
+    return [("weights", worker._weights_info, True)]
+
+
+def _weight_update_kwargs(worker, base_sync_done: bool):
+    peft_config = getattr(worker, "_weight_sync_peft_config", None)
+    if peft_config is None:
+        return {}
+    return {"peft_config": peft_config, "base_sync_done": base_sync_done}
+
+
+def _rollout_can_update_weights(worker) -> bool:
+    return getattr(worker, "_is_rollout", False) and hasattr(getattr(worker, "rollout", None), "update_weights")
+
+
+def _sync_rollout_weights_impl(worker):
+    assert (worker._is_actor or worker._is_rollout) and not worker.config.hybrid_engine
+    assert hasattr(worker, "_weights_info") and worker._weights_info is not None
+
+    if worker._is_actor and getattr(worker, "_is_offload_param", False):
+        load_fsdp_model_to_gpu(worker.actor_module_fsdp)
+
+    rollout_name = worker.config.rollout.name
+    inference_model = None
+    use_rollout_update = False
+    if worker._is_rollout:
+        if rollout_name == "vllm":
+            from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
+
+            inference_model = _get_vllm_inference_model(worker.rollout)
+            if inference_model is not None:
+                patch_vllm_moe_model_weight_loader(inference_model)
+            elif _rollout_can_update_weights(worker):
+                use_rollout_update = True
+            else:
+                raise AttributeError(f"Unsupported vllm rollout object for weight sync: {type(worker.rollout)}")
+        elif rollout_name == "sglang":
+            if _rollout_can_update_weights(worker):
+                use_rollout_update = True
+            else:
+                inference_model = getattr(worker.rollout, "_engine", None)
+                if inference_model is None:
+                    raise AttributeError(f"Unsupported sglang rollout object for weight sync: {type(worker.rollout)}")
+        else:
+            raise NotImplementedError(f"Unknown rollout name: {rollout_name}")
+
+    group_name = getattr(worker, "_weight_sync_group_name", "actor_rollout")
+    sync_mode = str(getattr(worker, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
+    phases = _weight_sync_phases(worker)
+
+    def _finish_actor_side(mark_base_done: bool = True):
+        if worker._is_actor and getattr(worker, "_is_offload_param", False):
+            offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
+        if mark_base_done and getattr(worker, "_weight_sync_peft_config", None) is not None:
+            _set_rollout_base_sync_done(worker, True)
+        get_torch_device().empty_cache()
+
+    if sync_mode == "local_pair":
+        channel = _get_local_pair_channel(group_name)
+        if worker._is_actor:
+            def _produce_local_pair_weights():
+                success = False
+                try:
+                    for _, weights_info, base_sync_done in phases:
+                        params_iter = worker._iter_actor_params_for_sync(base_sync_done)
+                        for key, _, dtype in weights_info:
+                            tensor = worker._next_actor_param(params_iter, key, dtype)
+                            channel.put((key, tensor))
+                    success = True
+                except BaseException as exc:
+                    channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
+                finally:
+                    channel.put((_LOCAL_PAIR_END, None))
+                    _finish_actor_side(mark_base_done=success)
+
+            threading.Thread(target=_produce_local_pair_weights, daemon=True).start()
+            return
+
+        def _iter_local_pair_weights(weights_info):
+            for expected_key, _, _ in weights_info:
+                recv_key, tensor = channel.get()
+                if recv_key == _LOCAL_PAIR_ERROR:
+                    raise RuntimeError(f"local_pair actor producer failed: {tensor}")
+                if recv_key == _LOCAL_PAIR_END:
+                    raise RuntimeError(f"local_pair weight stream ended before {expected_key}")
+                if recv_key != expected_key:
+                    raise RuntimeError(f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}")
+                yield expected_key, tensor
+
+        for _, weights_info, base_sync_done in phases:
+            if use_rollout_update:
+                kwargs = _weight_update_kwargs(worker, base_sync_done)
+                _run_coro_blocking(
+                    lambda weights_info=weights_info, kwargs=kwargs: worker.rollout.update_weights(
+                        _iter_local_pair_weights(weights_info), **kwargs
+                    )
+                )
+            else:
+                for expected_key, tensor in _iter_local_pair_weights(weights_info):
+                    if rollout_name == "vllm":
+                        inference_model.load_weights([(expected_key, tensor)])
+                    elif rollout_name == "sglang":
+                        raise AttributeError(
+                            "SGLang rollout does not expose update_weights(); cannot sync STAR weights safely"
+                        )
+        end_key, value = channel.get()
+        if end_key == _LOCAL_PAIR_ERROR:
+            raise RuntimeError(f"local_pair actor producer failed after all expected weights: {value}")
+        if end_key != _LOCAL_PAIR_END:
+            raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
+        if getattr(worker, "_weight_sync_peft_config", None) is not None:
+            _set_rollout_base_sync_done(worker, True)
+        get_torch_device().empty_cache()
+        return
+
+    if worker._is_rollout and use_rollout_update:
+        for _, weights_info, base_sync_done in phases:
+            def _iter_collective_weights(weights_info=weights_info):
+                for key, shape, dtype in weights_info:
+                    tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+                    if hasattr(worker, "_weight_sync_group") and worker._weight_sync_group is not None:
+                        worker._weight_sync_group.broadcast(
+                            tensor, src=0, stream=get_torch_device().current_stream()
+                        )
+                    else:
+                        collective.broadcast(tensor, src_rank=0, group_name=group_name)
+                    yield key, tensor
+
+            kwargs = _weight_update_kwargs(worker, base_sync_done)
+            _run_coro_blocking(
+                lambda kwargs=kwargs: worker.rollout.update_weights(_iter_collective_weights(), **kwargs)
+            )
+        if getattr(worker, "_weight_sync_peft_config", None) is not None:
+            _set_rollout_base_sync_done(worker, True)
+        get_torch_device().empty_cache()
+        return
+
+    for _, weights_info, base_sync_done in phases:
+        params_iter = worker._iter_actor_params_for_sync(base_sync_done) if worker._is_actor else None
+        for key, shape, dtype in weights_info:
+            if worker._is_actor:
+                tensor = worker._next_actor_param(params_iter, key, dtype)
+            else:
+                tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
+
+            if hasattr(worker, "_weight_sync_group") and worker._weight_sync_group is not None:
+                worker._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
+            else:
+                collective.broadcast(tensor, src_rank=0, group_name=group_name)
+
+            if worker._is_rollout:
+                if rollout_name == "vllm":
+                    inference_model.load_weights([(key, tensor)])
+                elif rollout_name == "sglang":
+                    raise AttributeError(
+                        "SGLang rollout does not expose update_weights(); cannot sync STAR weights safely"
+                    )
+
+    if getattr(worker, "_weight_sync_peft_config", None) is not None:
+        _set_rollout_base_sync_done(worker, True)
+    _finish_actor_side()
+
+
 def _prepare_rollout_memory_for_weight_sync(worker):
     if not getattr(worker, "_is_rollout", False):
         return
@@ -165,7 +407,11 @@ class CriticWorker(TrainingWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self):
-        return self.reset()
+        result = self.reset()
+        from verl.workers.utils.losses import value_loss
+
+        self.set_loss_fn(partial(value_loss, config=self.critic_config))
+        return result
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
     def compute_values(self, data):
@@ -194,9 +440,6 @@ class CriticWorker(TrainingWorker):
         return self.train_mini_batch(data)
 
 
-RewardModelWorker = TrainingWorker
-
-
 class StarDetachActorWorker(DetachActorWorker):
     """Actor worker alias for star PPO."""
 
@@ -207,12 +450,17 @@ class StarDetachActorWorker(DetachActorWorker):
 
     def _get_actor_params(self):
         assert self._is_actor
-        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+        per_tensor_param, _ = _actor_per_tensor_param(self, base_sync_done=True)
         return dict(per_tensor_param)
 
     def _iter_actor_params(self):
         assert self._is_actor
-        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+        per_tensor_param, _ = _actor_per_tensor_param(self, base_sync_done=True)
+        return iter(per_tensor_param)
+
+    def _iter_actor_params_for_sync(self, base_sync_done: bool):
+        assert self._is_actor
+        per_tensor_param, _ = _actor_per_tensor_param(self, base_sync_done=base_sync_done)
         return iter(per_tensor_param)
 
     def _next_actor_param(self, params_iter, expected_key, expected_dtype):
@@ -230,15 +478,21 @@ class StarDetachActorWorker(DetachActorWorker):
     def get_actor_weights_info(self):
         assert self._is_actor
         if hasattr(self, "_weights_info"):
-            return self._weights_info
-        self._weights_info = _get_actor_weights_info_from_state_dict(self)
-        if self._weights_info is None:
-            self._weights_info = [(key, tensor.size(), tensor.dtype) for key, tensor in self._iter_actor_params()]
-        return self._weights_info
+            payload = {
+                "weights_info": self._weights_info,
+                "base_weights_info": getattr(self, "_weight_sync_base_weights_info", None),
+                "peft_config": getattr(self, "_weight_sync_peft_config", None),
+                "needs_lora_base_sync": getattr(self, "_weight_sync_needs_lora_base_sync", False),
+                "base_sync_done": _rollout_base_sync_done(self),
+            }
+            return payload
+        payload = _build_actor_weights_info_payload(self)
+        _apply_actor_weights_info(self, payload)
+        return payload
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_actor_weights_info(self, weights_info):
-        self._weights_info = weights_info
+        _apply_actor_weights_info(self, weights_info)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_weight_sync_group_name(self, group_name: str):
@@ -258,130 +512,7 @@ class StarDetachActorWorker(DetachActorWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self):
-        assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
-        assert hasattr(self, "_weights_info") and self._weights_info is not None
-
-        if self._is_actor and getattr(self, "_is_offload_param", False):
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-
-        rollout_name = self.config.rollout.name
-        inference_model = None
-        use_vllm_server_adapter = False
-        if self._is_rollout:
-            if rollout_name == "vllm":
-                from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-
-                inference_model = _get_vllm_inference_model(self.rollout)
-                if inference_model is not None:
-                    patch_vllm_moe_model_weight_loader(inference_model)
-                elif hasattr(self.rollout, "update_weights"):
-                    use_vllm_server_adapter = True
-                else:
-                    raise AttributeError(
-                        f"Unsupported vllm rollout object for weight sync: {type(self.rollout)}"
-                    )
-            elif rollout_name == "sglang":
-                inference_model = self.rollout._engine
-            else:
-                raise NotImplementedError(f"Unknown rollout name: {rollout_name}")
-        loop = get_event_loop()
-        group_name = getattr(self, "_weight_sync_group_name", "actor_rollout")
-        sync_mode = str(getattr(self, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
-        params_iter = self._iter_actor_params() if self._is_actor else None
-        if sync_mode == "local_pair":
-            channel = _get_local_pair_channel(group_name)
-            if self._is_actor:
-                def _produce_local_pair_weights():
-                    try:
-                        for key, shape, dtype in self._weights_info:
-                            tensor = self._next_actor_param(params_iter, key, dtype)
-                            channel.put((key, tensor))
-                    except BaseException as exc:
-                        channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
-                    finally:
-                        channel.put((_LOCAL_PAIR_END, None))
-                        if getattr(self, "_is_offload_param", False):
-                            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                        get_torch_device().empty_cache()
-
-                threading.Thread(target=_produce_local_pair_weights, daemon=True).start()
-                return
-            else:
-                def _iter_local_pair_weights():
-                    for expected_key, _, _ in self._weights_info:
-                        recv_key, tensor = channel.get()
-                        if recv_key == _LOCAL_PAIR_ERROR:
-                            raise RuntimeError(f"local_pair actor producer failed: {tensor}")
-                        if recv_key == _LOCAL_PAIR_END:
-                            raise RuntimeError(f"local_pair weight stream ended before {expected_key}")
-                        if recv_key != expected_key:
-                            raise RuntimeError(
-                                f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
-                            )
-                        yield expected_key, tensor
-                    end_key, _ = channel.get()
-                    if end_key == _LOCAL_PAIR_ERROR:
-                        raise RuntimeError("local_pair actor producer failed after all expected weights")
-                    if end_key != _LOCAL_PAIR_END:
-                        raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
-
-                if rollout_name == "vllm" and use_vllm_server_adapter:
-                    _run_coro_blocking(lambda: self.rollout.update_weights(_iter_local_pair_weights()))
-                else:
-                    for expected_key, tensor in _iter_local_pair_weights():
-                        if rollout_name == "vllm":
-                            inference_model.load_weights([(expected_key, tensor)])
-                        elif rollout_name == "sglang":
-                            if inference_model is not None:
-                                _run_coro_blocking(
-                                    lambda weights=[(expected_key, tensor)]: self.update_weights(
-                                        inference_model, weights
-                                    )
-                                )
-            if self._is_actor and getattr(self, "_is_offload_param", False):
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            get_torch_device().empty_cache()
-            return
-
-        if self._is_rollout and rollout_name == "vllm" and use_vllm_server_adapter:
-            def _iter_collective_weights():
-                for key, shape, dtype in self._weights_info:
-                    tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-                    if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
-                        self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
-                    else:
-                        collective.broadcast(tensor, src_rank=0, group_name=group_name)
-                    yield key, tensor
-
-            _run_coro_blocking(lambda: self.rollout.update_weights(_iter_collective_weights()))
-            if self._is_actor and getattr(self, "_is_offload_param", False):
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            get_torch_device().empty_cache()
-            return
-
-        for key, shape, dtype in self._weights_info:
-            if self._is_actor:
-                tensor = self._next_actor_param(params_iter, key, dtype)
-            else:
-                tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-
-            if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
-                self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
-            else:
-                collective.broadcast(tensor, src_rank=0, group_name=group_name)
-
-            if self._is_rollout:
-                if rollout_name == "vllm":
-                    inference_model.load_weights([(key, tensor)])
-                elif rollout_name == "sglang":
-                    if inference_model is not None:
-                        _run_coro_blocking(
-                            lambda weights=[(key, tensor)]: self.update_weights(inference_model, weights)
-                        )
-
-        if self._is_actor and getattr(self, "_is_offload_param", False):
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        get_torch_device().empty_cache()
+        _sync_rollout_weights_impl(self)
 
 
 class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
@@ -435,7 +566,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_actor_weights_info(self, weights_info):
-        self._weights_info = weights_info
+        _apply_actor_weights_info(self, weights_info)
 
     def _decode_action_text(self, response_tokens: torch.Tensor) -> str:
         if response_tokens is None:
@@ -821,6 +952,16 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         batch: DataProto, response_mask: Optional[torch.Tensor], responses: torch.Tensor
     ) -> Optional[torch.Tensor]:
         if batch.batch is not None and "loss_mask" in batch.batch.keys():
+            if response_mask is not None and tuple(batch.batch["loss_mask"].shape) != tuple(response_mask.shape):
+                loss_mask = batch.batch["loss_mask"]
+                if loss_mask.dim() == response_mask.dim() and loss_mask.shape[0] == response_mask.shape[0]:
+                    batch.batch["loss_mask"] = loss_mask[..., -response_mask.shape[-1] :]
+                else:
+                    raise RuntimeError(
+                        "STAR ready batch has incompatible response/loss mask ranks: "
+                        f"response_mask={tuple(response_mask.shape)} "
+                        f"loss_mask={tuple(loss_mask.shape)}"
+                    )
             return None
         if response_mask is not None:
             return response_mask.clone()
@@ -862,55 +1003,48 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             return batch
 
         bsz, resp_len = responses.shape[0], responses.shape[1]
-        token_level_scores = torch.zeros((bsz, resp_len), dtype=torch.float32)
+        token_level_scores = torch.zeros((bsz, resp_len), dtype=torch.float32, device=responses.device)
 
-        reward_scalar = torch.tensor([float(e.reward.item()) if e.reward is not None else 0.0 for e in entries])
+        reward_scalar = torch.tensor(
+            [float(e.reward.item()) if e.reward is not None else 0.0 for e in entries],
+            dtype=torch.float32,
+            device=responses.device,
+        )
         if response_mask is None:
             token_level_scores[:, -1] = reward_scalar
         else:
-            last_pos = response_mask.to(torch.long).sum(dim=-1) - 1
+            last_pos = response_mask.to(device=responses.device, dtype=torch.long).sum(dim=-1) - 1
             last_pos = torch.clamp(last_pos, min=0)
-            token_level_scores[torch.arange(bsz), last_pos] = reward_scalar
+            token_level_scores[torch.arange(bsz, device=responses.device), last_pos] = reward_scalar
 
         extra_tensors = {
             "token_level_scores": token_level_scores,
             "token_level_rewards": token_level_scores.clone(),
             "reward": reward_scalar,
-            "done": torch.tensor([e.done for e in entries], dtype=torch.bool),
+            "done": torch.tensor([e.done for e in entries], dtype=torch.bool, device=responses.device),
         }
         loss_mask = self._ready_loss_mask_tensor(batch, response_mask, responses)
         if loss_mask is not None:
             extra_tensors["loss_mask"] = loss_mask
 
-        extra = DataProto.from_dict(
-            tensors=extra_tensors,
-            non_tensors={
-                "traj_id": np.array([e.traj_id for e in entries], dtype=object),
-                "query_id": np.array([e.query_id for e in entries], dtype=object),
-                "agent_id": np.array([e.agent_id for e in entries], dtype=object),
-                "model_id": np.array([e.model_id for e in entries], dtype=object),
-            },
-        )
-        return batch.union(extra)
+        for key, value in extra_tensors.items():
+            batch.batch[key] = value
+        batch.non_tensor_batch["traj_id"] = np.array([e.traj_id for e in entries], dtype=object)
+        batch.non_tensor_batch["query_id"] = np.array([e.query_id for e in entries], dtype=object)
+        batch.non_tensor_batch["agent_id"] = np.array([e.agent_id for e in entries], dtype=object)
+        batch.non_tensor_batch["model_id"] = np.array([e.model_id for e in entries], dtype=object)
+        return batch
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def train_from_local_batch(self, data: DataProto, do_actor: bool = True, do_critic: bool = True) -> dict:
         bsz = len(data)
         if bsz == 0:
-            return {"star/consumed": 0, "star/placeholder_update": 0}
-
-        avg_reward = 0.0
-        if data.batch is not None and "reward" in data.batch.keys():
-            avg_reward = data.batch["reward"].float().mean().item()
-
-        # V1 skeleton: keep FSDP update call site but avoid forcing full PPO fields.
-        return {
-            "star/consumed": bsz,
-            "star/placeholder_update": 1,
-            "star/avg_reward": avg_reward,
-            "star/do_actor": int(do_actor),
-            "star/do_critic": int(do_critic),
-        }
+            return {"star/consumed": 0}
+        raise NotImplementedError(
+            "train_from_local_batch is a legacy STAR rollout-worker API and no longer performs PPO updates. "
+            "Use StarRayTrainer._global_sync_and_update(), which builds ready batches on the driver and calls "
+            "actor/critic worker update APIs."
+        )
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def train_from_ready_queue(
@@ -924,13 +1058,13 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         batch = self.build_ready_train_batch(max_items=max_items)
         bsz = len(batch)
         if bsz == 0:
-            return {"star/consumed": 0, "star/dropped": 0, "star/placeholder_update": 0}
+            return {"star/consumed": 0, "star/dropped": 0}
 
         dropped = 0
         if drop_last and world_size_divisor > 1:
             keep = (bsz // world_size_divisor) * world_size_divisor
             if keep <= 0:
-                return {"star/consumed": 0, "star/dropped": bsz, "star/placeholder_update": 0}
+                return {"star/consumed": 0, "star/dropped": bsz}
             if keep < bsz:
                 indices = np.random.permutation(bsz)[:keep].tolist()
                 batch = batch.select_idxs(indices)
@@ -950,7 +1084,12 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
 
     def _iter_actor_params(self):
         assert self._is_actor
-        per_tensor_param, _ = self.actor.engine.get_per_tensor_param()
+        per_tensor_param, _ = _actor_per_tensor_param(self, base_sync_done=True)
+        return iter(per_tensor_param)
+
+    def _iter_actor_params_for_sync(self, base_sync_done: bool):
+        assert self._is_actor
+        per_tensor_param, _ = _actor_per_tensor_param(self, base_sync_done=base_sync_done)
         return iter(per_tensor_param)
 
     def _next_actor_param(self, params_iter, expected_key, expected_dtype):
@@ -974,127 +1113,4 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def sync_rollout_weights(self):
-        assert (self._is_actor or self._is_rollout) and not self.config.hybrid_engine
-        assert hasattr(self, "_weights_info") and self._weights_info is not None
-
-        if self._is_actor and getattr(self, "_is_offload_param", False):
-            load_fsdp_model_to_gpu(self.actor_module_fsdp)
-
-        rollout_name = self.config.rollout.name
-        inference_model = None
-        use_vllm_server_adapter = False
-        if self._is_rollout:
-            if rollout_name == "vllm":
-                from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-
-                inference_model = _get_vllm_inference_model(self.rollout)
-                if inference_model is not None:
-                    patch_vllm_moe_model_weight_loader(inference_model)
-                elif hasattr(self.rollout, "update_weights"):
-                    use_vllm_server_adapter = True
-                else:
-                    raise AttributeError(
-                        f"Unsupported vllm rollout object for weight sync: {type(self.rollout)}"
-                    )
-            elif rollout_name == "sglang":
-                inference_model = self.rollout._engine
-            else:
-                raise NotImplementedError(f"Unknown rollout name: {rollout_name}")
-        loop = get_event_loop()
-        group_name = getattr(self, "_weight_sync_group_name", "actor_rollout")
-        sync_mode = str(getattr(self, "_weight_sync_mode", os.environ.get("STAR_WEIGHT_SYNC_MODE", "collective"))).lower()
-        params_iter = self._iter_actor_params() if self._is_actor else None
-        if sync_mode == "local_pair":
-            channel = _get_local_pair_channel(group_name)
-            if self._is_actor:
-                def _produce_local_pair_weights():
-                    try:
-                        for key, shape, dtype in self._weights_info:
-                            tensor = self._next_actor_param(params_iter, key, dtype)
-                            channel.put((key, tensor))
-                    except BaseException as exc:
-                        channel.put((_LOCAL_PAIR_ERROR, repr(exc)))
-                    finally:
-                        channel.put((_LOCAL_PAIR_END, None))
-                        if getattr(self, "_is_offload_param", False):
-                            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-                        get_torch_device().empty_cache()
-
-                threading.Thread(target=_produce_local_pair_weights, daemon=True).start()
-                return
-            else:
-                def _iter_local_pair_weights():
-                    for expected_key, _, _ in self._weights_info:
-                        recv_key, tensor = channel.get()
-                        if recv_key == _LOCAL_PAIR_ERROR:
-                            raise RuntimeError(f"local_pair actor producer failed: {tensor}")
-                        if recv_key == _LOCAL_PAIR_END:
-                            raise RuntimeError(f"local_pair weight stream ended before {expected_key}")
-                        if recv_key != expected_key:
-                            raise RuntimeError(
-                                f"local_pair weight order mismatch: got {recv_key}, expected {expected_key}"
-                            )
-                        yield expected_key, tensor
-                    end_key, _ = channel.get()
-                    if end_key == _LOCAL_PAIR_ERROR:
-                        raise RuntimeError("local_pair actor producer failed after all expected weights")
-                    if end_key != _LOCAL_PAIR_END:
-                        raise RuntimeError(f"local_pair weight stream missing end sentinel, got {end_key}")
-
-                if rollout_name == "vllm" and use_vllm_server_adapter:
-                    _run_coro_blocking(lambda: self.rollout.update_weights(_iter_local_pair_weights()))
-                else:
-                    for expected_key, tensor in _iter_local_pair_weights():
-                        if rollout_name == "vllm":
-                            inference_model.load_weights([(expected_key, tensor)])
-                        elif rollout_name == "sglang":
-                            if inference_model is not None:
-                                _run_coro_blocking(
-                                    lambda weights=[(expected_key, tensor)]: self.update_weights(
-                                        inference_model, weights
-                                    )
-                                )
-            if self._is_actor and getattr(self, "_is_offload_param", False):
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            get_torch_device().empty_cache()
-            return
-
-        if self._is_rollout and rollout_name == "vllm" and use_vllm_server_adapter:
-            def _iter_collective_weights():
-                for key, shape, dtype in self._weights_info:
-                    tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-                    if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
-                        self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
-                    else:
-                        collective.broadcast(tensor, src_rank=0, group_name=group_name)
-                    yield key, tensor
-
-            _run_coro_blocking(lambda: self.rollout.update_weights(_iter_collective_weights()))
-            if self._is_actor and getattr(self, "_is_offload_param", False):
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-            get_torch_device().empty_cache()
-            return
-
-        for key, shape, dtype in self._weights_info:
-            if self._is_actor:
-                tensor = self._next_actor_param(params_iter, key, dtype)
-            else:
-                tensor = torch.empty(shape, dtype=dtype, device=get_torch_device().current_device())
-
-            if hasattr(self, "_weight_sync_group") and self._weight_sync_group is not None:
-                self._weight_sync_group.broadcast(tensor, src=0, stream=get_torch_device().current_stream())
-            else:
-                collective.broadcast(tensor, src_rank=0, group_name=group_name)
-
-            if self._is_rollout:
-                if rollout_name == "vllm":
-                    inference_model.load_weights([(key, tensor)])
-                elif rollout_name == "sglang":
-                    if inference_model is not None:
-                        _run_coro_blocking(
-                            lambda weights=[(key, tensor)]: self.update_weights(inference_model, weights)
-                        )
-
-        if self._is_actor and getattr(self, "_is_offload_param", False):
-            offload_fsdp_model_to_cpu(self.actor_module_fsdp)
-        get_torch_device().empty_cache()
+        _sync_rollout_weights_impl(self)

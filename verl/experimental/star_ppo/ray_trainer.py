@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import os
 import time
@@ -28,7 +29,7 @@ from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.ray_trainer import apply_kl_penalty, compute_advantage, compute_response_mask
-from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy
+from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.device import get_nccl_backend
@@ -98,7 +99,16 @@ class StarRayTrainer:
 
         self.use_critic = need_critic(self.config)
         self.use_reference_policy = need_reference_policy(self.config)
-        self.use_rm = Role.RewardModel in self.role_worker_mapping
+        lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+        if lora_rank <= 0:
+            lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+        self.ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+        if need_reward_model(self.config):
+            raise NotImplementedError(
+                "STAR PPO does not support config.reward.reward_model.enable=True yet. "
+                "Use workflow reward allocators/custom reward logic, or add a STAR-specific RewardLoopManager path."
+            )
+        self.use_rm = need_reward_model(self.config) and Role.RewardModel in self.role_worker_mapping
 
         self.model_ids = [spec.model_id for spec in self.engine_specs]
         self.engine_cfg_by_model_id = {
@@ -385,7 +395,7 @@ class StarRayTrainer:
                     f"critic_model={critic_cfg.model.path}"
                 )
 
-            if self.use_reference_policy:
+            if self.use_reference_policy and not self.ref_in_actor:
                 class_dict["ref"] = RayClassWithInitArgs(
                     cls=self.role_worker_mapping[Role.RefPolicy], config=actor_rollout_cfg, role=str(Role.RefPolicy)
                 )
@@ -393,7 +403,7 @@ class StarRayTrainer:
             if self.use_rm:
                 class_dict["rm"] = RayClassWithInitArgs(
                     cls=self.role_worker_mapping[Role.RewardModel],
-                    config=omega_conf_to_dataclass(self.config.reward_model),
+                    config=omega_conf_to_dataclass(self.config.reward.reward_model),
                 )
 
             worker_dict_cls = create_colocated_worker_cls(class_dict=class_dict)
@@ -421,7 +431,7 @@ class StarRayTrainer:
                 rollout_wg=rollout_wg,
                 rollout_manager=None,
                 critic_wg=critic_wg,
-                ref_policy_wg=ref_wg,
+                ref_policy_wg=actor_wg if self.ref_in_actor else ref_wg,
                 rm_wg=rm_wg,
             )
             actor_rollout_cfg_by_model_id[spec.model_id] = actor_rollout_cfg
@@ -678,6 +688,8 @@ class StarRayTrainer:
         bsz = len(batch)
         if "query_id" not in batch.non_tensor_batch:
             batch.non_tensor_batch["query_id"] = np.array([uuid.uuid4().hex for _ in range(bsz)], dtype=object)
+        if "uid" not in batch.non_tensor_batch:
+            batch.non_tensor_batch["uid"] = batch.non_tensor_batch["query_id"].astype(object)
         if "agent_id" not in batch.non_tensor_batch:
             batch.non_tensor_batch["agent_id"] = np.array(["agent_0"] * bsz, dtype=object)
 
@@ -1696,16 +1708,30 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/star/drop_cleanup_failed_timeout"] = timeout_flag
         return metrics
 
+    async def _call_workflow_runner_batch(self, batch: DataProto, epoch: int, stage: str):
+        run_batch = self.workflow_runner.run_batch
+        try:
+            signature = inspect.signature(run_batch)
+            accepts_stage = "stage" in signature.parameters or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_stage = True
+
+        if accepts_stage:
+            return await run_batch(batch, epoch, stage=stage)
+        return await run_batch(batch, epoch)
+
     async def _run_workflow_batch(self, batch: DataProto, epoch: int, stage: str) -> tuple[DataProto, dict[str, float]]:
         timeout_s = float(self._workflow_batch_timeout_seconds)
         try:
             if timeout_s > 0:
                 rewards, workflow_metrics = await asyncio.wait_for(
-                    self.workflow_runner.run_batch(batch, epoch, stage=stage),
+                    self._call_workflow_runner_batch(batch, epoch, stage=stage),
                     timeout=timeout_s,
                 )
             else:
-                rewards, workflow_metrics = await self.workflow_runner.run_batch(batch, epoch, stage=stage)
+                rewards, workflow_metrics = await self._call_workflow_runner_batch(batch, epoch, stage=stage)
         except asyncio.TimeoutError:
             query_ids = []
             if "query_id" in batch.non_tensor_batch:
@@ -1920,6 +1946,16 @@ class StarRayTrainer:
         batch: DataProto, response_mask: Optional[torch.Tensor], responses: torch.Tensor
     ) -> Optional[torch.Tensor]:
         if batch.batch is not None and "loss_mask" in batch.batch.keys():
+            if response_mask is not None and tuple(batch.batch["loss_mask"].shape) != tuple(response_mask.shape):
+                loss_mask = batch.batch["loss_mask"]
+                if loss_mask.dim() == response_mask.dim() and loss_mask.shape[0] == response_mask.shape[0]:
+                    batch.batch["loss_mask"] = loss_mask[..., -response_mask.shape[-1] :]
+                else:
+                    raise RuntimeError(
+                        "STAR ready batch has incompatible response/loss mask ranks: "
+                        f"response_mask={tuple(response_mask.shape)} "
+                        f"loss_mask={tuple(loss_mask.shape)}"
+                    )
             return None
         if response_mask is not None:
             return response_mask.clone()
@@ -1931,7 +1967,20 @@ class StarRayTrainer:
             return batch
         if "response_mask" not in batch.batch.keys():
             batch.batch["response_mask"] = compute_response_mask(batch)
-        if "loss_mask" not in batch.batch.keys():
+        if "loss_mask" in batch.batch.keys():
+            loss_mask = batch.batch["loss_mask"]
+            response_mask = batch.batch["response_mask"]
+            if loss_mask.shape != response_mask.shape:
+                if loss_mask.dim() == response_mask.dim() and loss_mask.shape[0] == response_mask.shape[0]:
+                    loss_mask = loss_mask[..., -response_mask.shape[-1] :]
+                    batch.batch["loss_mask"] = loss_mask
+                else:
+                    raise RuntimeError(
+                        "STAR PPO batch has incompatible response/loss mask ranks: "
+                        f"response_mask={tuple(response_mask.shape)} "
+                        f"loss_mask={tuple(loss_mask.shape)}"
+                    )
+        else:
             batch.batch["loss_mask"] = batch.batch["response_mask"].clone()
         if tuple(batch.batch["loss_mask"].shape) != tuple(batch.batch["response_mask"].shape):
             raise RuntimeError(
@@ -1990,12 +2039,17 @@ class StarRayTrainer:
     @staticmethod
     def _prefix_worker_update_metrics(metrics: dict, prefix: str, mfu_metric_key: str) -> dict:
         metrics = dict(metrics or {})
-        if not any(str(key).startswith(prefix) for key in metrics):
-            metrics = rename_dict(metrics, prefix)
+        metrics = rename_dict(metrics, prefix)
         worker_mfu_key = f"{prefix}mfu"
         if worker_mfu_key in metrics:
             metrics[mfu_metric_key] = metrics.pop(worker_mfu_key)
         return metrics
+
+    @staticmethod
+    def _overwrite_tensor_fields(batch: DataProto, extra: DataProto) -> DataProto:
+        for key, value in extra.batch.items():
+            batch.batch[key] = value
+        return batch
 
     def _compute_old_log_prob_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         batch_td = self._to_ppo_worker_batch(batch)
@@ -2022,8 +2076,14 @@ class StarRayTrainer:
 
     def _compute_ref_log_prob_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         batch_td = self._to_ppo_worker_batch(batch)
-        tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False)
-        output = ctx.ref_policy_wg.compute_ref_log_prob(batch_td)
+        metadata = {"calculate_entropy": False, "compute_loss": False}
+        if self.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td, **metadata)
+        if self.ref_in_actor:
+            output = ctx.actor_wg.compute_log_prob(batch_td)
+        else:
+            output = ctx.ref_policy_wg.compute_ref_log_prob(batch_td)
         log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td).float()
         return DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": log_probs}))
 
@@ -2056,7 +2116,7 @@ class StarRayTrainer:
     def _update_actor_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         rollout_cfg = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_cfg.multi_turn.enable
-        batch.meta_info["temperature"] = rollout_cfg.temperature
+        batch.meta_info["temperature"] = rollout_cfg.get("temperature", 1.0) or 1.0
 
         batch_td = self._to_ppo_worker_batch(batch)
         actor_cfg = self.config.actor_rollout_ref.actor
@@ -2115,36 +2175,37 @@ class StarRayTrainer:
             return batch
 
         bsz, resp_len = responses.shape[0], responses.shape[1]
-        token_level_scores = torch.zeros((bsz, resp_len), dtype=torch.float32)
+        token_level_scores = torch.zeros((bsz, resp_len), dtype=torch.float32, device=responses.device)
 
-        reward_scalar = torch.tensor([float(entry.reward.item()) if entry.reward is not None else 0.0 for entry in entries])
+        reward_scalar = torch.tensor(
+            [float(entry.reward.item()) if entry.reward is not None else 0.0 for entry in entries],
+            dtype=torch.float32,
+            device=responses.device,
+        )
         if response_mask is None:
             token_level_scores[:, -1] = reward_scalar
         else:
-            last_pos = response_mask.to(torch.long).sum(dim=-1) - 1
+            last_pos = response_mask.to(device=responses.device, dtype=torch.long).sum(dim=-1) - 1
             last_pos = torch.clamp(last_pos, min=0)
-            token_level_scores[torch.arange(bsz), last_pos] = reward_scalar
+            token_level_scores[torch.arange(bsz, device=responses.device), last_pos] = reward_scalar
 
         extra_tensors = {
             "token_level_scores": token_level_scores,
             "token_level_rewards": token_level_scores.clone(),
             "reward": reward_scalar,
-            "done": torch.tensor([entry.done for entry in entries], dtype=torch.bool),
+            "done": torch.tensor([entry.done for entry in entries], dtype=torch.bool, device=responses.device),
         }
         loss_mask = self._ready_loss_mask_tensor(batch, response_mask, responses)
         if loss_mask is not None:
             extra_tensors["loss_mask"] = loss_mask
 
-        extra = DataProto.from_dict(
-            tensors=extra_tensors,
-            non_tensors={
-                "traj_id": np.array([entry.traj_id for entry in entries], dtype=object),
-                "query_id": np.array([entry.query_id for entry in entries], dtype=object),
-                "agent_id": np.array([entry.agent_id for entry in entries], dtype=object),
-                "model_id": np.array([entry.model_id for entry in entries], dtype=object),
-            },
-        )
-        return batch.union(extra)
+        for key, value in extra_tensors.items():
+            batch.batch[key] = value
+        batch.non_tensor_batch["traj_id"] = np.array([entry.traj_id for entry in entries], dtype=object)
+        batch.non_tensor_batch["query_id"] = np.array([entry.query_id for entry in entries], dtype=object)
+        batch.non_tensor_batch["agent_id"] = np.array([entry.agent_id for entry in entries], dtype=object)
+        batch.non_tensor_batch["model_id"] = np.array([entry.model_id for entry in entries], dtype=object)
+        return batch
 
     def _merge_ready_batches(self, ready_parts: list[DataProto]) -> Optional[DataProto]:
         valid = [x for x in ready_parts if isinstance(x, DataProto) and len(x) > 0]
@@ -2188,16 +2249,32 @@ class StarRayTrainer:
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
-        old_log_prob = self._compute_old_log_prob_for_model(ctx, batch)
-        batch = batch.union(old_log_prob)
+        rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
+        bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        if bypass_recomputing_logprobs:
+            from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
+
+            apply_bypass_mode(
+                batch=batch,
+                rollout_corr_config=rollout_corr_config,
+                policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
+            )
+        else:
+            old_log_prob = self._compute_old_log_prob_for_model(ctx, batch)
+            if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
+                raise ValueError(
+                    "Detected conflicting router replay configuration: rollout and actor recompute both returned "
+                    "routed_experts. Disable either router_replay.mode='R2' or rollout routing replay for STAR PPO."
+                )
+            batch = self._overwrite_tensor_fields(batch, old_log_prob)
 
         if self.use_reference_policy and ctx.ref_policy_wg is not None:
             ref_log_prob = self._compute_ref_log_prob_for_model(ctx, batch)
-            batch = batch.union(ref_log_prob)
+            batch = self._overwrite_tensor_fields(batch, ref_log_prob)
 
         if self.use_critic and ctx.critic_wg is not None:
             values = self._compute_values_for_model(ctx, batch)
-            batch = batch.union(values)
+            batch = self._overwrite_tensor_fields(batch, values)
 
         if self.config.algorithm.use_kl_in_reward and "ref_log_prob" in batch.batch.keys():
             batch, kl_metrics = apply_kl_penalty(
@@ -2210,6 +2287,17 @@ class StarRayTrainer:
         else:
             if "token_level_rewards" not in batch.batch.keys() and "token_level_scores" in batch.batch.keys():
                 batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+        if (
+            rollout_corr_config is not None
+            and "rollout_log_probs" in batch.batch
+            and not bypass_recomputing_logprobs
+        ):
+            from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
+
+            batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
+            for key, val in is_metrics.items():
+                metrics[f"model/{model_id}/{key}"] = float(val)
 
         batch = compute_advantage(
             batch,

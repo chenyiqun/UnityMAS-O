@@ -8,11 +8,12 @@ import hydra
 import ray
 from omegaconf import OmegaConf
 
+from verl.experimental.reward_loop import migrate_legacy_reward_impl
 from verl.experimental.star_ppo.ray_trainer import StarRayTrainer
 from verl.experimental.star_ppo.types import EngineSpec
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler, run_ppo
 from verl.trainer.ppo.reward import load_reward_manager
-from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy
+from verl.trainer.ppo.utils import Role, need_critic, need_reference_policy, need_reward_model
 from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
 
@@ -34,14 +35,18 @@ def create_engine_specs(config) -> list[EngineSpec]:
 
 def create_role_worker_mapping(config):
     strategy = config.actor_rollout_ref.actor.strategy
+    lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
+    if lora_rank <= 0:
+        lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
+    ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
+
     if strategy not in ["fsdp", "fsdp2"]:
         raise NotImplementedError(f"Star PPO skeleton currently supports fsdp/fsdp2 only, got {strategy}")
-    if strategy != config.critic.strategy:
+    if need_critic(config) and strategy != config.critic.strategy:
         raise ValueError("actor strategy and critic strategy must be consistent")
 
     from verl.experimental.star_ppo.star_fsdp_workers import (
         CriticWorker,
-        RewardModelWorker,
         StarDetachActorWorker,
         StarDetachAsyncRolloutWorker,
     )
@@ -49,13 +54,18 @@ def create_role_worker_mapping(config):
     role_worker_mapping = {
         Role.Actor: ray.remote(StarDetachActorWorker),
         Role.Rollout: ray.remote(StarDetachAsyncRolloutWorker),
-        Role.Critic: ray.remote(CriticWorker),
     }
 
-    if config.reward_model.enable:
-        role_worker_mapping[Role.RewardModel] = ray.remote(RewardModelWorker)
+    if need_critic(config):
+        role_worker_mapping[Role.Critic] = ray.remote(CriticWorker)
 
-    if need_reference_policy(config):
+    if need_reward_model(config):
+        raise NotImplementedError(
+            "STAR PPO does not support config.reward.reward_model.enable=True yet. "
+            "Use workflow reward allocators/custom reward logic, or add a STAR-specific RewardLoopManager path."
+        )
+
+    if need_reference_policy(config) and not ref_in_actor:
         role_worker_mapping[Role.RefPolicy] = ray.remote(StarDetachActorWorker)
 
     return role_worker_mapping
@@ -129,6 +139,7 @@ def main(config):
 
     start_time = time()
     auto_set_device(config)
+    config = migrate_legacy_reward_impl(config)
     run_ppo(config, task_runner_class=StarTaskRunner)
     print(f"total time: {time() - start_time:.2f} seconds")
 

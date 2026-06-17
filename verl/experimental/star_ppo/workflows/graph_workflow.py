@@ -1103,7 +1103,13 @@ class GraphWorkflowRunner(WorkflowRunner):
                 "drop_query_id": query_id,
             }
 
-    async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
+    async def run_batch(
+        self,
+        batch: DataProto,
+        epoch: int,
+        stage: str = "train",
+    ) -> tuple[DataProto, dict[str, float]]:
+        del stage
         del epoch
         batch_start = time.perf_counter()
         self._debug_batch_counter += 1

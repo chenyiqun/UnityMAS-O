@@ -17,6 +17,10 @@ class WorkflowRunner(ABC):
         self.config = config
 
     @abstractmethod
-    async def run_batch(self, batch: DataProto, epoch: int) -> tuple[DataProto, dict[str, float]]:
+    async def run_batch(
+        self,
+        batch: DataProto,
+        epoch: int,
+        stage: str = "train",
+    ) -> tuple[DataProto, dict[str, float]]:
         raise NotImplementedError
-

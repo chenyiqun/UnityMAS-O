@@ -6,7 +6,8 @@ from verl.experimental.star_ppo.workflows.base import WorkflowRunner
 class BuiltinWorkflowRunner(WorkflowRunner):
     """Backward-compatible built-in workflow dispatcher."""
 
-    async def run_batch(self, batch, epoch):
+    async def run_batch(self, batch, epoch, stage: str = "train"):
+        del stage
         workflow_name = str(self.config.star.get("workflow", {}).get("name", "single_agent"))
         if workflow_name == "single_agent":
             return await self.trainer._run_single_agent_workflow(batch, epoch)
