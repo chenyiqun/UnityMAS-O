@@ -2210,8 +2210,6 @@ class StarRayTrainer:
 
     def _update_actor_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         rollout_cfg = self.config.actor_rollout_ref.rollout
-        batch.meta_info["multi_turn"] = rollout_cfg.multi_turn.enable
-
         batch_td = self._to_ppo_worker_batch(batch)
         actor_cfg = self.config.actor_rollout_ref.actor
         calculate_entropy = actor_cfg.calculate_entropy or (actor_cfg.entropy_coeff != 0.0)
@@ -2228,6 +2226,7 @@ class StarRayTrainer:
             )
         tu.assign_non_tensor(
             batch_td,
+            multi_turn=rollout_cfg.multi_turn.enable,
             calculate_entropy=calculate_entropy,
             distillation_use_topk=False,
             global_batch_size=ppo_mini_batch_size,
