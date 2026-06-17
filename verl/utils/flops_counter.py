@@ -86,7 +86,19 @@ def get_device_flops(unit="T", device_name=None):
     return flops_unit
 
 
+def _get_text_config(config):
+    return getattr(config, "text_config", None) or config
+
+
+def _get_head_dim(config, hidden_size, num_attention_heads):
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is not None:
+        return head_dim
+    return hidden_size // num_attention_heads
+
+
 def _estimate_qwen2_flops(config, tokens_sum, batch_seqlens, delta_time):
+    config = _get_text_config(config)
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
     num_hidden_layers = config.num_hidden_layers
@@ -94,7 +106,7 @@ def _estimate_qwen2_flops(config, tokens_sum, batch_seqlens, delta_time):
     num_attention_heads = config.num_attention_heads
     intermediate_size = config.intermediate_size
 
-    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    head_dim = _get_head_dim(config, hidden_size, num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
@@ -320,16 +332,19 @@ def _estimate_deepseek_v3_flops(config, tokens_sum, batch_seqlens, delta_time):
 
 
 def _estimate_qwen2_moe_flops(config, tokens_sum, batch_seqlens, delta_time):
+    config = _get_text_config(config)
     hidden_size = config.hidden_size
     vocab_size = config.vocab_size
     num_hidden_layers = config.num_hidden_layers
     num_key_value_heads = config.num_key_value_heads
     num_attention_heads = config.num_attention_heads
-    moe_intermediate_size = config.moe_intermediate_size
+    moe_intermediate_size = getattr(config, "moe_intermediate_size", None)
+    if moe_intermediate_size is None:
+        moe_intermediate_size = config.intermediate_size
     moe_topk = config.num_experts_per_tok
     num_experts = config.num_experts
 
-    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    head_dim = _get_head_dim(config, hidden_size, num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
@@ -364,7 +379,7 @@ def _estimate_gemma3_flops(config, tokens_sum, batch_seqlens, delta_time):
     num_attention_heads = config.num_attention_heads
     intermediate_size = config.intermediate_size
 
-    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    head_dim = _get_head_dim(config, hidden_size, num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
@@ -432,7 +447,7 @@ def _estimate_apertus_flops(config, tokens_sum, batch_seqlens, delta_time):
     num_attention_heads = config.num_attention_heads
     intermediate_size = config.intermediate_size
 
-    head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+    head_dim = _get_head_dim(config, hidden_size, num_attention_heads)
     q_size = num_attention_heads * head_dim
     k_size = num_key_value_heads * head_dim
     v_size = num_key_value_heads * head_dim
