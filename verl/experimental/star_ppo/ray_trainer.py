@@ -839,10 +839,45 @@ class StarRayTrainer:
         meta_info.pop("metrics", None)
         return DataProto(batch=data.batch, non_tensor_batch=data.non_tensor_batch, meta_info=meta_info)
 
+    @staticmethod
+    def _meta_values_equal(left: Any, right: Any) -> bool:
+        if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
+            if not isinstance(left, torch.Tensor) or not isinstance(right, torch.Tensor):
+                return False
+            return bool(torch.equal(left.detach().cpu(), right.detach().cpu()))
+        if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+            if not isinstance(left, np.ndarray) or not isinstance(right, np.ndarray):
+                return False
+            return bool(np.array_equal(left, right))
+        try:
+            return bool(left == right)
+        except Exception:
+            return False
+
+    @classmethod
+    def _align_concat_meta(cls, parts: list[DataProto]) -> list[DataProto]:
+        if len(parts) <= 1:
+            return parts
+        common_meta = dict(parts[0].meta_info or {})
+        for part in parts[1:]:
+            meta_info = dict(part.meta_info or {})
+            for key in list(common_meta.keys()):
+                if key not in meta_info or not cls._meta_values_equal(common_meta[key], meta_info[key]):
+                    common_meta.pop(key, None)
+        return [
+            DataProto(batch=part.batch, non_tensor_batch=part.non_tensor_batch, meta_info=dict(common_meta))
+            for part in parts
+        ]
+
     @classmethod
     def _concat_data_proto_safe(cls, parts: list[DataProto]) -> DataProto:
         cleaned = [cls._strip_concat_volatile_meta(part) for part in parts]
-        return DataProto.concat(cleaned) if len(cleaned) > 1 else cleaned[0]
+        if len(cleaned) <= 1:
+            return cleaned[0]
+        try:
+            return DataProto.concat(cleaned)
+        except AssertionError:
+            return DataProto.concat(cls._align_concat_meta(cleaned))
 
     def _build_thin_from_generated_local(self, model_id: str, full_batch: DataProto) -> DataProto:
         build_start = time.perf_counter()
@@ -1256,11 +1291,7 @@ class StarRayTrainer:
         batch_start = time.perf_counter()
         try:
             concat_batches = [self._strip_concat_volatile_meta(req.batch) for req in active_requests]
-            batched_batch = (
-                concat_batches[0]
-                if len(concat_batches) == 1
-                else DataProto.concat(concat_batches)
-            )
+            batched_batch = self._concat_data_proto_safe(concat_batches)
             _, thin, _, batch_timing_info = await self._rollout_model_async(
                 model_id,
                 batched_batch,
