@@ -2072,12 +2072,29 @@ class StarRayTrainer:
         return batch
 
     @staticmethod
+    def _drop_colliding_meta_info(batch: DataProto) -> DataProto:
+        if batch.meta_info is None:
+            return batch
+        data_keys: set[str] = set()
+        if batch.batch is not None:
+            data_keys.update(str(key) for key in batch.batch.keys())
+        if batch.non_tensor_batch is not None:
+            data_keys.update(str(key) for key in batch.non_tensor_batch.keys())
+        if not data_keys:
+            return batch
+        colliding_keys = [key for key in list(batch.meta_info.keys()) if str(key) in data_keys]
+        for key in colliding_keys:
+            batch.meta_info.pop(key, None)
+        return batch
+
+    @staticmethod
     def _to_ppo_worker_batch(batch: DataProto):
         """Convert STAR's padded driver batch to the no-padding worker format."""
         loss_mask = None
         if batch.batch is not None and "loss_mask" in batch.batch.keys():
             loss_mask = batch.batch["loss_mask"]
 
+        batch = StarRayTrainer._drop_colliding_meta_info(batch)
         batch_td = left_right_2_no_padding(batch.to_tensordict())
         if loss_mask is not None:
             batch_td["loss_mask"] = loss_mask
@@ -2194,7 +2211,6 @@ class StarRayTrainer:
     def _update_actor_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         rollout_cfg = self.config.actor_rollout_ref.rollout
         batch.meta_info["multi_turn"] = rollout_cfg.multi_turn.enable
-        batch.meta_info["temperature"] = rollout_cfg.get("temperature", 1.0) or 1.0
 
         batch_td = self._to_ppo_worker_batch(batch)
         actor_cfg = self.config.actor_rollout_ref.actor
