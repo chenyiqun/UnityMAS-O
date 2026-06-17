@@ -1653,9 +1653,10 @@ class StarRayTrainer:
             return self._run_model_ppo_update(model_id, ctx, batch, global_step)
         except Exception as exc:
             timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+            tb = traceback.format_exc(limit=20)
             print(
                 f"[star] model ppo update failed: model={model_id} step={global_step} "
-                f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}\n{tb}"
             )
             return {
                 f"model/{model_id}/star/update_failed": 1.0,
@@ -1780,8 +1781,8 @@ class StarRayTrainer:
                     counts[k] = counts.get(k, 0) + 1
         return {k: sums[k] / max(1, counts[k]) for k in sums}
 
-    def _get_dp_size(self, worker_group, role: str) -> int:
-        fallback = max(
+    def _fallback_dp_size(self, worker_group, role: str) -> int:
+        world_size = max(
             1,
             int(
                 getattr(worker_group, "world_size", 0)
@@ -1789,27 +1790,77 @@ class StarRayTrainer:
                 or 1
             ),
         )
+        role = str(role or "")
+        try:
+            if role == "rollout":
+                rollout_cfg = self.config.actor_rollout_ref.rollout
+                tp = int(rollout_cfg.get("tensor_model_parallel_size", 1) or 1)
+                pp = int(rollout_cfg.get("pipeline_model_parallel_size", 1) or 1)
+                return max(1, world_size // max(1, tp * pp))
+            if role in {"actor", "ref"}:
+                actor_cfg = self.config.actor_rollout_ref.actor
+                sp = int(
+                    actor_cfg.get(
+                        "ulysses_sequence_parallel_size",
+                        actor_cfg.get("fsdp_config", {}).get("ulysses_sequence_parallel_size", 1),
+                    )
+                    or 1
+                )
+                return max(1, world_size // max(1, sp))
+            if role in {"critic", "train"}:
+                sp = int(
+                    self.config.critic.get(
+                        "ulysses_sequence_parallel_size",
+                        self.config.critic.get("fsdp", {}).get("ulysses_sequence_parallel_size", 1),
+                    )
+                    or 1
+                )
+                return max(1, world_size // max(1, sp))
+        except Exception:
+            pass
+        return world_size
+
+    @staticmethod
+    def _dp_size_from_dispatch_mapping(dp_rank_mapping, fallback: int) -> int:
+        if isinstance(dp_rank_mapping, int):
+            return max(1, int(dp_rank_mapping) + 1)
+        try:
+            values = [int(x) for x in dp_rank_mapping]
+        except TypeError:
+            return fallback
+        return max(1, max(values) + 1) if values else fallback
+
+    @staticmethod
+    def _dispatch_mesh_candidates(role: str, dispatch_info: dict) -> list[str]:
+        role = str(role or "")
+        if role == "critic":
+            candidates = ["train"]
+            if "critic" in dispatch_info:
+                candidates.append("critic")
+            return candidates
+        return [role]
+
+    def _get_dp_size(self, worker_group, role: str) -> int:
+        fallback = self._fallback_dp_size(worker_group, role)
         try:
             dispatch_info = getattr(worker_group, "_dispatch_info", {})
-            if role not in dispatch_info:
-                dp_rank_mapping = worker_group._query_dispatch_info(role)
-                dispatch_info[role] = dp_rank_mapping
-            else:
-                dp_rank_mapping = dispatch_info[role]
+            last_exc: Exception | None = None
+            for mesh_name in self._dispatch_mesh_candidates(role, dispatch_info):
+                try:
+                    if mesh_name not in dispatch_info:
+                        dispatch_info[mesh_name] = worker_group._query_dispatch_info(mesh_name)
+                    return self._dp_size_from_dispatch_mapping(dispatch_info[mesh_name], fallback)
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+            if last_exc is not None:
+                raise last_exc
         except Exception as exc:
             print(
                 f"[star] failed to query dispatch dp size role={role}; "
                 f"fallback={fallback}; err={type(exc).__name__}: {exc}"
             )
             return fallback
-
-        if isinstance(dp_rank_mapping, int):
-            return max(1, dp_rank_mapping + 1)
-        try:
-            values = [int(x) for x in dp_rank_mapping]
-        except TypeError:
-            return fallback
-        return max(1, max(values) + 1) if values else fallback
 
     @staticmethod
     def _effective_global_mini_batch_size(configured_size: int, batch_size: int, dp_size: int) -> int:
@@ -2116,7 +2167,7 @@ class StarRayTrainer:
         ppo_mini_batch_size = self._effective_global_mini_batch_size(
             configured_mini_batch_size,
             len(batch),
-            self._get_dp_size(ctx.critic_wg, "critic"),
+            self._get_dp_size(ctx.critic_wg, "train"),
         )
         if ppo_mini_batch_size <= 0:
             return DataProto.from_single_dict(
@@ -2401,7 +2452,7 @@ class StarRayTrainer:
 
                 ready_batch = self._shuffle_ready_batch(ready_batch)
                 actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
-                critic_dp_size = self._get_dp_size(ctx.critic_wg, "critic") if ctx.critic_wg is not None else 1
+                critic_dp_size = self._get_dp_size(ctx.critic_wg, "train") if ctx.critic_wg is not None else 1
                 drop_divisor = math.lcm(max(1, actor_dp_size), max(1, critic_dp_size))
                 metrics[f"model/{model_id}/star/drop_divisor"] = float(drop_divisor)
                 metrics[f"model/{model_id}/star/actor_dp_size"] = float(actor_dp_size)
