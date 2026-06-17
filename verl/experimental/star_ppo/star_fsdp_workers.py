@@ -130,6 +130,13 @@ def _rollout_base_sync_done(worker) -> bool:
     return "dummy" not in str(load_format)
 
 
+def _first_not_none(*values):
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def _set_rollout_base_sync_done(worker, done: bool) -> None:
     worker.base_sync_done = bool(done)
     if done:
@@ -397,10 +404,25 @@ class CriticWorker(TrainingWorker):
         self.critic_config = config
         engine_config = config.engine
         engine_config.use_dynamic_bsz = config.use_dynamic_bsz
-        engine_config.infer_max_token_len_per_gpu = config.ppo_infer_max_token_len_per_gpu
-        engine_config.infer_micro_batch_size_per_gpu = config.ppo_infer_micro_batch_size_per_gpu
+        engine_config.infer_max_token_len_per_gpu = _first_not_none(
+            config.ppo_infer_max_token_len_per_gpu,
+            getattr(config, "forward_max_token_len_per_gpu", None),
+            config.ppo_max_token_len_per_gpu,
+        )
+        engine_config.infer_micro_batch_size_per_gpu = _first_not_none(
+            config.ppo_infer_micro_batch_size_per_gpu,
+            getattr(config, "forward_micro_batch_size_per_gpu", None),
+            getattr(config, "forward_micro_batch_size", None),
+            config.ppo_micro_batch_size_per_gpu,
+            config.ppo_micro_batch_size,
+            1,
+        )
         engine_config.max_token_len_per_gpu = config.ppo_max_token_len_per_gpu
-        engine_config.micro_batch_size_per_gpu = config.ppo_micro_batch_size_per_gpu
+        engine_config.micro_batch_size_per_gpu = _first_not_none(
+            config.ppo_micro_batch_size_per_gpu,
+            config.ppo_micro_batch_size,
+            1,
+        )
         worker_config = TrainingWorkerConfig(
             model_type="value_model",
             model_config=config.model,
