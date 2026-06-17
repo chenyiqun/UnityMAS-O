@@ -880,11 +880,14 @@ class TraceWorkflowRunner(WorkflowRunner):
         metric_acc: dict[str, list[float]] = defaultdict(list)
         dropped_query_ids: list[str] = []
         drop_reason_acc: dict[str, int] = defaultdict(int)
+        drop_error_type_acc: dict[str, int] = defaultdict(int)
         for trace in traces:
             if trace.dropped:
                 if trace.query_id:
                     dropped_query_ids.append(trace.query_id)
                 drop_reason_acc[str(trace.drop_reason or "unknown")] += 1
+                error_type = str(trace.drop_error or "unknown").split(":", 1)[0].strip() or "unknown"
+                drop_error_type_acc[error_type] += 1
                 continue
             assignments, alloc_metrics = self.reward_allocator.allocate(trace)
             fallback_assignments = self._build_unassigned_record_rewards(trace, assignments)
@@ -916,6 +919,9 @@ class TraceWorkflowRunner(WorkflowRunner):
         for reason, count in drop_reason_acc.items():
             safe_reason = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(reason or "unknown")).strip("_.-") or "unknown"
             metrics[f"workflow/query_drop/{safe_reason}"] = float(count)
+        for error_type, count in drop_error_type_acc.items():
+            safe_error = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(error_type or "unknown")).strip("_.-") or "unknown"
+            metrics[f"workflow/query_drop_error/{safe_error}"] = float(count)
         for key, values in metric_acc.items():
             if not values:
                 continue

@@ -1145,6 +1145,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         llm_node_counts = []
         dropped_query_ids: list[str] = []
         drop_reason_acc = defaultdict(int)
+        drop_error_type_acc = defaultdict(int)
         node_format_acc = defaultdict(list)
         node_prompt_len_acc = defaultdict(list)
         node_output_len_acc = defaultdict(list)
@@ -1223,6 +1224,8 @@ class GraphWorkflowRunner(WorkflowRunner):
                     dropped_query_ids.append(query_id)
                 reason = str(item.get("drop_reason", "unknown") or "unknown")
                 drop_reason_acc[reason] += 1
+                error_type = str(item.get("drop_error", "unknown") or "unknown").split(":", 1)[0].strip()
+                drop_error_type_acc[error_type or "unknown"] += 1
                 query_elapsed_acc.append(float(item.get("query_elapsed_s", 0.0)))
                 continue
             reward_parts.extend(item["reward_parts"])
@@ -1282,6 +1285,9 @@ class GraphWorkflowRunner(WorkflowRunner):
         for reason, count in drop_reason_acc.items():
             safe_reason = self._sanitize_metric_key(reason)
             metrics[f"workflow/query_drop/{safe_reason}"] = float(count)
+        for error_type, count in drop_error_type_acc.items():
+            safe_error = self._sanitize_metric_key(error_type)
+            metrics[f"workflow/query_drop_error/{safe_error}"] = float(count)
         for node_id, values in node_format_acc.items():
             metrics[f"workflow/node/{node_id}/format_reward_mean"] = float(np.mean(values)) if values else 0.0
         for node_id, values in node_prompt_len_acc.items():

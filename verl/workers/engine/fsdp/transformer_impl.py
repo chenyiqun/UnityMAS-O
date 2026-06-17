@@ -978,6 +978,8 @@ class FSDPEngineWithLMHead(FSDPEngine):
 
             # for compute the log_prob
             input_ids_rmpad_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1)  # (1, total_nnz)
+            input_ids_rmpad_rolled_full = input_ids_rmpad_rolled.squeeze(0)
+            temperature_rmpad_full = temperature_rmpad.squeeze(0)
 
             # pad and slice the inputs if sp > 1
             if self.use_ulysses_sp:
@@ -1011,7 +1013,9 @@ class FSDPEngineWithLMHead(FSDPEngine):
             input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
             temperature_rmpad = temperature_rmpad.squeeze(0)
             output_args["input_ids_rmpad_rolled"] = input_ids_rmpad_rolled
+            output_args["input_ids_rmpad_rolled_full"] = input_ids_rmpad_rolled_full
             output_args["temperature_rmpad"] = temperature_rmpad
+            output_args["temperature_rmpad_full"] = temperature_rmpad_full
 
             # only pass input_ids and position_ids to enable flash_attn_varlen
 
@@ -1109,6 +1113,28 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 entropy_rmpad = output.entropy.squeeze(0)  # (total_nnz,)
             else:
                 logits_rmpad = output.logits.squeeze(0)  # (total_nnz, vocab_size)
+                sp_output_is_local = False
+                if self.use_ulysses_sp:
+                    pad_size = output_args["pad_size"]
+                    expected_tokens = int(input_ids.offsets()[-1].item())
+                    current_tokens = logits_rmpad.size(0)
+                    local_tokens = temperature_rmpad.size(0)
+                    if current_tokens == local_tokens:
+                        sp_output_is_local = True
+                    elif current_tokens == expected_tokens:
+                        temperature_rmpad = output_args["temperature_rmpad_full"]
+                        input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled_full"]
+                    elif pad_size and current_tokens == expected_tokens + pad_size:
+                        logits_rmpad = logits_rmpad.narrow(0, 0, expected_tokens)
+                        temperature_rmpad = output_args["temperature_rmpad_full"]
+                        input_ids_rmpad_rolled = output_args["input_ids_rmpad_rolled_full"]
+                    else:
+                        raise RuntimeError(
+                            "Ulysses LM-head output length mismatch: "
+                            f"logits={current_tokens}, local_temperature={local_tokens}, "
+                            f"expected_full={expected_tokens}, pad_size={pad_size}"
+                        )
+
                 logits_rmpad.div_(temperature_rmpad.clamp(min=1e-8).unsqueeze(-1).to(logits_rmpad.dtype))
 
                 # if use_sp: ((total_nnz / sp) + pad) ; if not use_sp: (batch, seqlen)
@@ -1141,13 +1167,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                     for k, v in outputs.items():
                         v = v.squeeze(0)
                         assert v.shape == log_probs.shape, f"log_probs shape: {log_probs.shape}, {k} shape: {v.shape}"
-                        if self.use_ulysses_sp:
+                        if self.use_ulysses_sp and sp_output_is_local:
                             pad_size = output_args["pad_size"]
                             v = gather_outputs_and_unpad(v, gather_dim=0, unpad_dim=0, padding_size=pad_size)
                         model_output[k] = torch.nested.nested_tensor_from_jagged(v, cu_seqlens)
 
             # gather log_prob if sp > 1
-            if self.use_ulysses_sp:
+            if self.use_ulysses_sp and (use_fused_kernels or sp_output_is_local):
                 pad_size = output_args["pad_size"]
 
                 # gather and unpad for the ulysses sp
