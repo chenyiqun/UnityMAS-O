@@ -14,6 +14,7 @@ from typing import Any, Optional
 import numpy as np
 
 from verl import DataProto
+from verl.experimental.star_ppo.reward_allocators.base import RewardAllocator
 from verl.experimental.star_ppo.tools import build_retriever_tool
 from verl.experimental.star_ppo.workflows.base import WorkflowRunner
 from verl.experimental.star_ppo.workflows.schema import RewardAssignment, WorkflowExecutionRecord, WorkflowTrace
@@ -613,6 +614,56 @@ class TraceWorkflowRunner(WorkflowRunner):
         return reward_parts, metrics
 
     @staticmethod
+    def _record_traj_id(record: WorkflowExecutionRecord) -> str:
+        if record.thin is None or len(record.thin) == 0:
+            return ""
+        traj_ids = record.thin.non_tensor_batch.get("traj_id", np.array([], dtype=object))
+        if len(traj_ids) == 0:
+            return ""
+        return str(traj_ids[0])
+
+    @classmethod
+    def _build_unassigned_record_rewards(
+        cls,
+        trace: WorkflowTrace,
+        assignments: list[RewardAssignment],
+    ) -> list[RewardAssignment]:
+        assigned_traj_ids = {
+            traj_id
+            for assignment in assignments
+            for traj_id in [cls._record_traj_id(assignment.record)]
+            if traj_id
+        }
+        fallback_assignments: list[RewardAssignment] = []
+        for record in trace.records:
+            if not bool(record.trainable):
+                continue
+            traj_id = cls._record_traj_id(record)
+            if not traj_id or traj_id in assigned_traj_ids:
+                continue
+            format_reward = float(record.meta.get("format_reward", 0.0))
+            format_weight = float(record.meta.get("format_weight", 0.0))
+            total_reward = RewardAllocator.compose_reward(
+                0.0,
+                format_reward=format_reward,
+                format_weight=format_weight,
+            )
+            fallback_assignments.append(
+                RewardAssignment(
+                    record=record,
+                    reward=float(total_reward),
+                    reward_type="unassigned_record_fallback",
+                    meta={
+                        "task_reward": 0.0,
+                        "format_penalty": float(format_weight * format_reward),
+                        "total_reward": float(total_reward),
+                    },
+                )
+            )
+            assigned_traj_ids.add(traj_id)
+        return fallback_assignments
+
+    @staticmethod
     def _merge_scalar_metrics(metric_acc: dict[str, list[float]], metrics: dict[str, float]) -> None:
         for key, value in metrics.items():
             if isinstance(value, int | float | np.integer | np.floating):
@@ -836,6 +887,10 @@ class TraceWorkflowRunner(WorkflowRunner):
                 drop_reason_acc[str(trace.drop_reason or "unknown")] += 1
                 continue
             assignments, alloc_metrics = self.reward_allocator.allocate(trace)
+            fallback_assignments = self._build_unassigned_record_rewards(trace, assignments)
+            if fallback_assignments:
+                assignments = [*assignments, *fallback_assignments]
+                metric_acc["workflow/reward_unassigned_fallback"].append(float(len(fallback_assignments)))
             parts, assign_metrics = self._build_reward_parts(assignments)
             reward_parts.extend(parts)
             self._merge_scalar_metrics(metric_acc, trace.metrics)

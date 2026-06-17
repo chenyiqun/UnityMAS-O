@@ -1676,38 +1676,24 @@ class StarRayTrainer:
             return []
         return [str(q).strip() for q in query_ids if str(q).strip()]
 
-    def _drop_queries_from_rollout_buffers(self, query_ids: list[str]) -> dict[str, float]:
+    def _record_workflow_dropped_queries(self, query_ids: list[str]) -> dict[str, float]:
         if not query_ids:
             return {}
         unique_ids = list(dict.fromkeys(query_ids))
         metrics: dict[str, float] = {
-            "workflow/query_dropped_cleanup": float(len(unique_ids)),
+            "workflow/query_dropped_recorded": float(len(unique_ids)),
         }
-        for model_id, ctx in self.model_contexts.items():
+        for model_id in self.model_contexts:
             local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
             if local_buffer is not None:
-                local_purged = local_buffer.mark_queries_dropped(unique_ids)
+                local_buffer.mark_queries_dropped(unique_ids)
                 local_stats = local_buffer.stats()
-                metrics[f"model/{model_id}/star/local_dropped_queries"] = float(len(unique_ids))
-                metrics[f"model/{model_id}/star/local_purged_traj"] = float(local_purged)
+                metrics[f"model/{model_id}/star/local_dropped_queries_observed"] = float(len(unique_ids))
                 metrics[f"model/{model_id}/star/local_buffer_total"] = float(local_stats["buffer/total"])
                 metrics[f"model/{model_id}/star/local_buffer_ready"] = float(local_stats["buffer/ready"])
                 metrics[f"model/{model_id}/star/local_buffer_dropped_queries"] = float(
                     local_stats["buffer/dropped_queries"]
                 )
-            try:
-                outputs = ctx.rollout_wg.drop_queries(unique_ids)
-                reduced = self._reduce_worker_metrics(outputs)
-                for key, val in reduced.items():
-                    metrics[f"model/{model_id}/{key}"] = float(val)
-            except Exception as exc:
-                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
-                print(
-                    f"[star] drop_queries cleanup failed: model={model_id} "
-                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
-                )
-                metrics[f"model/{model_id}/star/drop_cleanup_failed"] = 1.0
-                metrics[f"model/{model_id}/star/drop_cleanup_failed_timeout"] = timeout_flag
         return metrics
 
     async def _call_workflow_runner_batch(self, batch: DataProto, epoch: int, stage: str):
@@ -1742,7 +1728,7 @@ class StarRayTrainer:
                 f"[star] workflow batch timeout: stage={stage} timeout_s={timeout_s} "
                 f"batch_size={len(batch)} dropped_queries={len(query_ids)}"
             )
-            cleanup_metrics = self._drop_queries_from_rollout_buffers(query_ids)
+            cleanup_metrics = self._record_workflow_dropped_queries(query_ids)
             timeout_metrics: dict[str, float] = {
                 "workflow/query_dropped": float(len(query_ids)),
                 "workflow/query_drop_ratio": float(len(query_ids) / max(1, len(batch))),
@@ -1760,7 +1746,7 @@ class StarRayTrainer:
                 f"batch_size={len(batch)} dropped_queries={len(query_ids)} "
                 f"err={type(exc).__name__}: {exc}"
             )
-            cleanup_metrics = self._drop_queries_from_rollout_buffers(query_ids)
+            cleanup_metrics = self._record_workflow_dropped_queries(query_ids)
             fail_metrics: dict[str, float] = {
                 "workflow/query_dropped": float(len(query_ids)),
                 "workflow/query_drop_ratio": float(len(query_ids) / max(1, len(batch))),
@@ -1771,7 +1757,7 @@ class StarRayTrainer:
             return self._empty_rewards(), fail_metrics
 
         dropped_query_ids = self._collect_workflow_dropped_query_ids()
-        drop_cleanup_metrics = self._drop_queries_from_rollout_buffers(dropped_query_ids)
+        drop_cleanup_metrics = self._record_workflow_dropped_queries(dropped_query_ids)
         if drop_cleanup_metrics:
             workflow_metrics.update(drop_cleanup_metrics)
         return rewards, workflow_metrics

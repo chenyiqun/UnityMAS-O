@@ -71,17 +71,6 @@ class TrajectoryBuffer:
             for query_id in expired:
                 self.dropped_queries.pop(query_id, None)
 
-    def _purge_query_nolock(self, query_id: str) -> int:
-        if not query_id:
-            return 0
-        removed_ids: set[str] = set()
-        for traj_id, entry in list(self.entries.items()):
-            if entry.query_id == query_id:
-                self.entries.pop(traj_id, None)
-                removed_ids.add(traj_id)
-        self._prune_ready_queue(removed_ids)
-        return len(removed_ids)
-
     def _evict_overflow(self) -> None:
         with self._lock:
             removed_ids: set[str] = set()
@@ -95,8 +84,6 @@ class TrajectoryBuffer:
         with self._lock:
             self._evict_expired()
             self._evict_expired_dropped_queries()
-            if entry.query_id in self.dropped_queries:
-                return
             self.entries[entry.traj_id] = entry
             self._evict_overflow()
 
@@ -107,20 +94,18 @@ class TrajectoryBuffer:
             if not query_id:
                 return 0
             self.dropped_queries[query_id] = time.time()
-            return self._purge_query_nolock(query_id)
+            return 0
 
     def mark_queries_dropped(self, query_ids: list[str]) -> int:
         with self._lock:
             self._evict_expired()
             self._evict_expired_dropped_queries()
-            purged = 0
             for query_id in query_ids:
                 q = str(query_id or "")
                 if not q:
                     continue
                 self.dropped_queries[q] = time.time()
-                purged += self._purge_query_nolock(q)
-            return purged
+            return 0
 
     def commit_reward(self, traj_id: str, reward: torch.Tensor, done: bool) -> bool:
         with self._lock:
@@ -128,10 +113,6 @@ class TrajectoryBuffer:
             self._evict_expired_dropped_queries()
             entry = self.entries.get(traj_id)
             if entry is None:
-                return False
-
-            if entry.query_id in self.dropped_queries:
-                self.entries.pop(traj_id, None)
                 return False
 
             was_done = entry.done

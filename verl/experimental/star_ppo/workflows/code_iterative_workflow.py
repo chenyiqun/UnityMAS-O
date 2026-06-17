@@ -326,13 +326,25 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             "extra_info": self._extract_first(query_batch, ["extra_info", "extra"], {}),
         }
         start = time.perf_counter()
-        output = await self._run_tool(
-            tool_name,
-            input_value=payload,
-            top_k=1,
-            max_attempts=1,
-            fail_open=bool(self.verifier_cfg.get("fail_open", True)),
-        )
+        try:
+            output = await self._run_tool(
+                tool_name,
+                input_value=payload,
+                top_k=1,
+                max_attempts=1,
+                fail_open=bool(self.verifier_cfg.get("fail_open", True)),
+            )
+        except Exception as exc:
+            output = {
+                "pass_rate": 0.0,
+                "all_passed": 0,
+                "passed": 0,
+                "total": 0,
+                "error": f"{type(exc).__name__}: {exc}",
+                "error_code": -6,
+                "error_message": "Verifier Tool Exception",
+                "failed_test_index": -1,
+            }
         duration_s = float(time.perf_counter() - start)
         if not isinstance(output, dict):
             output = {
