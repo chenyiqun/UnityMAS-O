@@ -1024,7 +1024,26 @@ class StarRayTrainer:
                     worker_timing = self._extract_worker_rollout_timing(thin)
                 else:
                     manager_start = time.perf_counter()
-                    fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
+                    bsz = len(gen_batch)
+                    manager_divisor = max(
+                        1,
+                        int(self.config.actor_rollout_ref.rollout.get("agent", {}).get("num_workers", 1)),
+                    )
+                    if bsz > 0 and manager_divisor > 1 and bsz % manager_divisor != 0:
+                        pad = manager_divisor - (bsz % manager_divisor)
+                        dp_padding_applied = 1.0
+                        dp_padding_added = float(pad)
+                        dp_padding_factor = float((bsz + pad) / max(1, bsz))
+                        pad_select_start = time.perf_counter()
+                        padded_indices = list(range(bsz)) + [bsz - 1] * pad
+                        manager_batch = gen_batch.select_idxs(padded_indices)
+                        data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
+                        fat_padded = await ctx.rollout_manager.generate_sequences_async(manager_batch)
+                        pad_select_start = time.perf_counter()
+                        fat = fat_padded.select_idxs(list(range(bsz)))
+                        data_proto_pad_select_s += float(time.perf_counter() - pad_select_start)
+                    else:
+                        fat = await ctx.rollout_manager.generate_sequences_async(gen_batch)
                     manager_generate_s = float(time.perf_counter() - manager_start)
                     # Avoid DataProto.union() conflicts on object-typed non-tensor fields
                     # (e.g. raw_prompt) that may be semantically equivalent but not deeply equal.
