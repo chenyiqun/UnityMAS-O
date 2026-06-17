@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 from verl import DataProto
 from verl.experimental.star_ppo.trajectory_buffer import TrajectoryBuffer, TrajectoryEntry
 from verl.experimental.star_ppo.types import EngineSpec
+from verl.protocol import DataProtoFuture
 from verl.single_controller.ray import RayClassWithInitArgs, RayResourcePool, RayWorkerGroup
 from verl.single_controller.ray.base import create_colocated_worker_cls
 from verl.trainer.main_ppo import create_rl_dataset, create_rl_sampler
@@ -2028,6 +2029,7 @@ class StarRayTrainer:
 
     @staticmethod
     def _extract_worker_metrics(output) -> dict[str, float]:
+        output = StarRayTrainer._materialize_worker_output(output)
         try:
             metrics = tu.get(output, "metrics")
         except Exception:
@@ -2035,6 +2037,12 @@ class StarRayTrainer:
         if metrics is None and isinstance(output, DataProto):
             metrics = output.meta_info.get("metrics", {})
         return metrics or {}
+
+    @staticmethod
+    def _materialize_worker_output(output):
+        if isinstance(output, DataProtoFuture):
+            return output.get()
+        return output
 
     @staticmethod
     def _prefix_worker_update_metrics(metrics: dict, prefix: str, mfu_metric_key: str) -> dict:
@@ -2062,6 +2070,7 @@ class StarRayTrainer:
         )
 
         output = ctx.actor_wg.compute_log_prob(batch_td)
+        output = self._materialize_worker_output(output)
         log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td).float()
         result = {"old_log_probs": log_probs}
 
@@ -2084,6 +2093,7 @@ class StarRayTrainer:
             output = ctx.actor_wg.compute_log_prob(batch_td)
         else:
             output = ctx.ref_policy_wg.compute_ref_log_prob(batch_td)
+        output = self._materialize_worker_output(output)
         log_probs = no_padding_2_padding(tu.get(output, "log_probs"), batch_td).float()
         return DataProto.from_tensordict(tu.get_tensordict({"ref_log_prob": log_probs}))
 
@@ -2091,6 +2101,7 @@ class StarRayTrainer:
         batch_td = self._to_ppo_worker_batch(batch)
         tu.assign_non_tensor(batch_td, compute_loss=False)
         output = ctx.critic_wg.compute_values(batch_td)
+        output = self._materialize_worker_output(output)
         values = no_padding_2_padding(tu.get(output, "values"), batch_td).float()
         return DataProto.from_tensordict(tu.get_tensordict({"values": values}))
 
@@ -2106,6 +2117,7 @@ class StarRayTrainer:
             dataloader_kwargs={"shuffle": self.config.critic.shuffle},
         )
         output = ctx.critic_wg.update_critic(batch_td)
+        output = self._materialize_worker_output(output)
         metrics = self._prefix_worker_update_metrics(
             self._extract_worker_metrics(output),
             prefix="critic/",
@@ -2134,6 +2146,7 @@ class StarRayTrainer:
             compute_loss=True,
         )
         output = ctx.actor_wg.update_actor(batch_td)
+        output = self._materialize_worker_output(output)
         metrics = self._prefix_worker_update_metrics(
             self._extract_worker_metrics(output),
             prefix="actor/",

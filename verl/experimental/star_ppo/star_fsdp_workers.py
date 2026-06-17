@@ -395,10 +395,16 @@ class CriticWorker(TrainingWorker):
 
     def __init__(self, config):
         self.critic_config = config
+        engine_config = config.engine
+        engine_config.use_dynamic_bsz = config.use_dynamic_bsz
+        engine_config.infer_max_token_len_per_gpu = config.ppo_infer_max_token_len_per_gpu
+        engine_config.infer_micro_batch_size_per_gpu = config.ppo_infer_micro_batch_size_per_gpu
+        engine_config.max_token_len_per_gpu = config.ppo_max_token_len_per_gpu
+        engine_config.micro_batch_size_per_gpu = config.ppo_micro_batch_size_per_gpu
         worker_config = TrainingWorkerConfig(
             model_type="value_model",
             model_config=config.model,
-            engine_config=config.engine,
+            engine_config=engine_config,
             optimizer_config=config.optim,
             checkpoint_config=config.checkpoint,
             profiler_config=getattr(config, "profiler", None),
