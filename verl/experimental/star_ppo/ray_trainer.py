@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import json
+import math
 import os
 import time
 import traceback
@@ -1825,6 +1826,24 @@ class StarRayTrainer:
         return max(1, max(values) + 1) if values else fallback
 
     @staticmethod
+    def _effective_global_mini_batch_size(configured_size: int, batch_size: int, dp_size: int) -> int:
+        configured_size = max(1, int(configured_size))
+        batch_size = max(0, int(batch_size))
+        dp_size = max(1, int(dp_size))
+        if batch_size <= 0:
+            return 0
+        if batch_size % dp_size != 0:
+            batch_size = (batch_size // dp_size) * dp_size
+        if batch_size <= 0:
+            return 0
+
+        upper = min(configured_size, batch_size)
+        for candidate in range(upper, 0, -1):
+            if candidate % dp_size == 0 and batch_size % candidate == 0:
+                return candidate
+        return dp_size if batch_size % dp_size == 0 else 0
+
+    @staticmethod
     def _empty_batch() -> DataProto:
         return DataProto.from_dict(non_tensors={"traj_id": np.array([], dtype=object)})
 
@@ -2107,7 +2126,17 @@ class StarRayTrainer:
 
     def _update_critic_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         batch_td = self._to_ppo_worker_batch(batch)
-        ppo_mini_batch_size = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        configured_mini_batch_size = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_mini_batch_size = self._effective_global_mini_batch_size(
+            configured_mini_batch_size,
+            len(batch),
+            self._get_dp_size(ctx.critic_wg, "critic"),
+        )
+        if ppo_mini_batch_size <= 0:
+            return DataProto.from_single_dict(
+                data={},
+                meta_info={"metrics": {"critic/star/skipped_too_small_batch": 1.0}},
+            )
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
@@ -2133,7 +2162,17 @@ class StarRayTrainer:
         batch_td = self._to_ppo_worker_batch(batch)
         actor_cfg = self.config.actor_rollout_ref.actor
         calculate_entropy = actor_cfg.calculate_entropy or (actor_cfg.entropy_coeff != 0.0)
-        ppo_mini_batch_size = actor_cfg.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        configured_mini_batch_size = actor_cfg.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        ppo_mini_batch_size = self._effective_global_mini_batch_size(
+            configured_mini_batch_size,
+            len(batch),
+            self._get_dp_size(ctx.actor_wg, "actor"),
+        )
+        if ppo_mini_batch_size <= 0:
+            return DataProto.from_single_dict(
+                data={},
+                meta_info={"metrics": {"actor/star/skipped_too_small_batch": 1.0}},
+            )
         tu.assign_non_tensor(
             batch_td,
             calculate_entropy=calculate_entropy,
@@ -2376,9 +2415,13 @@ class StarRayTrainer:
 
                 ready_batch = self._shuffle_ready_batch(ready_batch)
                 actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
-                metrics[f"model/{model_id}/star/drop_divisor"] = float(actor_dp_size)
+                critic_dp_size = self._get_dp_size(ctx.critic_wg, "critic") if ctx.critic_wg is not None else 1
+                drop_divisor = math.lcm(max(1, actor_dp_size), max(1, critic_dp_size))
+                metrics[f"model/{model_id}/star/drop_divisor"] = float(drop_divisor)
+                metrics[f"model/{model_id}/star/actor_dp_size"] = float(actor_dp_size)
+                metrics[f"model/{model_id}/star/critic_dp_size"] = float(critic_dp_size)
                 metrics[f"model/{model_id}/star/buffer_shuffle_ready"] = float(self._shuffle_ready_buffer)
-                ready_batch, dropped = self._maybe_drop_last(ready_batch, actor_dp_size)
+                ready_batch, dropped = self._maybe_drop_last(ready_batch, drop_divisor)
                 metrics[f"model/{model_id}/star/dropped"] = float(dropped)
             except Exception as exc:
                 timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
