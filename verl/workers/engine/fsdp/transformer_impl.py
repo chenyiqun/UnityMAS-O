@@ -81,6 +81,28 @@ logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 device_name = get_device_name()
 
 
+def _gather_ulysses_rmpad_if_needed(values_rmpad: torch.Tensor, input_ids: torch.Tensor, padding_size: int):
+    expected_tokens = int(input_ids.offsets()[-1].item())
+    current_tokens = values_rmpad.size(0)
+    if current_tokens == expected_tokens:
+        return values_rmpad
+    if padding_size and current_tokens == expected_tokens + padding_size:
+        return values_rmpad.narrow(0, 0, expected_tokens)
+
+    values_rmpad = gather_outputs_and_unpad(
+        values_rmpad,
+        gather_dim=0,
+        unpad_dim=0,
+        padding_size=padding_size,
+    )
+    if values_rmpad.size(0) != expected_tokens:
+        raise RuntimeError(
+            "Ulysses value-head output length mismatch after gather: "
+            f"got {values_rmpad.size(0)}, expected {expected_tokens}"
+        )
+    return values_rmpad
+
+
 class FSDPEngine(BaseEngine):
     """
     Concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP).
@@ -1297,7 +1319,7 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
             # gather output if sp > 1
             if self.use_ulysses_sp:
                 pad_size = output_args["pad_size"]
-                values_rmpad = gather_outputs_and_unpad(values_rmpad, gather_dim=0, unpad_dim=0, padding_size=pad_size)
+                values_rmpad = _gather_ulysses_rmpad_if_needed(values_rmpad, input_ids, pad_size)
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()
