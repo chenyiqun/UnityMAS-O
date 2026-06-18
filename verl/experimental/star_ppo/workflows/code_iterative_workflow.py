@@ -573,6 +573,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         agent_legal_counts: dict[str, int] = {}
         agent_prompt_tokens: dict[str, list[float]] = {}
         agent_output_tokens: dict[str, list[float]] = {}
+        agent_max_response_tokens: dict[str, list[float]] = {}
         verifier_pass_rates: list[float] = []
         verifier_all_passed: list[float] = []
         verifier_total_tests: list[float] = []
@@ -603,6 +604,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             )
             agent_prompt_tokens.setdefault(agent_id, []).append(float(record.meta.get("prompt_tokens", 0.0) or 0.0))
             agent_output_tokens.setdefault(agent_id, []).append(float(record.meta.get("output_tokens", 0.0) or 0.0))
+            agent_max_response_tokens.setdefault(agent_id, []).append(
+                float(record.meta.get("max_response_tokens", 0.0) or 0.0)
+            )
 
         metrics = {
             "workflow/code/used_turns": float(len(verifier_records)),
@@ -655,8 +659,12 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             legal_count = agent_legal_counts.get(agent_id, 0)
             prompt_values = agent_prompt_tokens.get(agent_id, [])
             output_values = agent_output_tokens.get(agent_id, [])
+            max_response_values = agent_max_response_tokens.get(agent_id, [])
             metrics[f"workflow/code/agent/{agent_id}/call_count"] = float(count)
             metrics[f"workflow/code/agent/{agent_id}/format_legal_rate"] = float(legal_count / max(1, count))
+            metrics[f"workflow/code/agent/{agent_id}/max_response_tokens_mean"] = (
+                float(sum(max_response_values) / max(1, len(max_response_values))) if max_response_values else 0.0
+            )
             metrics[f"workflow/code/agent/{agent_id}/prompt_tokens_mean"] = (
                 float(sum(prompt_values) / max(1, len(prompt_values))) if prompt_values else 0.0
             )

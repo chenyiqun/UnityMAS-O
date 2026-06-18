@@ -155,6 +155,7 @@ star:
         model_id: planner_llm
         agent_id: planner_agent
         output_key: pseudocode
+        max_response_tokens: ${oc.decode:${oc.env:CODE_PLANNER_MAX_RESPONSE_TOKENS,768}}
         parser:
           type: raw
         reward:
@@ -180,6 +181,7 @@ star:
 
           Task:
           Produce the pseudocode for turn {turn_number} of {max_turns}. Use the problem, execution mode, visible tests, previous code, verification errors, and reflections in the global state to improve the plan. Be concrete about input parsing or function arguments, algorithm, edge cases, and output/return formatting.
+          Keep the pseudocode concise; avoid restating the full problem or previous code.
 
           Output strictly in this format only:
           <pseudocode>
@@ -191,6 +193,7 @@ star:
         model_id: coder_llm
         agent_id: coder_agent
         output_key: code
+        max_response_tokens: ${oc.decode:${oc.env:CODE_CODER_MAX_RESPONSE_TOKENS,1536}}
         parser:
           type: raw
         reward:
@@ -237,10 +240,12 @@ star:
           Do not copy the example logic. Solve the original problem.
           Do not use Markdown fences such as ```python. Do not output explanations before or after the code tags.
           Your entire response must be exactly one <code>...</code> block.
+          Keep the implementation compact and avoid comments unless they are necessary for correctness.
       reflection:
         model_id: reflection_llm
         agent_id: reflection_agent
         output_key: reflection
+        max_response_tokens: ${oc.decode:${oc.env:CODE_REFLECTION_MAX_RESPONSE_TOKENS,512}}
         parser:
           type: raw
         reward:
@@ -281,6 +286,7 @@ star:
 
           Task:
           Give actionable debugging guidance for the next Planner and Coder. Identify the likely root cause, the exact code or algorithm change needed, and any edge cases to handle. Stay specific and concise.
+          Limit the reflection to the minimum concrete fix; do not repeat the full code or problem.
 
           Output strictly in this format only:
           <reflection>

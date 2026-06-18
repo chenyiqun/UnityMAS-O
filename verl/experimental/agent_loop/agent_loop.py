@@ -529,6 +529,15 @@ class AgentLoopWorker:
             sample_sampling_params = dict(sampling_params)
             if not validate and per_sample_do_sample is not None and not bool(per_sample_do_sample[i]):
                 apply_greedy_sampling_params(sample_sampling_params)
+            token_limit_key = "max_tokens" if kwargs.get("max_tokens", None) is not None else "max_new_tokens"
+            token_limit = kwargs.get(token_limit_key, None)
+            if token_limit is not None:
+                try:
+                    token_limit = int(token_limit)
+                except (TypeError, ValueError):
+                    token_limit = 0
+                if token_limit > 0:
+                    sample_sampling_params[token_limit_key] = token_limit
             tasks.append(
                 asyncio.create_task(
                     self._run_agent_loop(sample_sampling_params, trajectory_info[i], trace=trace_this_sample, **kwargs)

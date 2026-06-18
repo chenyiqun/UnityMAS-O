@@ -532,6 +532,15 @@ class TraceWorkflowRunner(WorkflowRunner):
             [raw_messages],
             agent_id,
         )
+        max_response_tokens = node_cfg.get("max_response_tokens", node_cfg.get("max_tokens", 0))
+        try:
+            max_response_tokens = int(max_response_tokens)
+        except (TypeError, ValueError):
+            max_response_tokens = 0
+        if max_response_tokens > 0:
+            prompt_batch.non_tensor_batch["max_tokens"] = np.full(
+                (len(prompt_batch),), max_response_tokens, dtype=np.int64
+            )
         timing_state: dict[str, Any] = {}
         rollout_coro = self.trainer._rollout_model_async_batched(model_id, prompt_batch, timing_state=timing_state)
         if self.llm_timeout_seconds > 0:
@@ -546,6 +555,7 @@ class TraceWorkflowRunner(WorkflowRunner):
         meta["format_weight"] = float(dict(node_cfg.get("reward", {})).get("format_weight", 0.0))
         meta["prompt_tokens"] = int(prompt_tokens)
         meta["output_tokens"] = int(self._count_tokens(raw_text))
+        meta["max_response_tokens"] = int(max_response_tokens)
         meta["prompt_trimmed_tokens"] = int(trimmed_tokens)
         meta["timing"] = {
             str(k): float(v)
