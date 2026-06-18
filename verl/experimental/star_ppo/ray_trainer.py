@@ -2394,6 +2394,12 @@ class StarRayTrainer:
         indices = np.random.permutation(bsz)[:keep].tolist()
         return batch.select_idxs(indices), bsz - keep
 
+    def _local_buffer_stats_for_model(self, model_id: str) -> dict[str, int]:
+        local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
+        if local_buffer is None:
+            return {"buffer/total": 0, "buffer/ready": 0, "buffer/dropped_queries": 0}
+        return local_buffer.stats()
+
     def _run_model_ppo_update(self, model_id: str, ctx: ModelWorkerContext, batch: DataProto, global_step: int):
         metrics: dict[str, float] = {}
         if len(batch) == 0:
@@ -2498,6 +2504,7 @@ class StarRayTrainer:
 
         for model_id, ctx in self.model_contexts.items():
             try:
+                self._mark_progress(stage=f"train_update_build_ready:{model_id}", step=self._global_step)
                 ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
                 remote_ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
                 remote_ready_count = len(remote_ready_batch) if isinstance(remote_ready_batch, DataProto) else 0
@@ -2508,8 +2515,16 @@ class StarRayTrainer:
                 )
                 local_ready = self._build_ready_train_batch_from_local_buffer(model_id, max_items=local_max_items)
                 ready_batch = self._merge_ready_batches([remote_ready_batch, local_ready])
+                post_local_stats = self._local_buffer_stats_for_model(model_id)
+                metrics[f"model/{model_id}/star/max_ready_items"] = float(max_ready_items)
                 metrics[f"model/{model_id}/star/remote_ready_consumed"] = float(remote_ready_count)
                 metrics[f"model/{model_id}/star/local_ready_consumed"] = float(len(local_ready))
+                metrics[f"model/{model_id}/star/local_buffer_total_after_pop"] = float(
+                    post_local_stats.get("buffer/total", 0)
+                )
+                metrics[f"model/{model_id}/star/local_buffer_ready_after_pop"] = float(
+                    post_local_stats.get("buffer/ready", 0)
+                )
                 if ready_batch is None:
                     metrics[f"model/{model_id}/star/consumed"] = 0.0
                     metrics[f"model/{model_id}/star/dropped"] = 0.0
@@ -2541,8 +2556,8 @@ class StarRayTrainer:
         if update_jobs:
             # Different models use disjoint worker groups/resource pools, so they can
             # update in parallel instead of serial model-by-model execution.
-            ppo_results = await asyncio.gather(
-                *[
+            update_tasks = [
+                asyncio.create_task(
                     asyncio.to_thread(
                         self._run_model_ppo_update_safe,
                         model_id,
@@ -2550,9 +2565,22 @@ class StarRayTrainer:
                         ready_batch,
                         self._global_step,
                     )
-                    for model_id, ctx, ready_batch in update_jobs
-                ]
-            )
+                )
+                for model_id, ctx, ready_batch in update_jobs
+            ]
+            ppo_results = []
+            pending = set(update_tasks)
+            try:
+                heartbeat_s = max(5.0, min(float(self._stall_heartbeat_seconds), 30.0))
+                while pending:
+                    done, pending = await asyncio.wait(pending, timeout=heartbeat_s)
+                    self._mark_progress(stage="train_update_ppo", step=self._global_step)
+                    for task in done:
+                        ppo_results.append(task.result())
+            except Exception:
+                for task in pending:
+                    task.cancel()
+                raise
             for ppo_metrics in ppo_results:
                 metrics.update(ppo_metrics)
 

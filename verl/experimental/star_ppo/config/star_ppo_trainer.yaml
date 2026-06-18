@@ -40,7 +40,10 @@ star:
   train:
     drop_last: true
     enforce_divisible_batch: true
-    max_ready_items: 0
+    # Cap the number of ready trajectories each model consumes per sync update.
+    # Rollout samples still enter the buffer; extra ready samples remain queued
+    # for later updates instead of making one PPO step process every turn.
+    max_ready_items: ${oc.decode:${oc.env:STAR_MAX_READY_ITEMS,${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}}
 
 actor_rollout_ref:
   rollout:
