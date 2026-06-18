@@ -10,7 +10,6 @@ trainer:
   project_name: ${oc.env:PROJECT_NAME,verl_examples}
   experiment_name: ${oc.env:EXPERIMENT_NAME,star_code_iterative_plan_code_reflect}
   val_before_train: ${oc.decode:${oc.env:VAL_BEFORE_TRAIN,true}}
-  critic_warmup: ${oc.decode:${oc.env:STAR_CRITIC_WARMUP,5}}
   test_freq: ${oc.decode:${oc.env:TEST_FREQ,50}}
   val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,5}}
   save_freq: ${oc.decode:${oc.env:SAVE_FREQ,300}}
@@ -97,8 +96,6 @@ ray_kwargs:
     address: auto
 
 star:
-  train:
-    max_ready_items: ${oc.decode:${oc.env:STAR_MAX_READY_ITEMS,${oc.env:STAR_CODE_MAX_READY_ITEMS,192}}}
   workflow:
     name: code_iterative_plan_code_reflect
     llm_timeout_seconds: ${oc.decode:${oc.env:STAR_LLM_TIMEOUT_SECONDS,0}}

@@ -1761,16 +1761,36 @@ class StarRayTrainer:
             return await run_batch(batch, epoch, stage=stage)
         return await run_batch(batch, epoch)
 
+    async def _await_with_progress(self, coro, *, timeout_s: float, stage: str):
+        task = asyncio.create_task(coro)
+        start_time = time.time()
+        heartbeat_s = max(5.0, min(float(self._stall_heartbeat_seconds), 30.0))
+        try:
+            while True:
+                remaining_s = None
+                if timeout_s > 0:
+                    remaining_s = timeout_s - (time.time() - start_time)
+                    if remaining_s <= 0:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        raise asyncio.TimeoutError()
+                wait_s = heartbeat_s if remaining_s is None else min(heartbeat_s, max(0.001, remaining_s))
+                done, _ = await asyncio.wait({task}, timeout=wait_s)
+                if task in done:
+                    return task.result()
+                self._mark_progress(stage=stage, step=self._global_step)
+        finally:
+            if not task.done():
+                task.cancel()
+
     async def _run_workflow_batch(self, batch: DataProto, epoch: int, stage: str) -> tuple[DataProto, dict[str, float]]:
         timeout_s = float(self._workflow_batch_timeout_seconds)
         try:
-            if timeout_s > 0:
-                rewards, workflow_metrics = await asyncio.wait_for(
-                    self._call_workflow_runner_batch(batch, epoch, stage=stage),
-                    timeout=timeout_s,
-                )
-            else:
-                rewards, workflow_metrics = await self._call_workflow_runner_batch(batch, epoch, stage=stage)
+            rewards, workflow_metrics = await self._await_with_progress(
+                self._call_workflow_runner_batch(batch, epoch, stage=stage),
+                timeout_s=timeout_s,
+                stage=f"{stage}_workflow_running",
+            )
         except asyncio.TimeoutError:
             query_ids = []
             if "query_id" in batch.non_tensor_batch:
@@ -2405,12 +2425,21 @@ class StarRayTrainer:
         if len(batch) == 0:
             return metrics
 
+        update_t0 = time.time()
+        timing_prefix = f"model/{model_id}/timing/update"
+
+        def record_elapsed(name: str, start_time: float):
+            metrics[f"{timing_prefix}/{name}_s"] = float(time.time() - start_time)
+
+        stage_t0 = time.time()
         batch = self._ensure_ppo_engine_inputs(batch)
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+        record_elapsed("prepare", stage_t0)
 
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
+        stage_t0 = time.time()
         if bypass_recomputing_logprobs:
             from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
@@ -2419,6 +2448,7 @@ class StarRayTrainer:
                 rollout_corr_config=rollout_corr_config,
                 policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
             )
+            metrics[f"model/{model_id}/star/old_log_prob_bypass"] = 1.0
         else:
             old_log_prob = self._compute_old_log_prob_for_model(ctx, batch)
             if "routed_experts" in batch.batch and "routed_experts" in old_log_prob.batch:
@@ -2427,15 +2457,22 @@ class StarRayTrainer:
                     "routed_experts. Disable either router_replay.mode='R2' or rollout routing replay for STAR PPO."
                 )
             batch = self._overwrite_tensor_fields(batch, old_log_prob)
+            metrics[f"model/{model_id}/star/old_log_prob_bypass"] = 0.0
+        record_elapsed("old_log_prob", stage_t0)
 
         if self.use_reference_policy and ctx.ref_policy_wg is not None:
+            stage_t0 = time.time()
             ref_log_prob = self._compute_ref_log_prob_for_model(ctx, batch)
             batch = self._overwrite_tensor_fields(batch, ref_log_prob)
+            record_elapsed("ref_log_prob", stage_t0)
 
         if self.use_critic and ctx.critic_wg is not None:
+            stage_t0 = time.time()
             values = self._compute_values_for_model(ctx, batch)
             batch = self._overwrite_tensor_fields(batch, values)
+            record_elapsed("values", stage_t0)
 
+        stage_t0 = time.time()
         if self.config.algorithm.use_kl_in_reward and "ref_log_prob" in batch.batch.keys():
             batch, kl_metrics = apply_kl_penalty(
                 batch,
@@ -2447,18 +2484,22 @@ class StarRayTrainer:
         else:
             if "token_level_rewards" not in batch.batch.keys() and "token_level_scores" in batch.batch.keys():
                 batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+        record_elapsed("reward_kl", stage_t0)
 
         if (
             rollout_corr_config is not None
             and "rollout_log_probs" in batch.batch
             and not bypass_recomputing_logprobs
         ):
+            stage_t0 = time.time()
             from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_add_to_batch
 
             batch, is_metrics = compute_rollout_correction_and_add_to_batch(batch, rollout_corr_config)
             for key, val in is_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
+            record_elapsed("rollout_correction", stage_t0)
 
+        stage_t0 = time.time()
         batch = compute_advantage(
             batch,
             adv_estimator=self.config.algorithm.adv_estimator,
@@ -2468,7 +2509,9 @@ class StarRayTrainer:
             norm_adv_by_std_in_grpo=self.config.algorithm.get("norm_adv_by_std_in_grpo", True),
             config=self.config.algorithm,
         )
+        record_elapsed("advantage", stage_t0)
 
+        stage_t0 = time.time()
         if "agent_id" in batch.non_tensor_batch and "reward" in batch.batch.keys():
             agent_ids = batch.non_tensor_batch["agent_id"]
             reward_vec = batch.batch["reward"].detach().cpu().numpy().reshape(-1)
@@ -2480,19 +2523,26 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/agent/{agent_id}/reward_mean"] = float(np.mean(reward_vec[mask]))
                 metrics[f"model/{model_id}/agent/{agent_id}/adv_mean"] = float(np.mean(adv_vec[mask]))
                 metrics[f"model/{model_id}/agent/{agent_id}/samples"] = float(np.sum(mask))
+        record_elapsed("agent_metrics", stage_t0)
 
         if self.use_critic and ctx.critic_wg is not None:
+            stage_t0 = time.time()
             critic_output = self._update_critic_for_model(ctx, batch)
             critic_metrics = reduce_metrics(critic_output.meta_info.get("metrics", {}))
             for key, val in critic_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
+            record_elapsed("critic_update", stage_t0)
 
         if self.config.trainer.critic_warmup <= global_step:
+            stage_t0 = time.time()
             actor_output = self._update_actor_for_model(ctx, batch)
             actor_metrics = reduce_metrics(actor_output.meta_info.get("metrics", {}))
             for key, val in actor_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
+            record_elapsed("actor_update", stage_t0)
+            stage_t0 = time.time()
             self._sync_rollout_weights(model_id, ctx)
+            record_elapsed("sync_rollout_weights", stage_t0)
         else:
             metrics[f"model/{model_id}/actor/star/skipped_critic_warmup"] = 1.0
             metrics[f"model/{model_id}/star/critic_warmup_remaining"] = float(
@@ -2500,6 +2550,7 @@ class StarRayTrainer:
             )
 
         metrics[f"model/{model_id}/star/consumed"] = float(len(batch))
+        metrics[f"{timing_prefix}/total_s"] = float(time.time() - update_t0)
         return metrics
 
     async def _global_sync_and_update(self) -> dict[str, float]:
