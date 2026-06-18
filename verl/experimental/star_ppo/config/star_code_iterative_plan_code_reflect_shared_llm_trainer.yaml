@@ -78,6 +78,8 @@ ray_kwargs:
     address: auto
 
 star:
+  train:
+    max_ready_items: ${oc.decode:${oc.env:STAR_MAX_READY_ITEMS,${oc.env:STAR_CODE_MAX_READY_ITEMS,192}}}
   workflow:
     name: code_iterative_plan_code_reflect
     llm_timeout_seconds: ${oc.decode:${oc.env:STAR_LLM_TIMEOUT_SECONDS,0}}

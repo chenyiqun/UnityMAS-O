@@ -2493,6 +2493,11 @@ class StarRayTrainer:
             for key, val in actor_metrics.items():
                 metrics[f"model/{model_id}/{key}"] = float(val)
             self._sync_rollout_weights(model_id, ctx)
+        else:
+            metrics[f"model/{model_id}/actor/star/skipped_critic_warmup"] = 1.0
+            metrics[f"model/{model_id}/star/critic_warmup_remaining"] = float(
+                max(0, int(self.config.trainer.critic_warmup) - int(global_step))
+            )
 
         metrics[f"model/{model_id}/star/consumed"] = float(len(batch))
         return metrics
