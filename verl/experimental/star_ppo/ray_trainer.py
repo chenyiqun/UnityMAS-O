@@ -645,7 +645,18 @@ class StarRayTrainer:
             if last_err is not None:
                 raise last_err
 
-    def _sync_rollout_weights(self, model_id: str, ctx: ModelWorkerContext):
+    def _sync_rollout_weights(
+        self,
+        model_id: str,
+        ctx: ModelWorkerContext,
+        metric_prefix: Optional[str] = None,
+    ) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+
+        def record_elapsed(name: str, start_time: float):
+            if metric_prefix:
+                metrics[f"{metric_prefix}/{name}_s"] = float(time.time() - start_time)
+
         def _call_wg_method(wg: RayWorkerGroup, method_names: list[str]):
             for method_name in method_names:
                 if hasattr(wg, method_name):
@@ -655,6 +666,7 @@ class StarRayTrainer:
                 f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
             )
 
+        stage_t0 = time.time()
         prepare_refs = _call_wg_method(
             ctx.rollout_wg,
             ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
@@ -664,7 +676,9 @@ class StarRayTrainer:
             timeout_s=self._weight_sync_timeout_seconds,
             op_name=f"prepare_rollout_weight_sync(model={model_id})",
         )
+        record_elapsed("prepare", stage_t0)
         try:
+            stage_t0 = time.time()
             actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
             rollout_refs = _call_wg_method(
                 ctx.rollout_wg,
@@ -675,7 +689,9 @@ class StarRayTrainer:
                 timeout_s=self._weight_sync_timeout_seconds,
                 op_name=f"sync_rollout_weights(model={model_id})",
             )
+            record_elapsed("sync", stage_t0)
         finally:
+            stage_t0 = time.time()
             finish_refs = _call_wg_method(
                 ctx.rollout_wg,
                 ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
@@ -685,6 +701,8 @@ class StarRayTrainer:
                 timeout_s=self._weight_sync_timeout_seconds,
                 op_name=f"finish_rollout_weight_sync(model={model_id})",
             )
+            record_elapsed("finish", stage_t0)
+        return metrics
 
     def _ensure_routing_fields(self, batch: DataProto):
         bsz = len(batch)
@@ -2202,6 +2220,77 @@ class StarRayTrainer:
             batch.batch[key] = value
         return batch
 
+    @staticmethod
+    def _tensor_stats(prefix: str, tensor: torch.Tensor) -> dict[str, float]:
+        if tensor.numel() == 0:
+            return {}
+        values = tensor.detach().float()
+        return {
+            f"{prefix}_mean": float(values.mean().item()),
+            f"{prefix}_max": float(values.max().item()),
+            f"{prefix}_min": float(values.min().item()),
+        }
+
+    def _collect_ppo_batch_debug_metrics(self, model_id: str, batch: DataProto) -> dict[str, float]:
+        metrics: dict[str, float] = {
+            f"model/{model_id}/star/update_batch_size": float(len(batch)),
+        }
+        if batch.batch is None or len(batch) == 0:
+            return metrics
+
+        batch_keys = set(batch.batch.keys())
+        metrics[f"model/{model_id}/star/update_tensor_key_count"] = float(len(batch_keys))
+        if "attention_mask" in batch_keys:
+            attention_mask = batch.batch["attention_mask"]
+            metrics[f"model/{model_id}/star/update_seq_capacity"] = float(attention_mask.shape[-1])
+            total_tokens = attention_mask.detach().long().sum(dim=-1)
+            for key, val in self._tensor_stats(f"model/{model_id}/star/update_total_tokens", total_tokens).items():
+                metrics[key] = val
+
+        response_tokens = None
+        if "response_mask" in batch_keys:
+            response_mask = batch.batch["response_mask"]
+            metrics[f"model/{model_id}/star/update_response_capacity"] = float(response_mask.shape[-1])
+            response_tokens = response_mask.detach().long().sum(dim=-1)
+            for key, val in self._tensor_stats(f"model/{model_id}/star/update_response_tokens", response_tokens).items():
+                metrics[key] = val
+
+        if "loss_mask" in batch_keys:
+            loss_tokens = batch.batch["loss_mask"].detach().long().sum(dim=-1)
+            for key, val in self._tensor_stats(f"model/{model_id}/star/update_loss_tokens", loss_tokens).items():
+                metrics[key] = val
+
+        if "attention_mask" in batch_keys and response_tokens is not None:
+            prompt_tokens = batch.batch["attention_mask"].detach().long().sum(dim=-1) - response_tokens
+            for key, val in self._tensor_stats(f"model/{model_id}/star/update_prompt_tokens", prompt_tokens).items():
+                metrics[key] = val
+
+        if "reward" in batch_keys:
+            rewards = batch.batch["reward"].detach().float().reshape(-1)
+            if rewards.numel() > 0:
+                metrics[f"model/{model_id}/star/update_reward_mean"] = float(rewards.mean().item())
+                metrics[f"model/{model_id}/star/update_reward_std"] = float(rewards.std(unbiased=False).item())
+                metrics[f"model/{model_id}/star/update_reward_min"] = float(rewards.min().item())
+                metrics[f"model/{model_id}/star/update_reward_max"] = float(rewards.max().item())
+                metrics[f"model/{model_id}/star/update_reward_nonzero_ratio"] = float((rewards != 0).float().mean().item())
+                metrics[f"model/{model_id}/star/update_reward_positive_ratio"] = float((rewards > 0).float().mean().item())
+
+        if "done" in batch_keys:
+            done = batch.batch["done"].detach().float().reshape(-1)
+            if done.numel() > 0:
+                metrics[f"model/{model_id}/star/update_done_ratio"] = float(done.mean().item())
+
+        non_tensor_batch = batch.non_tensor_batch or {}
+        for key in ("query_id", "traj_id", "agent_id"):
+            if key in non_tensor_batch:
+                try:
+                    metrics[f"model/{model_id}/star/update_unique_{key}_count"] = float(
+                        len(np.unique(non_tensor_batch[key]))
+                    )
+                except Exception:
+                    pass
+        return metrics
+
     def _compute_old_log_prob_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         batch_td = self._to_ppo_worker_batch(batch)
         calculate_sum_pi_squared = self.config.actor_rollout_ref.actor.get("calculate_sum_pi_squared", False)
@@ -2251,10 +2340,11 @@ class StarRayTrainer:
     def _update_critic_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
         batch_td = self._to_ppo_worker_batch(batch)
         configured_mini_batch_size = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        critic_dp_size = self._get_dp_size(ctx.critic_wg, "train")
         ppo_mini_batch_size = self._effective_global_mini_batch_size(
             configured_mini_batch_size,
             len(batch),
-            self._get_dp_size(ctx.critic_wg, "train"),
+            critic_dp_size,
         )
         if ppo_mini_batch_size <= 0:
             return DataProto.from_single_dict(
@@ -2276,6 +2366,18 @@ class StarRayTrainer:
             prefix="critic/",
             mfu_metric_key="perf/mfu/critic",
         )
+        metrics.update(
+            {
+                "critic/star/configured_mini_batch_size": float(configured_mini_batch_size),
+                "critic/star/effective_mini_batch_size": float(ppo_mini_batch_size),
+                "critic/star/dp_size": float(critic_dp_size),
+                "critic/star/ppo_epochs": float(self.config.critic.ppo_epochs),
+                "critic/star/update_batch_size": float(len(batch)),
+                "critic/star/micro_batch_size_per_gpu": float(
+                    self.config.critic.get("ppo_micro_batch_size_per_gpu", 0) or 0
+                ),
+            }
+        )
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
     def _update_actor_for_model(self, ctx: ModelWorkerContext, batch: DataProto) -> DataProto:
@@ -2284,10 +2386,11 @@ class StarRayTrainer:
         actor_cfg = self.config.actor_rollout_ref.actor
         calculate_entropy = actor_cfg.calculate_entropy or (actor_cfg.entropy_coeff != 0.0)
         configured_mini_batch_size = actor_cfg.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
+        actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
         ppo_mini_batch_size = self._effective_global_mini_batch_size(
             configured_mini_batch_size,
             len(batch),
-            self._get_dp_size(ctx.actor_wg, "actor"),
+            actor_dp_size,
         )
         if ppo_mini_batch_size <= 0:
             return DataProto.from_single_dict(
@@ -2312,6 +2415,17 @@ class StarRayTrainer:
             self._extract_worker_metrics(output),
             prefix="actor/",
             mfu_metric_key="perf/mfu/actor",
+        )
+        metrics.update(
+            {
+                "actor/star/configured_mini_batch_size": float(configured_mini_batch_size),
+                "actor/star/effective_mini_batch_size": float(ppo_mini_batch_size),
+                "actor/star/dp_size": float(actor_dp_size),
+                "actor/star/ppo_epochs": float(actor_cfg.ppo_epochs),
+                "actor/star/update_batch_size": float(len(batch)),
+                "actor/star/micro_batch_size_per_gpu": float(actor_cfg.get("ppo_micro_batch_size_per_gpu", 0) or 0),
+                "actor/star/calculate_entropy": float(bool(calculate_entropy)),
+            }
         )
         return DataProto.from_single_dict(data={}, meta_info={"metrics": metrics})
 
@@ -2436,6 +2550,9 @@ class StarRayTrainer:
 
         batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
         record_elapsed("prepare", stage_t0)
+        stage_t0 = time.time()
+        metrics.update(self._collect_ppo_batch_debug_metrics(model_id, batch))
+        record_elapsed("batch_debug_metrics", stage_t0)
 
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
@@ -2541,7 +2658,12 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/{key}"] = float(val)
             record_elapsed("actor_update", stage_t0)
             stage_t0 = time.time()
-            self._sync_rollout_weights(model_id, ctx)
+            sync_metrics = self._sync_rollout_weights(
+                model_id,
+                ctx,
+                metric_prefix=f"{timing_prefix}/sync_rollout_weights",
+            )
+            metrics.update(sync_metrics)
             record_elapsed("sync_rollout_weights", stage_t0)
         else:
             metrics[f"model/{model_id}/actor/star/skipped_critic_warmup"] = 1.0
@@ -2560,17 +2682,26 @@ class StarRayTrainer:
 
         for model_id, ctx in self.model_contexts.items():
             try:
+                build_ready_t0 = time.time()
                 self._mark_progress(stage=f"train_update_build_ready:{model_id}", step=self._global_step)
+                stage_t0 = time.time()
                 ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
+                metrics[f"model/{model_id}/timing/update/build_ready_remote_s"] = float(time.time() - stage_t0)
+                stage_t0 = time.time()
                 remote_ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
+                metrics[f"model/{model_id}/timing/update/build_ready_merge_remote_s"] = float(time.time() - stage_t0)
                 remote_ready_count = len(remote_ready_batch) if isinstance(remote_ready_batch, DataProto) else 0
                 local_max_items = (
                     max(0, int(max_ready_items) - int(remote_ready_count))
                     if max_ready_items and max_ready_items > 0
                     else 0
                 )
+                stage_t0 = time.time()
                 local_ready = self._build_ready_train_batch_from_local_buffer(model_id, max_items=local_max_items)
+                metrics[f"model/{model_id}/timing/update/build_ready_local_s"] = float(time.time() - stage_t0)
+                stage_t0 = time.time()
                 ready_batch = self._merge_ready_batches([remote_ready_batch, local_ready])
+                metrics[f"model/{model_id}/timing/update/build_ready_merge_total_s"] = float(time.time() - stage_t0)
                 post_local_stats = self._local_buffer_stats_for_model(model_id)
                 metrics[f"model/{model_id}/star/max_ready_items"] = float(max_ready_items)
                 metrics[f"model/{model_id}/star/remote_ready_consumed"] = float(remote_ready_count)
@@ -2596,6 +2727,7 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/star/buffer_shuffle_ready"] = float(self._shuffle_ready_buffer)
                 ready_batch, dropped = self._maybe_drop_last(ready_batch, drop_divisor)
                 metrics[f"model/{model_id}/star/dropped"] = float(dropped)
+                metrics[f"model/{model_id}/timing/update/build_ready_total_s"] = float(time.time() - build_ready_t0)
             except Exception as exc:
                 timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
                 print(
@@ -2609,6 +2741,8 @@ class StarRayTrainer:
 
             update_jobs.append((model_id, ctx, ready_batch))
 
+        metrics["training/update/models_scheduled"] = float(len(update_jobs))
+        metrics["training/update/ready_items_scheduled"] = float(sum(len(batch) for _, _, batch in update_jobs))
         if update_jobs:
             # Different models use disjoint worker groups/resource pools, so they can
             # update in parallel instead of serial model-by-model execution.
