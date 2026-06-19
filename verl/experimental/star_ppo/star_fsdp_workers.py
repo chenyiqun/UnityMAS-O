@@ -886,10 +886,10 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         normalized = [str(q).strip() for q in query_ids if str(q).strip()]
         if len(normalized) == 0:
             return {"star/dropped_queries": 0, "star/purged_traj": 0, **self._traj_buffer.stats()}
-        self._traj_buffer.mark_queries_dropped(normalized)
+        purge_stats = self._traj_buffer.drop_queries(normalized)
         return {
-            "star/dropped_queries": len(set(normalized)),
-            "star/purged_traj": 0,
+            "star/dropped_queries": purge_stats.get("dropped_queries", len(set(normalized))),
+            "star/purged_traj": purge_stats.get("purged_traj", 0),
             **self._traj_buffer.stats(),
         }
 

@@ -84,6 +84,9 @@ class TrajectoryBuffer:
         with self._lock:
             self._evict_expired()
             self._evict_expired_dropped_queries()
+            query_id = str(entry.query_id or "").strip()
+            if query_id and query_id in self.dropped_queries:
+                return
             self.entries[entry.traj_id] = entry
             self._evict_overflow()
 
@@ -106,6 +109,30 @@ class TrajectoryBuffer:
                     continue
                 self.dropped_queries[q] = time.time()
             return 0
+
+    def drop_queries(self, query_ids: list[str]) -> dict[str, int]:
+        with self._lock:
+            self._evict_expired()
+            self._evict_expired_dropped_queries()
+            normalized = list(dict.fromkeys(str(q or "").strip() for q in query_ids))
+            normalized = [q for q in normalized if q]
+            if not normalized:
+                return {"dropped_queries": 0, "purged_traj": 0}
+
+            now = time.time()
+            query_set = set(normalized)
+            removed_ids = {
+                traj_id
+                for traj_id, entry in list(self.entries.items())
+                if str(entry.query_id or "").strip() in query_set
+            }
+            for traj_id in removed_ids:
+                self.entries.pop(traj_id, None)
+            self._prune_ready_queue(removed_ids)
+            for query_id in normalized:
+                self.dropped_queries[query_id] = now
+
+            return {"dropped_queries": len(normalized), "purged_traj": len(removed_ids)}
 
     def commit_reward(self, traj_id: str, reward: torch.Tensor, done: bool) -> bool:
         with self._lock:

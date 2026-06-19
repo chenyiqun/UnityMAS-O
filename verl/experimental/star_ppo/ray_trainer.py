@@ -1753,11 +1753,47 @@ class StarRayTrainer:
             "workflow/query_dropped_recorded": float(len(unique_ids)),
         }
         for model_id in self.model_contexts:
+            ctx = self.model_contexts[model_id]
+            try:
+                remote_outputs = ctx.rollout_wg.drop_queries(unique_ids)
+                remote_items = remote_outputs if isinstance(remote_outputs, list | tuple) else [remote_outputs]
+                remote_sums: dict[str, float] = {}
+                for item in remote_items:
+                    if not isinstance(item, dict):
+                        continue
+                    for key, value in item.items():
+                        if isinstance(value, int | float):
+                            remote_sums[key] = remote_sums.get(key, 0.0) + float(value)
+                if remote_sums:
+                    metrics[f"model/{model_id}/star/remote_dropped_queries_observed"] = float(
+                        remote_sums.get("star/dropped_queries", 0.0)
+                    )
+                    metrics[f"model/{model_id}/star/remote_purged_traj"] = float(
+                        remote_sums.get("star/purged_traj", 0.0)
+                    )
+                    metrics[f"model/{model_id}/star/remote_buffer_total"] = float(
+                        remote_sums.get("buffer/total", 0.0)
+                    )
+                    metrics[f"model/{model_id}/star/remote_buffer_ready"] = float(
+                        remote_sums.get("buffer/ready", 0.0)
+                    )
+            except Exception as exc:
+                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+                print(
+                    f"[star] failed to drop queries from rollout workers: model={model_id} "
+                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                )
+                metrics[f"model/{model_id}/star/remote_drop_failed"] = 1.0
+                metrics[f"model/{model_id}/star/remote_drop_failed_timeout"] = timeout_flag
+
             local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
             if local_buffer is not None:
-                local_buffer.mark_queries_dropped(unique_ids)
+                purge_stats = local_buffer.drop_queries(unique_ids)
                 local_stats = local_buffer.stats()
                 metrics[f"model/{model_id}/star/local_dropped_queries_observed"] = float(len(unique_ids))
+                metrics[f"model/{model_id}/star/local_purged_traj"] = float(
+                    purge_stats.get("purged_traj", 0)
+                )
                 metrics[f"model/{model_id}/star/local_buffer_total"] = float(local_stats["buffer/total"])
                 metrics[f"model/{model_id}/star/local_buffer_ready"] = float(local_stats["buffer/ready"])
                 metrics[f"model/{model_id}/star/local_buffer_dropped_queries"] = float(
@@ -2774,6 +2810,24 @@ class StarRayTrainer:
             for ppo_metrics in ppo_results:
                 metrics.update(ppo_metrics)
 
+        fail_on_update_error = bool(self.config.star.train.get("fail_on_update_error", True))
+        failed_keys = [
+            key
+            for key, value in metrics.items()
+            if isinstance(value, int | float)
+            and float(value) != 0.0
+            and (
+                key.endswith("/star/update_failed")
+                or key.endswith("/star/build_ready_failed")
+                or key.endswith("/star/remote_drop_failed")
+            )
+        ]
+        if fail_on_update_error and failed_keys:
+            raise RuntimeError(
+                f"STAR PPO update failed at step={self._global_step}; "
+                f"failed_metrics={failed_keys[:8]}"
+            )
+
         return metrics
 
     def _get_checkpoint_root(self) -> str:
@@ -3226,6 +3280,8 @@ class StarRayTrainer:
             if bool(self.config.trainer.get("val_only", False)):
                 return
 
+            max_empty_reward_streak = int(self.config.star.train.get("max_empty_reward_streak", 3))
+            fail_on_update_error = bool(self.config.star.train.get("fail_on_update_error", True))
             for epoch in range(start_epoch, self.config.trainer.total_epochs):
                 empty_reward_streak = 0
                 resume_batch_offset = 0
@@ -3264,6 +3320,7 @@ class StarRayTrainer:
                                 **workflow_metrics,
                                 "workflow/empty_reward_batch": 1.0,
                                 "workflow/empty_reward_streak": float(empty_reward_streak),
+                                "workflow/empty_reward_streak_limit": float(max_empty_reward_streak),
                             }
                             self._print_batch_timing(
                                 stage="train",
@@ -3279,6 +3336,13 @@ class StarRayTrainer:
                                 print(f"[star] step={global_step} empty_reward_batch streak={empty_reward_streak}")
                             train_iter.set_postfix({"gstep": int(global_step), "samples": 0}, refresh=False)
                             self._mark_progress(stage="train_empty_batch_done", step=global_step)
+                            if max_empty_reward_streak > 0 and empty_reward_streak >= max_empty_reward_streak:
+                                raise RuntimeError(
+                                    "STAR workflow produced "
+                                    f"{empty_reward_streak} consecutive empty reward batches at step={global_step}. "
+                                    "This usually means rollout workflows are timing out or all queries are dropped; "
+                                    "check workflow timeout/drop metrics before continuing training."
+                                )
                             continue
                         empty_reward_streak = 0
 
@@ -3304,10 +3368,14 @@ class StarRayTrainer:
                                     "training/sync_failed": 1.0,
                                     "training/sync_failed_timeout": timeout_flag,
                                 }
+                                if fail_on_update_error:
+                                    raise
                         else:
                             sync_metrics = {
                                 "training/sync_skipped_due_to_commit_failed": 1.0,
                             }
+                            if fail_on_update_error:
+                                raise RuntimeError(f"STAR reward commit failed at step={global_step}")
                         sync_update_s = time.time() - sync_t0
                         self._mark_progress(stage="train_sync_update_done", step=global_step)
 
