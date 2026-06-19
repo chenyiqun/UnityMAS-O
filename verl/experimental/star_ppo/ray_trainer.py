@@ -1618,9 +1618,15 @@ class StarRayTrainer:
                 continue
             sub = rewards.select_idxs(indices)
             model_metrics, remote_indices = self._commit_rewards_to_local_buffer(model_id, sub)
+            actual_committed = float(model_metrics.get("star/local_committed", 0.0))
             if remote_indices:
                 remote_sub = sub.select_idxs(remote_indices)
                 worker_outputs = self.model_contexts[model_id].rollout_wg.commit_rewards(remote_sub)
+                remote_committed = 0.0
+                remote_items = worker_outputs if isinstance(worker_outputs, list | tuple) else [worker_outputs]
+                for item in remote_items:
+                    if isinstance(item, dict) and isinstance(item.get("star/committed", None), int | float):
+                        remote_committed += float(item["star/committed"])
                 reduced = self._reduce_worker_metrics(worker_outputs)
                 for k, v in reduced.items():
                     if k in {"star/committed", "buffer/total", "buffer/ready", "buffer/dropped_queries"}:
@@ -1628,7 +1634,11 @@ class StarRayTrainer:
                     elif k != "star/reward_in":
                         model_metrics[k] = float(v)
                 model_metrics["star/remote_reward_in"] = float(len(remote_indices))
+                model_metrics["star/remote_committed"] = float(remote_committed)
+                actual_committed += float(remote_committed)
             model_metrics["star/reward_in"] = float(len(sub))
+            model_metrics["star/actual_committed"] = float(actual_committed)
+            model_metrics["star/commit_missing"] = float(max(0.0, float(len(sub)) - actual_committed))
             for k, v in model_metrics.items():
                 metrics[f"model/{model_id}/{k}"] = v
         # reward metrics by agent id (for independent curves on tracking backend)
@@ -1689,7 +1699,21 @@ class StarRayTrainer:
 
     def _commit_rewards_safe(self, rewards: DataProto, stage: str, step: int) -> tuple[dict[str, float], bool]:
         try:
-            return self._commit_rewards(rewards), True
+            metrics = self._commit_rewards(rewards)
+            missing_keys = [
+                key
+                for key, value in metrics.items()
+                if key.endswith("/star/commit_missing") and isinstance(value, int | float) and float(value) > 0
+            ]
+            if missing_keys:
+                print(
+                    f"[star] commit_rewards incomplete: stage={stage} step={step} "
+                    f"missing_metrics={missing_keys[:8]}"
+                )
+                metrics[f"{stage}/commit_failed"] = 1.0
+                metrics[f"{stage}/commit_failed_timeout"] = 0.0
+                return metrics, False
+            return metrics, True
         except Exception as exc:
             timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
             print(
@@ -2720,13 +2744,33 @@ class StarRayTrainer:
             try:
                 build_ready_t0 = time.time()
                 self._mark_progress(stage=f"train_update_build_ready:{model_id}", step=self._global_step)
+                remote_worker_count = max(1, len(getattr(ctx.rollout_wg, "workers", []) or []))
+                remote_max_items = (
+                    int(math.ceil(float(max_ready_items) / float(remote_worker_count)))
+                    if max_ready_items and max_ready_items > 0
+                    else 0
+                )
                 stage_t0 = time.time()
-                ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=max_ready_items)
+                ready_parts = ctx.rollout_wg.build_ready_train_batch(max_items=remote_max_items)
                 metrics[f"model/{model_id}/timing/update/build_ready_remote_s"] = float(time.time() - stage_t0)
                 stage_t0 = time.time()
                 remote_ready_batch = self._merge_ready_batches(ready_parts if isinstance(ready_parts, list) else [ready_parts])
                 metrics[f"model/{model_id}/timing/update/build_ready_merge_remote_s"] = float(time.time() - stage_t0)
                 remote_ready_count = len(remote_ready_batch) if isinstance(remote_ready_batch, DataProto) else 0
+                remote_dropped_by_cap = 0
+                if (
+                    max_ready_items
+                    and max_ready_items > 0
+                    and isinstance(remote_ready_batch, DataProto)
+                    and remote_ready_count > max_ready_items
+                ):
+                    if self._shuffle_ready_buffer:
+                        keep_indices = np.random.permutation(remote_ready_count)[:max_ready_items].tolist()
+                    else:
+                        keep_indices = list(range(max_ready_items))
+                    remote_ready_batch = remote_ready_batch.select_idxs(keep_indices)
+                    remote_dropped_by_cap = remote_ready_count - len(remote_ready_batch)
+                    remote_ready_count = len(remote_ready_batch)
                 local_max_items = (
                     max(0, int(max_ready_items) - int(remote_ready_count))
                     if max_ready_items and max_ready_items > 0
@@ -2740,7 +2784,10 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/timing/update/build_ready_merge_total_s"] = float(time.time() - stage_t0)
                 post_local_stats = self._local_buffer_stats_for_model(model_id)
                 metrics[f"model/{model_id}/star/max_ready_items"] = float(max_ready_items)
+                metrics[f"model/{model_id}/star/remote_worker_count"] = float(remote_worker_count)
+                metrics[f"model/{model_id}/star/remote_max_items_per_worker"] = float(remote_max_items)
                 metrics[f"model/{model_id}/star/remote_ready_consumed"] = float(remote_ready_count)
+                metrics[f"model/{model_id}/star/remote_dropped_by_max_ready_items"] = float(remote_dropped_by_cap)
                 metrics[f"model/{model_id}/star/local_ready_consumed"] = float(len(local_ready))
                 metrics[f"model/{model_id}/star/local_buffer_total_after_pop"] = float(
                     post_local_stats.get("buffer/total", 0)
