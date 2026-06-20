@@ -48,7 +48,7 @@ math:       solver -> verifier -> refiner -> finalizer
 verl/experimental/star_ppo/
   main_ppo.py                         # UnityMAS-O / STAR PPO 入口
   ray_trainer.py                      # 多 engine Ray trainer、workflow 执行、reward commit、PPO update
-  star_fsdp_workers.py                # detach actor / async rollout / critic / reward worker
+  star_engine_workers.py              # detach actor / async rollout / critic / reward worker
   trajectory_buffer.py                # model-local trajectory buffer
   types.py                            # engine spec 等基础类型
 

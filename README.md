@@ -48,7 +48,7 @@ Runtime execution follows a Ray star topology:
 verl/experimental/star_ppo/
   main_ppo.py                         # UnityMAS-O / STAR PPO entry point
   ray_trainer.py                      # multi-engine Ray trainer, workflow execution, reward commit, PPO update
-  star_fsdp_workers.py                # detached actor / async rollout / critic / reward worker
+  star_engine_workers.py              # detached actor / async rollout / critic / reward worker
   trajectory_buffer.py                # model-local trajectory buffer
   types.py                            # basic types such as engine specs
 

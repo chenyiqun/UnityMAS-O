@@ -1,3 +1,11 @@
+"""STAR PPO worker adapters built on verl's unified engine abstraction.
+
+The STAR layer does not implement FSDP or Megatron directly. Actor/ref/critic
+training is delegated to ``TrainingWorker`` and the engine selected by config
+(``fsdp``/``fsdp2``/``megatron``). This module only adds STAR-specific detached
+actor/rollout coordination, trajectory buffering, and weight sync glue.
+"""
+
 import asyncio
 import os
 import threading
@@ -124,6 +132,7 @@ def _offload_actor_params_after_weight_sync(worker) -> None:
 def _get_actor_weights_info_from_state_dict(actor_worker):
     """Return HF-keyed weight metadata without materializing full FSDP/DTensor params."""
     if not _is_fsdp_strategy(_actor_strategy(actor_worker)):
+        # Megatron weight export is handled by MegatronEngine.get_per_tensor_param().
         return None
 
     engine = getattr(actor_worker.actor, "engine", None)

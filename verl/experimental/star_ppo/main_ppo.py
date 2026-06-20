@@ -98,7 +98,7 @@ def create_role_worker_mapping(config):
                 "or pass model_engine=megatron explicitly."
             )
 
-    from verl.experimental.star_ppo.star_fsdp_workers import (
+    from verl.experimental.star_ppo.star_engine_workers import (
         CriticWorker,
         StarDetachActorWorker,
         StarDetachAsyncRolloutWorker,
