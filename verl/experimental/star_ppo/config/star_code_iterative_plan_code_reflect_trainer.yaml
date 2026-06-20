@@ -18,19 +18,19 @@ trainer:
       nnodes: ${oc.decode:${oc.env:PLANNER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:PLANNER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:PLANNER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}
     - model_id: coder_llm
       nnodes: ${oc.decode:${oc.env:CODER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:CODER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:CODER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}
     - model_id: reflection_llm
       nnodes: ${oc.decode:${oc.env:REFLECTION_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:REFLECTION_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:REFLECTION_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}
   routing:
     policy: epoch_dynamic

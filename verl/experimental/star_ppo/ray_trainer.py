@@ -1947,6 +1947,12 @@ class StarRayTrainer:
                 return max(1, world_size // max(1, tp * pp))
             if role in {"actor", "ref"}:
                 actor_cfg = self.config.actor_rollout_ref.actor
+                if str(actor_cfg.get("strategy", "")).strip().lower() == "megatron":
+                    megatron_cfg = actor_cfg.get("megatron", {})
+                    tp = int(megatron_cfg.get("tensor_model_parallel_size", 1) or 1)
+                    pp = int(megatron_cfg.get("pipeline_model_parallel_size", 1) or 1)
+                    cp = int(megatron_cfg.get("context_parallel_size", 1) or 1)
+                    return max(1, world_size // max(1, tp * pp * cp))
                 sp = int(
                     actor_cfg.get(
                         "ulysses_sequence_parallel_size",
@@ -1956,6 +1962,12 @@ class StarRayTrainer:
                 )
                 return max(1, world_size // max(1, sp))
             if role in {"critic", "train"}:
+                if str(self.config.critic.get("strategy", "")).strip().lower() == "megatron":
+                    megatron_cfg = self.config.critic.get("megatron", {})
+                    tp = int(megatron_cfg.get("tensor_model_parallel_size", 1) or 1)
+                    pp = int(megatron_cfg.get("pipeline_model_parallel_size", 1) or 1)
+                    cp = int(megatron_cfg.get("context_parallel_size", 1) or 1)
+                    return max(1, world_size // max(1, tp * pp * cp))
                 sp = int(
                     self.config.critic.get(
                         "ulysses_sequence_parallel_size",

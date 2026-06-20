@@ -273,6 +273,7 @@ export WANDB_ENTITY="<your-wandb-entity>"
 
 RANK=0 HEAD_IP="${HEAD_IP}" WORLD_SIZE=3 \
 CONFIG_NAME=star_code_iterative_plan_code_reflect_trainer \
+STAR_OPTIMIZATION_STRATEGY=fsdp \
 PROJECT_NAME="STAR-Code" \
 EXPERIMENT_NAME="deepcoder_marti_iterative_plan_code_reflect_3xQwen3_4B_no_think_sp4" \
 TRAIN_JSONL="${UNITYMAS_ROOT}/datasets/code_datasets/DeepCoder-Preview-Dataset/processed_marti_jsonl/train_shuffled.jsonl" \
@@ -336,11 +337,22 @@ bash examples/star_ppo/common/run_per_node_background.sh \
 
 关键开关：
 
+- `STAR_OPTIMIZATION_STRATEGY`：STAR actor/ref/critic 的训练后端。默认使用 `fsdp`；MoE 等场景可设为 `megatron` 使用 Megatron-Core；也兼容 `fsdp2`。
 - `CODE_MAX_TURNS`：最多 plan-code-verify-reflect 轮数。
 - `CODE_STOP_ON_ALL_PASSED`：所有 verifier tests 通过后提前停止。
 - `CODE_VERIFY_TIMEOUT_SECONDS`：单次代码执行超时。
 - `CODE_VERIFIER_FAIL_OPEN=false`：verifier 异常时是否放行。训练代码任务通常建议保持 `false`。
 - `STAR_PER_INFER_PROMPT_MAX_TOKENS`：单次 agent prompt 的截断上限。
+
+Megatron 示例覆盖参数：
+
+```bash
+STAR_OPTIMIZATION_STRATEGY=megatron \
+STAR_MEGATRON_TENSOR_MODEL_PARALLEL_SIZE=4 \
+STAR_MEGATRON_PIPELINE_MODEL_PARALLEL_SIZE=1 \
+STAR_MEGATRON_EXPERT_MODEL_PARALLEL_SIZE=1 \
+bash examples/star_ppo/common/run_per_node_background.sh
+```
 
 ## 示例 2：M-ASK iterative search，4 个模型组
 

@@ -18,32 +18,85 @@ from verl.utils.config import validate_config
 from verl.utils.device import auto_set_device
 
 
+_SUPPORTED_TRAINING_STRATEGIES = {"fsdp", "fsdp2", "megatron"}
+
+
+def _normalize_training_strategy(strategy: str) -> str:
+    return str(strategy or "fsdp").strip().lower()
+
+
+def _strategy_family(strategy: str) -> str:
+    strategy = _normalize_training_strategy(strategy)
+    if strategy in {"fsdp", "fsdp2"}:
+        return "fsdp"
+    if strategy == "megatron":
+        return "megatron"
+    return strategy
+
+
+def _assert_supported_strategy(strategy: str, source: str) -> str:
+    strategy = _normalize_training_strategy(strategy)
+    if strategy not in _SUPPORTED_TRAINING_STRATEGIES:
+        raise NotImplementedError(
+            f"STAR PPO supports training strategies {sorted(_SUPPORTED_TRAINING_STRATEGIES)}, "
+            f"got {strategy!r} from {source}"
+        )
+    return strategy
+
+
 def create_engine_specs(config) -> list[EngineSpec]:
     specs = []
+    default_strategy = _assert_supported_strategy(
+        OmegaConf.select(config, "actor_rollout_ref.actor.strategy") or "fsdp",
+        "actor_rollout_ref.actor.strategy",
+    )
     for engine in config.trainer.llm_engines:
+        strategy = _assert_supported_strategy(
+            engine.get("strategy", default_strategy),
+            f"trainer.llm_engines.{engine.model_id}.strategy",
+        )
         specs.append(
             EngineSpec(
                 model_id=str(engine.model_id),
                 nnodes=int(engine.nnodes),
                 n_gpus_per_node=int(engine.n_gpus_per_node),
                 accelerator_type=engine.get("accelerator_type", None),
-                strategy=str(engine.get("strategy", "fsdp2")),
+                strategy=strategy,
             )
         )
     return specs
 
 
 def create_role_worker_mapping(config):
-    strategy = config.actor_rollout_ref.actor.strategy
+    strategy = _assert_supported_strategy(
+        config.actor_rollout_ref.actor.strategy,
+        "actor_rollout_ref.actor.strategy",
+    )
     lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
     if lora_rank <= 0:
         lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
     ref_in_actor = lora_rank > 0 or config.actor_rollout_ref.model.get("lora_adapter_path") is not None
 
-    if strategy not in ["fsdp", "fsdp2"]:
-        raise NotImplementedError(f"Star PPO skeleton currently supports fsdp/fsdp2 only, got {strategy}")
-    if need_critic(config) and strategy != config.critic.strategy:
-        raise ValueError("actor strategy and critic strategy must be consistent")
+    if need_critic(config):
+        critic_strategy = _assert_supported_strategy(config.critic.strategy, "critic.strategy")
+        if _strategy_family(strategy) != _strategy_family(critic_strategy):
+            raise ValueError(
+                "actor strategy and critic strategy must use the same backend family: "
+                f"actor={strategy}, critic={critic_strategy}"
+            )
+
+    for engine in config.trainer.get("llm_engines", []):
+        engine_strategy = _assert_supported_strategy(
+            engine.get("strategy", strategy),
+            f"trainer.llm_engines.{engine.model_id}.strategy",
+        )
+        if _strategy_family(strategy) != _strategy_family(engine_strategy):
+            raise ValueError(
+                "STAR model-engine specs must match the actor backend family: "
+                f"actor={strategy}, engine={engine.model_id}:{engine_strategy}. "
+                "For Megatron, launch with STAR_OPTIMIZATION_STRATEGY=megatron "
+                "or pass model_engine=megatron explicitly."
+            )
 
     from verl.experimental.star_ppo.star_fsdp_workers import (
         CriticWorker,

@@ -18,25 +18,25 @@ trainer:
       nnodes: ${oc.decode:${oc.env:SOLVER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:SOLVER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:SOLVER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
     - model_id: verifier_llm
       nnodes: ${oc.decode:${oc.env:VERIFIER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:VERIFIER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:VERIFIER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
     - model_id: refiner_llm
       nnodes: ${oc.decode:${oc.env:REFINER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:REFINER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:REFINER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
     - model_id: finalizer_llm
       nnodes: ${oc.decode:${oc.env:FINALIZER_NNODES,1}}
       n_gpus_per_node: ${oc.decode:${oc.env:FINALIZER_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:FINALIZER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen2.5-7B-Instruct}}
   routing:
     policy: epoch_dynamic

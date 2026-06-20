@@ -4,18 +4,19 @@ defaults:
 
 trainer:
   topology: star
+  optimization_strategy: ${oc.env:STAR_OPTIMIZATION_STRATEGY,fsdp}
   llm_engines:
     - model_id: L0
       nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: null
     - model_id: L1
       nnodes: 1
       n_gpus_per_node: 8
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: null
   routing:
     policy: epoch_dynamic

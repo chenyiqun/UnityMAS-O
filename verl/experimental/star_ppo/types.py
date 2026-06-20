@@ -9,4 +9,4 @@ class EngineSpec:
     nnodes: int
     n_gpus_per_node: int
     accelerator_type: str | None = None
-    strategy: str = "fsdp2"
+    strategy: str = "fsdp"

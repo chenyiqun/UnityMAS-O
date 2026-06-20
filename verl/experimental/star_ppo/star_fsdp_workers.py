@@ -15,7 +15,6 @@ from verl.experimental.separation.engine_workers import DetachActorWorker
 from verl.experimental.star_ppo.trajectory_buffer import TrajectoryBuffer, TrajectoryEntry
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
 from verl.utils.device import get_torch_device
-from verl.utils.fsdp_utils import load_fsdp_model_to_gpu, offload_fsdp_model_to_cpu
 from verl.utils.model import convert_weight_keys
 from verl.utils.ray_utils import get_event_loop
 from verl.workers.config.engine import TrainingWorkerConfig
@@ -98,8 +97,35 @@ def _get_vllm_inference_model(rollout):
     return None
 
 
+def _actor_strategy(worker) -> str:
+    return str(getattr(getattr(worker, "config", None), "actor", {}).get("strategy", "")).strip().lower()
+
+
+def _is_fsdp_strategy(strategy: str) -> bool:
+    return str(strategy).strip().lower() in {"fsdp", "fsdp2"}
+
+
+def _actor_engine(worker):
+    actor = getattr(worker, "actor", None)
+    return getattr(actor, "engine", None)
+
+
+def _actor_param_offload_enabled(worker) -> bool:
+    engine = _actor_engine(worker)
+    return bool(getattr(engine, "is_param_offload_enabled", False))
+
+
+def _offload_actor_params_after_weight_sync(worker) -> None:
+    engine = _actor_engine(worker)
+    if engine is not None and _actor_param_offload_enabled(worker):
+        engine.to("cpu", model=True, optimizer=False, grad=False)
+
+
 def _get_actor_weights_info_from_state_dict(actor_worker):
     """Return HF-keyed weight metadata without materializing full FSDP/DTensor params."""
+    if not _is_fsdp_strategy(_actor_strategy(actor_worker)):
+        return None
+
     engine = getattr(actor_worker.actor, "engine", None)
     module = getattr(engine, "module", None)
     if module is None:
@@ -228,9 +254,6 @@ def _sync_rollout_weights_impl(worker):
     assert (worker._is_actor or worker._is_rollout) and not worker.config.hybrid_engine
     assert hasattr(worker, "_weights_info") and worker._weights_info is not None
 
-    if worker._is_actor and getattr(worker, "_is_offload_param", False):
-        load_fsdp_model_to_gpu(worker.actor_module_fsdp)
-
     rollout_name = worker.config.rollout.name
     inference_model = None
     use_rollout_update = False
@@ -260,8 +283,8 @@ def _sync_rollout_weights_impl(worker):
     phases = _weight_sync_phases(worker)
 
     def _finish_actor_side(mark_base_done: bool = True):
-        if worker._is_actor and getattr(worker, "_is_offload_param", False):
-            offload_fsdp_model_to_cpu(worker.actor_module_fsdp)
+        if worker._is_actor:
+            _offload_actor_params_after_weight_sync(worker)
         if mark_base_done and getattr(worker, "_weight_sync_peft_config", None) is not None:
             _set_rollout_base_sync_done(worker, True)
         get_torch_device().empty_cache()

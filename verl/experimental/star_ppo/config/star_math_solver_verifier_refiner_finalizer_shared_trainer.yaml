@@ -18,7 +18,7 @@ trainer:
       nnodes: ${oc.decode:${oc.env:MATH_SHARED_NNODES,${oc.env:AGENT_NNODES,4}}}
       n_gpus_per_node: ${oc.decode:${oc.env:MATH_SHARED_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
       accelerator_type: null
-      strategy: fsdp2
+      strategy: ${trainer.optimization_strategy}
       model_path: ${oc.env:MATH_SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,${oc.env:UNITYMAS_ROOT}/base_models/Qwen/Qwen3-4B}}
   routing:
     policy: epoch_dynamic

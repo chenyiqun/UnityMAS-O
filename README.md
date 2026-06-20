@@ -273,6 +273,7 @@ export WANDB_ENTITY="<your-wandb-entity>"
 
 RANK=0 HEAD_IP="${HEAD_IP}" WORLD_SIZE=3 \
 CONFIG_NAME=star_code_iterative_plan_code_reflect_trainer \
+STAR_OPTIMIZATION_STRATEGY=fsdp \
 PROJECT_NAME="STAR-Code" \
 EXPERIMENT_NAME="deepcoder_marti_iterative_plan_code_reflect_3xQwen3_4B_no_think_sp4" \
 TRAIN_JSONL="${UNITYMAS_ROOT}/datasets/code_datasets/DeepCoder-Preview-Dataset/processed_marti_jsonl/train_shuffled.jsonl" \
@@ -336,11 +337,22 @@ bash examples/star_ppo/common/run_per_node_background.sh \
 
 Important switches:
 
+- `STAR_OPTIMIZATION_STRATEGY`: training backend for STAR actor/ref/critic. Use `fsdp` by default, or `megatron` for Megatron-Core training. `fsdp2` is also accepted for FSDP2.
 - `CODE_MAX_TURNS`: maximum number of plan-code-verify-reflect turns.
 - `CODE_STOP_ON_ALL_PASSED`: stop early once all verifier tests pass.
 - `CODE_VERIFY_TIMEOUT_SECONDS`: timeout for one code execution.
 - `CODE_VERIFIER_FAIL_OPEN=false`: whether verifier failures should be treated as pass-through. For code training, `false` is usually preferred.
 - `STAR_PER_INFER_PROMPT_MAX_TOKENS`: truncation limit for each agent prompt.
+
+Megatron example overrides:
+
+```bash
+STAR_OPTIMIZATION_STRATEGY=megatron \
+STAR_MEGATRON_TENSOR_MODEL_PARALLEL_SIZE=4 \
+STAR_MEGATRON_PIPELINE_MODEL_PARALLEL_SIZE=1 \
+STAR_MEGATRON_EXPERT_MODEL_PARALLEL_SIZE=1 \
+bash examples/star_ppo/common/run_per_node_background.sh
+```
 
 ## Example 2: M-ASK Iterative Search, Four Model Groups
 
