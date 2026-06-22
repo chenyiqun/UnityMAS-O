@@ -27,6 +27,12 @@ _gb200_nccl_env = {}
 if (_major or 0) >= 10 and os.environ.get("TLLM_DISABLE_NVLS_MNNVL", "0") == "1":
     _gb200_nccl_env = {"NCCL_NVLS_ENABLE": "0", "NCCL_MNNVL_ENABLE": "0"}
 
+_RUNTIME_ENV_PASSTHROUGH_KEYS = (
+    "NCCL_CUMEM_ENABLE",
+    "TORCH_NCCL_AVOID_RECORD_STREAMS",
+    "TORCH_NCCL_ASYNC_ERROR_HANDLING",
+)
+
 PPO_RAY_RUNTIME_ENV = {
     "env_vars": {
         "TOKENIZERS_PARALLELISM": "true",
@@ -63,4 +69,8 @@ def get_ppo_ray_runtime_env():
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
             runtime_env["env_vars"].pop(key, None)
+    for key in _RUNTIME_ENV_PASSTHROUGH_KEYS:
+        value = os.environ.get(key)
+        if value is not None:
+            runtime_env["env_vars"][key] = value
     return runtime_env

@@ -66,12 +66,20 @@ if [[ "${CONFIG_NAME}" == star_code_* ]]; then
     echo "[common/run_per_node] setting NCCL_CUMEM_ENABLE=0 for Qwen3.5-9B code FSDP stability; set STAR_CODE_QWEN35_9B_ALLOW_CUMEM=true to override"
     export NCCL_CUMEM_ENABLE=0
   fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); sys.exit(0 if "Qwen3.5-9B" in paths and os.environ.get("TORCH_NCCL_AVOID_RECORD_STREAMS") is None else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] setting TORCH_NCCL_AVOID_RECORD_STREAMS=1 for Qwen3.5-9B code FSDP stability"
+    export TORCH_NCCL_AVOID_RECORD_STREAMS=1
+  fi
   if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); allow = os.environ.get("STAR_CODE_QWEN35_9B_ALLOW_MICRO2", "").lower() in {"1", "true", "yes", "on"}; sys.exit(0 if "Qwen3.5-9B" in paths and not allow else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] lowering Qwen3.5-9B code update/logprob micro batches to 1 for FSDP stability; set STAR_CODE_QWEN35_9B_ALLOW_MICRO2=true to override"
     export ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=1
     export CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU=1
     export ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU=1
     export REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU=1
+  fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); allow = os.environ.get("STAR_CODE_QWEN35_9B_ALLOW_FSDP_COMPILE", "").lower() in {"1", "true", "yes", "on"}; sys.exit(0 if "Qwen3.5-9B" in paths and not allow else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] disabling actor/ref/critic FSDP torch compile for Qwen3.5-9B code update stability; set STAR_CODE_QWEN35_9B_ALLOW_FSDP_COMPILE=true to override"
+    export STAR_CODE_QWEN35_9B_DISABLE_FSDP_COMPILE=true
   fi
   if python3 -c 'import os, sys; sys.exit(0 if os.environ["ROLLOUT_ENABLE_CHUNKED_PREFILL"].lower() in {"0", "false", "no", "off"} and int(os.environ["ROLLOUT_MAX_NUM_BATCHED_TOKENS"]) < int(os.environ["ROLLOUT_MAX_MODEL_LEN"]) else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] raising ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} to ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} because chunked prefill is disabled"
@@ -148,6 +156,13 @@ PY
   fi
   if [[ -n "${EXPERIMENT_NAME}" ]]; then
     EXTRA_OVERRIDES+=("trainer.experiment_name=${EXPERIMENT_NAME}")
+  fi
+  if [[ "${STAR_CODE_QWEN35_9B_DISABLE_FSDP_COMPILE:-false}" == "true" ]]; then
+    EXTRA_OVERRIDES+=("actor_rollout_ref.actor.fsdp_config.use_torch_compile=false")
+    EXTRA_OVERRIDES+=("actor_rollout_ref.ref.fsdp_config.use_torch_compile=false")
+    EXTRA_OVERRIDES+=("critic.fsdp.use_torch_compile=false")
+    EXTRA_OVERRIDES+=("+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-0}")
+    EXTRA_OVERRIDES+=("+ray_kwargs.ray_init.runtime_env.env_vars.TORCH_NCCL_AVOID_RECORD_STREAMS=${TORCH_NCCL_AVOID_RECORD_STREAMS:-1}")
   fi
   python3 -m verl.experimental.star_ppo.main_ppo \
     --config-name "${CONFIG_NAME}" \
