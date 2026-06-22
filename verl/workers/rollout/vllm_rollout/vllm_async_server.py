@@ -374,6 +374,13 @@ class vLLMHttpServer:
                 cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
                 cmds[cmd.name] = cmd
         server_args = parser.parse_args(args=server_args)
+        # Some vLLM CLI bools are default-on and only emit a CLI flag when True
+        # in build_cli_args_from_config. Preserve explicit False values from
+        # verl config so the resulting AsyncEngineArgs matches the resolved
+        # rollout config instead of falling back to vLLM defaults.
+        for explicit_bool_key in ("enable_chunked_prefill",):
+            if explicit_bool_key in args:
+                setattr(server_args, explicit_bool_key, args[explicit_bool_key])
         server_args.model = server_args.model_tag
         if server_args.subparser in cmds:
             cmds[server_args.subparser].validate(server_args)
