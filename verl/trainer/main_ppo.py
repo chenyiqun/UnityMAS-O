@@ -75,6 +75,10 @@ def run_ppo(config, task_runner_class=None) -> None:
             runtime_env_kwargs["env_vars"] = runtime_env_vars
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
+        if runtime_env.get("env_vars") is not None:
+            for key, value in list(runtime_env.env_vars.items()):
+                if value is not None:
+                    runtime_env.env_vars[key] = str(value)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))

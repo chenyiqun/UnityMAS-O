@@ -161,8 +161,6 @@ PY
     EXTRA_OVERRIDES+=("actor_rollout_ref.actor.fsdp_config.use_torch_compile=false")
     EXTRA_OVERRIDES+=("actor_rollout_ref.ref.fsdp_config.use_torch_compile=false")
     EXTRA_OVERRIDES+=("critic.fsdp.use_torch_compile=false")
-    EXTRA_OVERRIDES+=("+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-0}")
-    EXTRA_OVERRIDES+=("+ray_kwargs.ray_init.runtime_env.env_vars.TORCH_NCCL_AVOID_RECORD_STREAMS=${TORCH_NCCL_AVOID_RECORD_STREAMS:-1}")
   fi
   python3 -m verl.experimental.star_ppo.main_ppo \
     --config-name "${CONFIG_NAME}" \
