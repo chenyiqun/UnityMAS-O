@@ -45,6 +45,7 @@ actor_rollout_ref:
     gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.15}}
     max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,8192}}
     max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
+    enable_chunked_prefill: ${oc.decode:${oc.env:ROLLOUT_ENABLE_CHUNKED_PREFILL,false}}
     enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
     checkpoint_engine:
       update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,3072}}

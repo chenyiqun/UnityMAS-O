@@ -53,9 +53,14 @@ export VERL_VLLM_FORCE_SHM_WEIGHT_SYNC="${VERL_VLLM_FORCE_SHM_WEIGHT_SYNC:-1}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
 if [[ "${CONFIG_NAME}" == star_code_* ]]; then
+  export ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-16384}"
   if python3 -c 'import os, sys; sys.exit(0 if float(os.environ["ROLLOUT_GPU_MEMORY_UTILIZATION"]) > float(os.environ["STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP"]) else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] lowering ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} to STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP=${STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP} for code workflow"
     export ROLLOUT_GPU_MEMORY_UTILIZATION="${STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP}"
+  fi
+  if python3 -c 'import os, sys; sys.exit(0 if os.environ["ROLLOUT_ENABLE_CHUNKED_PREFILL"].lower() in {"0", "false", "no", "off"} and int(os.environ["ROLLOUT_MAX_NUM_BATCHED_TOKENS"]) < int(os.environ["ROLLOUT_MAX_MODEL_LEN"]) else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] raising ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} to ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} because chunked prefill is disabled"
+    export ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_MODEL_LEN}"
   fi
 fi
 
