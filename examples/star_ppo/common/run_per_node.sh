@@ -62,6 +62,17 @@ if [[ "${CONFIG_NAME}" == star_code_* ]]; then
     echo "[common/run_per_node] lowering ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=${ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE} to 2 for Qwen3.5-9B code rollout stability; set STAR_CODE_QWEN35_9B_ALLOW_TP4=true to override"
     export ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE=2
   fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); allow = os.environ.get("STAR_CODE_QWEN35_9B_ALLOW_CUMEM", "").lower() in {"1", "true", "yes", "on"}; sys.exit(0 if "Qwen3.5-9B" in paths and os.environ.get("NCCL_CUMEM_ENABLE", "1") != "0" and not allow else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] setting NCCL_CUMEM_ENABLE=0 for Qwen3.5-9B code FSDP stability; set STAR_CODE_QWEN35_9B_ALLOW_CUMEM=true to override"
+    export NCCL_CUMEM_ENABLE=0
+  fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); allow = os.environ.get("STAR_CODE_QWEN35_9B_ALLOW_MICRO2", "").lower() in {"1", "true", "yes", "on"}; sys.exit(0 if "Qwen3.5-9B" in paths and not allow else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] lowering Qwen3.5-9B code update/logprob micro batches to 1 for FSDP stability; set STAR_CODE_QWEN35_9B_ALLOW_MICRO2=true to override"
+    export ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU=1
+    export CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU=1
+    export ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU=1
+    export REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU=1
+  fi
   if python3 -c 'import os, sys; sys.exit(0 if os.environ["ROLLOUT_ENABLE_CHUNKED_PREFILL"].lower() in {"0", "false", "no", "off"} and int(os.environ["ROLLOUT_MAX_NUM_BATCHED_TOKENS"]) < int(os.environ["ROLLOUT_MAX_MODEL_LEN"]) else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] raising ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} to ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} because chunked prefill is disabled"
     export ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_MODEL_LEN}"
