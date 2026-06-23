@@ -42,9 +42,12 @@ actor_rollout_ref:
   model:
     path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:PLANNER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}
     tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:PLANNER_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}}
+    enable_activation_offload: ${oc.decode:${oc.env:ACTOR_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
   actor:
     ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
     ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+    use_dynamic_bsz: ${oc.decode:${oc.env:ACTOR_USE_DYNAMIC_BSZ,${oc.env:USE_DYNAMIC_BSZ,false}}}
+    ppo_max_token_len_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MAX_TOKEN_LEN_PER_GPU,${oc.env:PPO_MAX_TOKEN_LEN_PER_GPU,16384}}}
   ref:
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
   rollout:
@@ -72,7 +75,10 @@ critic:
   model:
     path: ${oc.select:actor_rollout_ref.model.path,null}
     tokenizer_path: ${oc.select:actor_rollout_ref.model.tokenizer_path,null}
+    enable_activation_offload: ${oc.decode:${oc.env:CRITIC_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
   ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+  use_dynamic_bsz: ${oc.decode:${oc.env:CRITIC_USE_DYNAMIC_BSZ,${oc.env:USE_DYNAMIC_BSZ,false}}}
+  ppo_max_token_len_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MAX_TOKEN_LEN_PER_GPU,${oc.env:PPO_MAX_TOKEN_LEN_PER_GPU,32768}}}
 
 data:
   dataset_root: ${oc.env:DATASET_ROOT,${oc.env:UNITYMAS_ROOT}/datasets/data/code_jsonl}

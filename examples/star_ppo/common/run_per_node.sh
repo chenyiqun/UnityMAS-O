@@ -20,6 +20,11 @@ WANDB_API_KEY_VALUE="${WANDB_API_KEY:-}"
 WANDB_ENTITY_VALUE="${WANDB_ENTITY:-}"
 export ROLLOUT_ENABLE_CHUNKED_PREFILL_EXPLICIT="${ROLLOUT_ENABLE_CHUNKED_PREFILL+x}"
 export ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB_EXPLICIT="${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB+x}"
+export ENABLE_ACTIVATION_OFFLOAD_EXPLICIT="${ENABLE_ACTIVATION_OFFLOAD+x}"
+export USE_DYNAMIC_BSZ_EXPLICIT="${USE_DYNAMIC_BSZ+x}"
+export PPO_MAX_TOKEN_LEN_PER_GPU_EXPLICIT="${PPO_MAX_TOKEN_LEN_PER_GPU+x}"
+export NCCL_BUFFSIZE_EXPLICIT="${NCCL_BUFFSIZE+x}"
+export NCCL_MAX_NCHANNELS_EXPLICIT="${NCCL_MAX_NCHANNELS+x}"
 
 if [[ -z "${HEAD_IP}" ]]; then
   echo "[common/run_per_node] ERROR: HEAD_IP is required"
@@ -90,6 +95,28 @@ if [[ "${CONFIG_NAME}" == star_code_* ]]; then
   if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); sys.exit(0 if "Qwen3.5-9B" in paths and not os.environ.get("ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB_EXPLICIT") else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] setting ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=1024 for Qwen3.5-9B rollout weight-sync stability; set ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB explicitly to override"
     export ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=1024
+  fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); nodes = [int(os.environ.get(k, "1")) for k in ("PLANNER_NNODES", "CODER_NNODES", "REFLECTION_NNODES")]; sys.exit(0 if "Qwen3.5-9B" in paths and min(nodes) <= 2 else 1)' >/dev/null 2>&1; then
+    if [[ -z "${ENABLE_ACTIVATION_OFFLOAD_EXPLICIT}" ]]; then
+      echo "[common/run_per_node] enabling ENABLE_ACTIVATION_OFFLOAD=true for Qwen3.5-9B 2-node update memory headroom"
+      export ENABLE_ACTIVATION_OFFLOAD=true
+    fi
+    if [[ -z "${USE_DYNAMIC_BSZ_EXPLICIT}" ]]; then
+      echo "[common/run_per_node] enabling USE_DYNAMIC_BSZ=true for Qwen3.5-9B 2-node update memory headroom"
+      export USE_DYNAMIC_BSZ=true
+    fi
+    if [[ -z "${PPO_MAX_TOKEN_LEN_PER_GPU_EXPLICIT}" ]]; then
+      echo "[common/run_per_node] setting PPO_MAX_TOKEN_LEN_PER_GPU=8192 for Qwen3.5-9B 2-node update memory headroom"
+      export PPO_MAX_TOKEN_LEN_PER_GPU=8192
+    fi
+    if [[ -z "${NCCL_BUFFSIZE_EXPLICIT}" ]]; then
+      echo "[common/run_per_node] setting NCCL_BUFFSIZE=1048576 for Qwen3.5-9B 2-node Ulysses all-to-all memory headroom"
+      export NCCL_BUFFSIZE=1048576
+    fi
+    if [[ -z "${NCCL_MAX_NCHANNELS_EXPLICIT}" ]]; then
+      echo "[common/run_per_node] setting NCCL_MAX_NCHANNELS=4 for Qwen3.5-9B 2-node Ulysses all-to-all memory headroom"
+      export NCCL_MAX_NCHANNELS=4
+    fi
   fi
   if python3 -c 'import os, sys; sys.exit(0 if os.environ["ROLLOUT_ENABLE_CHUNKED_PREFILL"].lower() in {"0", "false", "no", "off"} and int(os.environ["ROLLOUT_MAX_NUM_BATCHED_TOKENS"]) < int(os.environ["ROLLOUT_MAX_MODEL_LEN"]) else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] raising ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} to ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} because chunked prefill is disabled"
