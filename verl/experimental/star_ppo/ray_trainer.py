@@ -484,8 +484,12 @@ class StarRayTrainer:
                 ctx.rollout_manager = _StarAsyncRolloutManagerAdapter(agent_loop_manager)
                 print(f"[star] async rollout manager ready model={spec.model_id}")
 
-            self._init_weight_sync_group(spec.model_id, ctx)
-            self._sync_rollout_weights(spec.model_id, ctx)
+            try:
+                self._init_weight_sync_group(spec.model_id, ctx)
+                self._sync_rollout_weights(spec.model_id, ctx)
+            except BaseException:
+                self._restore_prepared_rollout_after_init_error(spec.model_id, ctx)
+                raise
             return spec.model_id
 
         parallel_post_init = str(os.environ.get("STAR_PARALLEL_POST_INIT", "false")).strip().lower() in {
@@ -516,6 +520,38 @@ class StarRayTrainer:
         else:
             for spec in self.engine_specs:
                 _post_init_model(spec)
+
+    def _restore_prepared_rollout_after_init_error(self, model_id: str, ctx: ModelWorkerContext) -> None:
+        if not getattr(ctx, "rollout_prepared_for_initial_weight_sync", False):
+            return
+
+        def _call_wg_method(wg: RayWorkerGroup, method_names: list[str]):
+            for method_name in method_names:
+                if hasattr(wg, method_name):
+                    return getattr(wg, method_name)()
+            raise AttributeError(
+                f"{type(wg).__name__} has none of methods={method_names}; "
+                f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
+            )
+
+        try:
+            finish_refs = _call_wg_method(
+                ctx.rollout_wg,
+                ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
+            )
+            self._ray_get_with_timeout(
+                [finish_refs],
+                timeout_s=self._weight_sync_timeout_seconds,
+                op_name=f"restore_prepared_rollout_after_init_error(model={model_id})",
+            )
+            print(f"[star] restored prepared rollout memory after init error model={model_id}")
+        except BaseException as exc:
+            print(
+                f"[star] failed to restore prepared rollout memory after init error "
+                f"model={model_id}: {type(exc).__name__}: {exc}"
+            )
+        finally:
+            ctx.rollout_prepared_for_initial_weight_sync = False
 
     def _init_weight_sync_group(self, model_id: str, ctx: ModelWorkerContext):
         def _call_wg_method(wg: RayWorkerGroup, method_names: list[str], *args):
