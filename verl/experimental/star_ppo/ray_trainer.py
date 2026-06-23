@@ -54,6 +54,7 @@ class ModelWorkerContext:
     critic_wg: Optional[RayWorkerGroup] = None
     ref_policy_wg: Optional[RayWorkerGroup] = None
     rm_wg: Optional[RayWorkerGroup] = None
+    rollout_prepared_for_initial_weight_sync: bool = False
 
 
 @dataclass
@@ -550,16 +551,12 @@ class StarRayTrainer:
                 f"elapsed={time.time() - stage_t0:.3f}s"
             )
 
-        weight_info_error = None
         try:
             weights_info = _call_wg_method(
                 ctx.actor_wg,
                 ["get_actor_weights_info", "actor_get_actor_weights_info"],
             )[0]
         except BaseException as exc:
-            weight_info_error = exc
-            raise
-        finally:
             if prepared_for_weight_info:
                 stage_t0 = time.time()
                 try:
@@ -570,19 +567,20 @@ class StarRayTrainer:
                     self._ray_get_with_timeout(
                         [finish_refs],
                         timeout_s=self._weight_sync_timeout_seconds,
-                        op_name=f"finish_rollout_weight_info(model={model_id})",
+                        op_name=f"finish_rollout_weight_info_after_error(model={model_id})",
                     )
                     print(
-                        f"[star] restored rollout memory after actor weight info model={model_id} "
+                        f"[star] restored rollout memory after failed actor weight info model={model_id} "
                         f"elapsed={time.time() - stage_t0:.3f}s"
                     )
                 except BaseException as finish_exc:
                     print(
-                        f"[star] failed to restore rollout memory after actor weight info "
+                        f"[star] failed to restore rollout memory after failed actor weight info "
                         f"model={model_id}: {type(finish_exc).__name__}: {finish_exc}"
                     )
-                    if weight_info_error is None:
-                        raise
+            raise
+        if prepared_for_weight_info:
+            ctx.rollout_prepared_for_initial_weight_sync = True
         _call_wg_method(
             ctx.rollout_wg,
             ["set_actor_weights_info", "rollout_set_actor_weights_info", "actor_set_actor_weights_info"],
@@ -719,17 +717,23 @@ class StarRayTrainer:
                 f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
             )
 
-        stage_t0 = time.time()
-        prepare_refs = _call_wg_method(
-            ctx.rollout_wg,
-            ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
-        )
-        self._ray_get_with_timeout(
-            [prepare_refs],
-            timeout_s=self._weight_sync_timeout_seconds,
-            op_name=f"prepare_rollout_weight_sync(model={model_id})",
-        )
-        record_elapsed("prepare", stage_t0)
+        already_prepared = bool(getattr(ctx, "rollout_prepared_for_initial_weight_sync", False))
+        if already_prepared:
+            print(f"[star] reuse prepared rollout memory for initial weight sync model={model_id}")
+            if metric_prefix:
+                metrics[f"{metric_prefix}/prepare_s"] = 0.0
+        else:
+            stage_t0 = time.time()
+            prepare_refs = _call_wg_method(
+                ctx.rollout_wg,
+                ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
+            )
+            self._ray_get_with_timeout(
+                [prepare_refs],
+                timeout_s=self._weight_sync_timeout_seconds,
+                op_name=f"prepare_rollout_weight_sync(model={model_id})",
+            )
+            record_elapsed("prepare", stage_t0)
         try:
             stage_t0 = time.time()
             actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
@@ -754,6 +758,8 @@ class StarRayTrainer:
                 timeout_s=self._weight_sync_timeout_seconds,
                 op_name=f"finish_rollout_weight_sync(model={model_id})",
             )
+            if already_prepared:
+                ctx.rollout_prepared_for_initial_weight_sync = False
             record_elapsed("finish", stage_t0)
         return metrics
 

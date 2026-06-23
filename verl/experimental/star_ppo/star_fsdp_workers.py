@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import os
 import threading
 import time
@@ -155,27 +156,33 @@ def _weights_info_from_params(params_iter):
 
 
 def _build_actor_weights_info_payload(actor_worker):
-    state_dict_info = _get_actor_weights_info_from_state_dict(actor_worker)
-    if state_dict_info is not None:
-        return {"weights_info": state_dict_info, "base_sync_done": True, "peft_config": None}
+    try:
+        state_dict_info = _get_actor_weights_info_from_state_dict(actor_worker)
+        if state_dict_info is not None:
+            return {"weights_info": state_dict_info, "base_sync_done": True, "peft_config": None}
 
-    params_iter, peft_config = _actor_per_tensor_param(actor_worker, base_sync_done=True)
-    payload = {
-        "weights_info": _weights_info_from_params(params_iter),
-        "base_sync_done": True,
-        "peft_config": peft_config,
-    }
-    if peft_config is not None and not _rollout_base_sync_done(actor_worker):
-        base_params_iter, base_peft_config = _actor_per_tensor_param(actor_worker, base_sync_done=False)
-        payload.update(
-            {
-                "base_weights_info": _weights_info_from_params(base_params_iter),
-                "base_sync_done": False,
-                "needs_lora_base_sync": True,
-                "peft_config": base_peft_config or peft_config,
-            }
-        )
-    return payload
+        params_iter, peft_config = _actor_per_tensor_param(actor_worker, base_sync_done=True)
+        payload = {
+            "weights_info": _weights_info_from_params(params_iter),
+            "base_sync_done": True,
+            "peft_config": peft_config,
+        }
+        if peft_config is not None and not _rollout_base_sync_done(actor_worker):
+            base_params_iter, base_peft_config = _actor_per_tensor_param(actor_worker, base_sync_done=False)
+            payload.update(
+                {
+                    "base_weights_info": _weights_info_from_params(base_params_iter),
+                    "base_sync_done": False,
+                    "needs_lora_base_sync": True,
+                    "peft_config": base_peft_config or peft_config,
+                }
+            )
+        return payload
+    finally:
+        # Weight-info construction can briefly materialize FSDP/DTensor state.
+        # Return those temporary allocations before vLLM wakes its KV cache.
+        gc.collect()
+        get_torch_device().empty_cache()
 
 
 def _apply_actor_weights_info(worker, weights_info):
