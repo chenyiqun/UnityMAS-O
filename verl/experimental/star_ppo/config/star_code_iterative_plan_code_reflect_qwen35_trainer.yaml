@@ -1,0 +1,176 @@
+defaults:
+  - star_code_iterative_plan_code_reflect_trainer
+  - _self_
+
+actor_rollout_ref:
+  rollout:
+    # Qwen3.5 code agents often produce longer tagged outputs even with
+    # no-thinking chat-template settings. Keep the rollout tensor budget aligned
+    # with the largest per-agent response cap so closing tags are not truncated.
+    prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,12288}}
+    response_length: ${oc.decode:${oc.env:ROLLOUT_RESPONSE_LENGTH,3072}}
+    max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,15360}}
+    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,15360}}
+
+data:
+  max_prompt_length: ${oc.decode:${oc.env:DATA_MAX_PROMPT_LENGTH,12288}}
+
+star:
+  workflow:
+    per_infer_prompt_max_tokens: ${oc.decode:${oc.env:STAR_PER_INFER_PROMPT_MAX_TOKENS,11264}}
+    prompt_truncation_margin: ${oc.decode:${oc.env:STAR_PROMPT_TRUNCATION_MARGIN,512}}
+    code:
+      max_state_chars: ${oc.decode:${oc.env:CODE_MAX_STATE_CHARS,10000}}
+      visible_tests_max_chars: ${oc.decode:${oc.env:CODE_VISIBLE_TESTS_MAX_CHARS,2500}}
+      planner:
+        max_response_tokens: ${oc.decode:${oc.env:CODE_PLANNER_MAX_RESPONSE_TOKENS,1536}}
+        prompt_template: |
+          /no_think
+          You are the Planner agent in an iterative multi-agent coding workflow.
+
+          Critical output rule for Qwen3.5:
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only the final concise pseudocode inside the required tags.
+
+          Original problem/task:
+          {original_problem}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
+          Global state so far:
+          {global_state_text}
+
+          Task:
+          Produce only the useful pseudocode for turn {turn_number} of {max_turns}. Use the problem, execution mode, visible tests, previous code, verification errors, and reflections in the global state to improve the plan.
+
+          Content constraints:
+          - Include input parsing or function arguments only when needed.
+          - Include the core algorithm, edge cases, and output/return formatting.
+          - Prefer short numbered or bullet steps.
+          - Do not restate the full problem.
+          - Do not include analysis, proof, alternatives, or confidence statements.
+
+          Output strictly in this format only:
+          <pseudocode>
+          concise pseudocode here
+          </pseudocode>
+
+          The first non-whitespace characters must be <pseudocode>.
+          The last non-whitespace characters must be </pseudocode>.
+          Do not output anything outside the pseudocode tags.
+      coder:
+        max_response_tokens: ${oc.decode:${oc.env:CODE_CODER_MAX_RESPONSE_TOKENS,3072}}
+        prompt_template: |
+          /no_think
+          You are the Coder agent in an iterative multi-agent coding workflow.
+
+          Critical output rule for Qwen3.5:
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain the code. Output only the final Python source code inside the required tags.
+
+          Original problem/task:
+          {original_problem}
+
+          Starter code, if any:
+          {starter_code}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
+          Global state so far:
+          {global_state_text}
+
+          Current turn pseudocode:
+          {current_pseudocode}
+
+          Task:
+          {coder_task_instruction}
+          Use the original problem, current pseudocode, visible tests, and any previous reflections/errors from the global state.
+
+          Coding constraints:
+          - Return complete runnable Python source code.
+          - Keep the implementation compact.
+          - Do not include comments unless they are necessary for correctness.
+          - Do not include prose, reasoning, tests, examples, or Markdown fences.
+
+          Output strictly in this format only:
+          <code>
+          complete Python source code here
+          </code>
+
+          Correct format example:
+          <code>
+          {code_format_example}
+          </code>
+
+          Do not copy the example logic. Solve the original problem.
+          The first non-whitespace characters must be <code>.
+          The last non-whitespace characters must be </code>.
+          Your entire response must be exactly one <code>...</code> block.
+      reflection:
+        max_response_tokens: ${oc.decode:${oc.env:CODE_REFLECTION_MAX_RESPONSE_TOKENS,1024}}
+        prompt_template: |
+          /no_think
+          You are the Reflection agent in an iterative multi-agent coding workflow.
+
+          Critical output rule for Qwen3.5:
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only concise debugging guidance inside the required tags.
+
+          Original problem/task:
+          {original_problem}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
+          Global state, including the current failed or partial attempt:
+          {global_state_text}
+
+          Current turn pseudocode:
+          {current_pseudocode}
+
+          Current turn code:
+          {current_code}
+
+          Current verifier pass rate:
+          {current_pass_rate}
+
+          Current verifier all-passed flag:
+          {current_all_passed}
+
+          Current verifier error:
+          {current_error}
+
+          Task:
+          Give only actionable debugging guidance for the next Planner and Coder. Identify the likely root cause, the exact code or algorithm change needed, and any edge cases to handle.
+
+          Content constraints:
+          - Keep it short and concrete.
+          - Do not repeat the full problem.
+          - Do not repeat the full code.
+          - Do not include chain-of-thought, long derivations, or alternative explorations.
+
+          Output strictly in this format only:
+          <reflection>
+          concise concrete fix here
+          </reflection>
+
+          The first non-whitespace characters must be <reflection>.
+          The last non-whitespace characters must be </reflection>.
+          Do not output anything outside the reflection tags.
