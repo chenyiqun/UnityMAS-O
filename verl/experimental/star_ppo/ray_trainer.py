@@ -526,10 +526,63 @@ class StarRayTrainer:
                 f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'actor' in name]}"
             )
 
-        weights_info = _call_wg_method(
-            ctx.actor_wg,
-            ["get_actor_weights_info", "actor_get_actor_weights_info"],
-        )[0]
+        # get_actor_weights_info may build FSDP/DTensor state_dict metadata and
+        # needs temporary GPU memory. Release rollout KV/cache memory before it,
+        # not only before the actual weight broadcast.
+        prepare_before_weight_info = str(
+            os.environ.get("STAR_PREPARE_ROLLOUT_BEFORE_WEIGHT_INFO", "true")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        prepared_for_weight_info = False
+        if prepare_before_weight_info:
+            stage_t0 = time.time()
+            prepare_refs = _call_wg_method(
+                ctx.rollout_wg,
+                ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
+            )
+            self._ray_get_with_timeout(
+                [prepare_refs],
+                timeout_s=self._weight_sync_timeout_seconds,
+                op_name=f"prepare_rollout_weight_info(model={model_id})",
+            )
+            prepared_for_weight_info = True
+            print(
+                f"[star] prepared rollout memory for actor weight info model={model_id} "
+                f"elapsed={time.time() - stage_t0:.3f}s"
+            )
+
+        weight_info_error = None
+        try:
+            weights_info = _call_wg_method(
+                ctx.actor_wg,
+                ["get_actor_weights_info", "actor_get_actor_weights_info"],
+            )[0]
+        except BaseException as exc:
+            weight_info_error = exc
+            raise
+        finally:
+            if prepared_for_weight_info:
+                stage_t0 = time.time()
+                try:
+                    finish_refs = _call_wg_method(
+                        ctx.rollout_wg,
+                        ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
+                    )
+                    self._ray_get_with_timeout(
+                        [finish_refs],
+                        timeout_s=self._weight_sync_timeout_seconds,
+                        op_name=f"finish_rollout_weight_info(model={model_id})",
+                    )
+                    print(
+                        f"[star] restored rollout memory after actor weight info model={model_id} "
+                        f"elapsed={time.time() - stage_t0:.3f}s"
+                    )
+                except BaseException as finish_exc:
+                    print(
+                        f"[star] failed to restore rollout memory after actor weight info "
+                        f"model={model_id}: {type(finish_exc).__name__}: {finish_exc}"
+                    )
+                    if weight_info_error is None:
+                        raise
         _call_wg_method(
             ctx.rollout_wg,
             ["set_actor_weights_info", "rollout_set_actor_weights_info", "actor_set_actor_weights_info"],
