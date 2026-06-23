@@ -18,6 +18,8 @@ PROJECT_NAME="${PROJECT_NAME:-}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-}"
 WANDB_API_KEY_VALUE="${WANDB_API_KEY:-}"
 WANDB_ENTITY_VALUE="${WANDB_ENTITY:-}"
+export ROLLOUT_ENABLE_CHUNKED_PREFILL_EXPLICIT="${ROLLOUT_ENABLE_CHUNKED_PREFILL+x}"
+export ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB_EXPLICIT="${ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB+x}"
 
 if [[ -z "${HEAD_IP}" ]]; then
   echo "[common/run_per_node] ERROR: HEAD_IP is required"
@@ -80,6 +82,14 @@ if [[ "${CONFIG_NAME}" == star_code_* ]]; then
   if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); allow = os.environ.get("STAR_CODE_QWEN35_9B_ALLOW_FSDP_COMPILE", "").lower() in {"1", "true", "yes", "on"}; sys.exit(0 if "Qwen3.5-9B" in paths and not allow else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] disabling actor/ref/critic FSDP torch compile for Qwen3.5-9B code update stability; set STAR_CODE_QWEN35_9B_ALLOW_FSDP_COMPILE=true to override"
     export STAR_CODE_QWEN35_9B_DISABLE_FSDP_COMPILE=true
+  fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); explicit = bool(os.environ.get("ROLLOUT_ENABLE_CHUNKED_PREFILL_EXPLICIT")); disabled = os.environ["ROLLOUT_ENABLE_CHUNKED_PREFILL"].lower() in {"0", "false", "no", "off"}; sys.exit(0 if "Qwen3.5-9B" in paths and disabled and not explicit else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] enabling ROLLOUT_ENABLE_CHUNKED_PREFILL=true for Qwen3.5-9B vLLM stability; set ROLLOUT_ENABLE_CHUNKED_PREFILL=false explicitly to override"
+    export ROLLOUT_ENABLE_CHUNKED_PREFILL=true
+  fi
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); sys.exit(0 if "Qwen3.5-9B" in paths and not os.environ.get("ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB_EXPLICIT") else 1)' >/dev/null 2>&1; then
+    echo "[common/run_per_node] setting ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=1024 for Qwen3.5-9B rollout weight-sync stability; set ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB explicitly to override"
+    export ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB=1024
   fi
   if python3 -c 'import os, sys; sys.exit(0 if os.environ["ROLLOUT_ENABLE_CHUNKED_PREFILL"].lower() in {"0", "false", "no", "off"} and int(os.environ["ROLLOUT_MAX_NUM_BATCHED_TOKENS"]) < int(os.environ["ROLLOUT_MAX_MODEL_LEN"]) else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] raising ROLLOUT_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_MAX_NUM_BATCHED_TOKENS} to ROLLOUT_MAX_MODEL_LEN=${ROLLOUT_MAX_MODEL_LEN} because chunked prefill is disabled"
