@@ -161,7 +161,7 @@ star:
         model_id: planner_llm
         agent_id: planner_agent
         output_key: pseudocode
-        max_response_tokens: ${oc.decode:${oc.env:CODE_PLANNER_MAX_RESPONSE_TOKENS,1536}}
+        max_response_tokens: ${oc.decode:${oc.env:CODE_PLANNER_MAX_RESPONSE_TOKENS,3072}}
         parser:
           type: raw
         reward:
@@ -197,6 +197,8 @@ star:
           - Prefer short numbered or bullet steps.
           - Do not restate the full problem.
           - Do not include analysis, proof, alternatives, or confidence statements.
+          - Inside the <pseudocode> tags, include only pseudocode that the next Coder can directly implement.
+          - Inside the <pseudocode> tags, do not include chain-of-thought, meta commentary, apologies, uncertainty, rationale, examples, tests, Markdown, or any text unrelated to the pseudocode itself.
 
           Output strictly in this format only:
           <pseudocode>
@@ -252,6 +254,8 @@ star:
           - Keep the implementation compact.
           - Do not include comments unless they are necessary for correctness.
           - Do not include prose, reasoning, tests, examples, or Markdown fences.
+          - Inside the <code> tags, include only Python source code required to solve the original problem.
+          - Inside the <code> tags, do not include chain-of-thought, explanations, pseudocode, natural-language discussion, sample runs, Markdown, or any text that is not valid Python source code.
 
           Output strictly in this format only:
           <code>
@@ -271,7 +275,7 @@ star:
         model_id: reflection_llm
         agent_id: reflection_agent
         output_key: reflection
-        max_response_tokens: ${oc.decode:${oc.env:CODE_REFLECTION_MAX_RESPONSE_TOKENS,1024}}
+        max_response_tokens: ${oc.decode:${oc.env:CODE_REFLECTION_MAX_RESPONSE_TOKENS,3072}}
         parser:
           type: raw
         reward:
@@ -321,6 +325,8 @@ star:
           - Do not repeat the full problem.
           - Do not repeat the full code.
           - Do not include chain-of-thought, long derivations, or alternative explorations.
+          - Inside the <reflection> tags, include only the concrete bug diagnosis and next-step fix guidance.
+          - Inside the <reflection> tags, do not include chain-of-thought, broad reasoning, meta commentary, summaries of the whole problem, copied code, Markdown, or any text unrelated to the next fix.
 
           Output strictly in this format only:
           <reflection>
