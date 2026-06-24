@@ -391,6 +391,26 @@ def _prepare_rollout_memory_for_weight_sync(worker):
         _run_coro_blocking(lambda: rollout.resume(tags=["weights"]))
 
 
+def _sleep_rollout_memory_for_update(worker):
+    if not getattr(worker, "_is_rollout", False):
+        return
+    rollout = getattr(worker, "rollout", None)
+    if rollout is None or not getattr(worker.config.rollout, "free_cache_engine", False):
+        return
+    if hasattr(rollout, "release"):
+        _run_coro_blocking(lambda: rollout.release())
+
+
+def _wake_rollout_memory_for_weight_sync(worker):
+    if not getattr(worker, "_is_rollout", False):
+        return
+    rollout = getattr(worker, "rollout", None)
+    if rollout is None or not getattr(worker.config.rollout, "free_cache_engine", False):
+        return
+    if hasattr(rollout, "resume"):
+        _run_coro_blocking(lambda: rollout.resume(tags=["weights"]))
+
+
 def _restore_rollout_memory_after_weight_sync(worker):
     if not getattr(worker, "_is_rollout", False):
         return
@@ -540,6 +560,14 @@ class StarDetachActorWorker(DetachActorWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def prepare_rollout_weight_sync(self):
         _prepare_rollout_memory_for_weight_sync(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def sleep_rollout_for_update(self):
+        _sleep_rollout_memory_for_update(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def wake_rollout_weight_sync(self):
+        _wake_rollout_memory_for_weight_sync(self)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def finish_rollout_weight_sync(self):
@@ -1186,6 +1214,14 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def prepare_rollout_weight_sync(self):
         _prepare_rollout_memory_for_weight_sync(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def sleep_rollout_for_update(self):
+        _sleep_rollout_memory_for_update(self)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def wake_rollout_weight_sync(self):
+        _wake_rollout_memory_for_weight_sync(self)
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def finish_rollout_weight_sync(self):
