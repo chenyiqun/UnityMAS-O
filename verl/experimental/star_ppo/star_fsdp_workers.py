@@ -494,6 +494,11 @@ class CriticWorker(TrainingWorker):
             tu.assign_non_tensor(data, **defaults)
         return self.train_mini_batch(data)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def compact_training_memory_for_rollout_sync(self):
+        gc.collect()
+        get_torch_device().empty_cache()
+
 
 class StarDetachActorWorker(DetachActorWorker):
     """Actor worker alias for star PPO."""
@@ -556,6 +561,11 @@ class StarDetachActorWorker(DetachActorWorker):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def set_weight_sync_mode(self, mode: str):
         self._weight_sync_mode = str(mode).strip().lower()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
+    def compact_training_memory_for_rollout_sync(self):
+        gc.collect()
+        get_torch_device().empty_cache()
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     def prepare_rollout_weight_sync(self):

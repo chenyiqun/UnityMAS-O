@@ -3,6 +3,7 @@ import inspect
 import json
 import math
 import os
+import threading
 import time
 import traceback
 import uuid
@@ -174,6 +175,9 @@ class StarRayTrainer:
         self._weight_sync_timeout_seconds = float(
             os.environ.get("STAR_WEIGHT_SYNC_TIMEOUT_SECONDS", self._ray_get_timeout_seconds)
         )
+        serialize_weight_sync = str(os.environ.get("STAR_SERIALIZE_ROLLOUT_WEIGHT_SYNC", "true")).strip().lower()
+        self._serialize_rollout_weight_sync = serialize_weight_sync in {"1", "true", "yes", "on"}
+        self._rollout_weight_sync_lock = threading.Lock()
         self._rollout_quiesce_timeout_seconds = float(
             self.config.star.train.get("rollout_quiesce_timeout_seconds", 120)
         )
@@ -600,6 +604,52 @@ class StarRayTrainer:
             ctx.rollout_prepared_for_initial_weight_sync = False
             ctx.rollout_sleeping_for_update = False
 
+    def _compact_training_memory_for_rollout_sync(
+        self,
+        model_id: str,
+        ctx: ModelWorkerContext,
+        metric_prefix: Optional[str] = None,
+    ) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+
+        def _call_optional(wg: Optional[RayWorkerGroup], method_names: list[str]):
+            if wg is None:
+                return None
+            for method_name in method_names:
+                if hasattr(wg, method_name):
+                    return getattr(wg, method_name)()
+            return None
+
+        stage_t0 = time.time()
+        refs = []
+        for wg, names in (
+            (ctx.actor_wg, ["compact_training_memory_for_rollout_sync", "actor_compact_training_memory_for_rollout_sync"]),
+            (
+                ctx.ref_policy_wg,
+                ["compact_training_memory_for_rollout_sync", "ref_compact_training_memory_for_rollout_sync"],
+            ),
+            (
+                ctx.critic_wg,
+                ["compact_training_memory_for_rollout_sync", "critic_compact_training_memory_for_rollout_sync"],
+            ),
+        ):
+            maybe_refs = _call_optional(wg, names)
+            if maybe_refs is None:
+                continue
+            if isinstance(maybe_refs, list | tuple):
+                refs.extend(maybe_refs)
+            else:
+                refs.append(maybe_refs)
+        if refs:
+            self._ray_get_with_timeout(
+                refs,
+                timeout_s=self._weight_sync_timeout_seconds,
+                op_name=f"compact_training_memory_for_rollout_sync(model={model_id})",
+            )
+        if metric_prefix:
+            metrics[f"{metric_prefix}/compact_training_memory_s"] = float(time.time() - stage_t0)
+        return metrics
+
     def _init_weight_sync_group(self, model_id: str, ctx: ModelWorkerContext):
         def _call_wg_method(wg: RayWorkerGroup, method_names: list[str], *args):
             for method_name in method_names:
@@ -787,79 +837,96 @@ class StarRayTrainer:
     ) -> dict[str, float]:
         metrics: dict[str, float] = {}
 
+        lock_acquired = False
+        if self._serialize_rollout_weight_sync:
+            stage_t0 = time.time()
+            self._rollout_weight_sync_lock.acquire()
+            lock_acquired = True
+            if metric_prefix:
+                metrics[f"{metric_prefix}/lock_wait_s"] = float(time.time() - stage_t0)
+
         def record_elapsed(name: str, start_time: float):
             if metric_prefix:
                 metrics[f"{metric_prefix}/{name}_s"] = float(time.time() - start_time)
 
-        def _call_wg_method(wg: RayWorkerGroup, method_names: list[str]):
-            for method_name in method_names:
-                if hasattr(wg, method_name):
-                    return getattr(wg, method_name)()
-            raise AttributeError(
-                f"{type(wg).__name__} has none of methods={method_names}; "
-                f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
-            )
-
-        already_prepared = bool(getattr(ctx, "rollout_prepared_for_initial_weight_sync", False))
-        sleeping_for_update = bool(getattr(ctx, "rollout_sleeping_for_update", False))
-        if already_prepared:
-            print(f"[star] reuse prepared rollout memory for weight sync model={model_id}")
-            if metric_prefix:
-                metrics[f"{metric_prefix}/prepare_s"] = 0.0
-        elif sleeping_for_update:
-            stage_t0 = time.time()
-            wake_refs = _call_wg_method(
-                ctx.rollout_wg,
-                ["wake_rollout_weight_sync", "rollout_wake_rollout_weight_sync"],
-            )
-            self._ray_get_with_timeout(
-                [wake_refs],
-                timeout_s=self._weight_sync_timeout_seconds,
-                op_name=f"wake_rollout_weight_sync(model={model_id})",
-            )
-            record_elapsed("prepare", stage_t0)
-            record_elapsed("wake_weights", stage_t0)
-        else:
-            stage_t0 = time.time()
-            prepare_refs = _call_wg_method(
-                ctx.rollout_wg,
-                ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
-            )
-            self._ray_get_with_timeout(
-                [prepare_refs],
-                timeout_s=self._weight_sync_timeout_seconds,
-                op_name=f"prepare_rollout_weight_sync(model={model_id})",
-            )
-            record_elapsed("prepare", stage_t0)
         try:
-            stage_t0 = time.time()
-            actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
-            rollout_refs = _call_wg_method(
-                ctx.rollout_wg,
-                ["sync_rollout_weights", "rollout_sync_rollout_weights", "actor_sync_rollout_weights"],
-            )
-            self._ray_get_with_timeout(
-                [actor_refs, rollout_refs],
-                timeout_s=self._weight_sync_timeout_seconds,
-                op_name=f"sync_rollout_weights(model={model_id})",
-            )
-            record_elapsed("sync", stage_t0)
-        finally:
-            stage_t0 = time.time()
-            finish_refs = _call_wg_method(
-                ctx.rollout_wg,
-                ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
-            )
-            self._ray_get_with_timeout(
-                [finish_refs],
-                timeout_s=self._weight_sync_timeout_seconds,
-                op_name=f"finish_rollout_weight_sync(model={model_id})",
-            )
+            def _call_wg_method(wg: RayWorkerGroup, method_names: list[str]):
+                for method_name in method_names:
+                    if hasattr(wg, method_name):
+                        return getattr(wg, method_name)()
+                raise AttributeError(
+                    f"{type(wg).__name__} has none of methods={method_names}; "
+                    f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
+                )
+
+            already_prepared = bool(getattr(ctx, "rollout_prepared_for_initial_weight_sync", False))
+            sleeping_for_update = bool(getattr(ctx, "rollout_sleeping_for_update", False))
+            metrics.update(self._compact_training_memory_for_rollout_sync(model_id, ctx, metric_prefix=metric_prefix))
             if already_prepared:
-                ctx.rollout_prepared_for_initial_weight_sync = False
-            if sleeping_for_update:
-                ctx.rollout_sleeping_for_update = False
-            record_elapsed("finish", stage_t0)
+                print(f"[star] reuse prepared rollout memory for weight sync model={model_id}")
+                if metric_prefix:
+                    metrics[f"{metric_prefix}/prepare_s"] = 0.0
+            elif sleeping_for_update:
+                stage_t0 = time.time()
+                wake_refs = _call_wg_method(
+                    ctx.rollout_wg,
+                    ["wake_rollout_weight_sync", "rollout_wake_rollout_weight_sync"],
+                )
+                try:
+                    self._ray_get_with_timeout(
+                        [wake_refs],
+                        timeout_s=self._weight_sync_timeout_seconds,
+                        op_name=f"wake_rollout_weight_sync(model={model_id})",
+                    )
+                except BaseException:
+                    ctx.rollout_sleeping_for_update = False
+                    raise
+                record_elapsed("prepare", stage_t0)
+                record_elapsed("wake_weights", stage_t0)
+            else:
+                stage_t0 = time.time()
+                prepare_refs = _call_wg_method(
+                    ctx.rollout_wg,
+                    ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
+                )
+                self._ray_get_with_timeout(
+                    [prepare_refs],
+                    timeout_s=self._weight_sync_timeout_seconds,
+                    op_name=f"prepare_rollout_weight_sync(model={model_id})",
+                )
+                record_elapsed("prepare", stage_t0)
+            try:
+                stage_t0 = time.time()
+                actor_refs = _call_wg_method(ctx.actor_wg, ["sync_rollout_weights", "actor_sync_rollout_weights"])
+                rollout_refs = _call_wg_method(
+                    ctx.rollout_wg,
+                    ["sync_rollout_weights", "rollout_sync_rollout_weights", "actor_sync_rollout_weights"],
+                )
+                self._ray_get_with_timeout(
+                    [actor_refs, rollout_refs],
+                    timeout_s=self._weight_sync_timeout_seconds,
+                    op_name=f"sync_rollout_weights(model={model_id})",
+                )
+                record_elapsed("sync", stage_t0)
+            finally:
+                stage_t0 = time.time()
+                finish_refs = _call_wg_method(
+                    ctx.rollout_wg,
+                    ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
+                )
+                self._ray_get_with_timeout(
+                    [finish_refs],
+                    timeout_s=self._weight_sync_timeout_seconds,
+                    op_name=f"finish_rollout_weight_sync(model={model_id})",
+                )
+                if already_prepared:
+                    ctx.rollout_prepared_for_initial_weight_sync = False
+                if sleeping_for_update:
+                    ctx.rollout_sleeping_for_update = False
+                record_elapsed("finish", stage_t0)
+        finally:
+            if lock_acquired:
+                self._rollout_weight_sync_lock.release()
         return metrics
 
     def _ensure_routing_fields(self, batch: DataProto):
