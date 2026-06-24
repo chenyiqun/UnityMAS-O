@@ -175,6 +175,24 @@ class LLMServerClient:
         # Awaiting here risks blocking the finally clause if the LB actor is unresponsive.
         self._load_balancer.release_server.remote(server_id=server_id)
 
+    @staticmethod
+    def _is_fatal_server_error(exc: BaseException) -> bool:
+        messages: list[str] = []
+        cur: Optional[BaseException] = exc
+        while cur is not None:
+            messages.append(f"{type(cur).__name__}: {cur}")
+            cur = cur.__cause__ or cur.__context__
+        text = "\n".join(messages)
+        fatal_markers = (
+            "EngineDeadError",
+            "EngineCore encountered",
+            "Worker proc VllmWorker",
+            "CUBLAS_STATUS_EXECUTION_FAILED",
+            "cudaErrorLaunchFailure",
+            "unspecified launch failure",
+        )
+        return any(marker in text for marker in fatal_markers)
+
     @rollout_trace_op
     async def generate(
         self,
@@ -183,10 +201,10 @@ class LLMServerClient:
         prompt_ids: list[int],
         sampling_params: dict[str, Any],
         image_data: Optional[list[Any]] = None,
-        video_data: Optional[list[Any]] = None,
-        audio_data: Optional[list[Any]] = None,
-        mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        **kwargs: Any,
+            video_data: Optional[list[Any]] = None,
+            audio_data: Optional[list[Any]] = None,
+            mm_processor_kwargs: Optional[dict[str, Any]] = None,
+            **kwargs: Any,
     ) -> TokenOutput:
         """Generate tokens from prompt ids.
 
@@ -199,6 +217,7 @@ class LLMServerClient:
             TokenOutput | DiffusionOutput: token or diffusion output
         """
         server_id, server = await self._acquire_server(request_id)
+        release_server = True
         try:
             multimodal_kwargs = {}
             if audio_data is not None:
@@ -215,8 +234,20 @@ class LLMServerClient:
                 **kwargs,
             )
             return output
+        except Exception as exc:
+            if self._is_fatal_server_error(exc):
+                release_server = False
+                logger.error(
+                    "[LLMServerClient] removing unhealthy rollout server %s after fatal error: %s: %s",
+                    server_id,
+                    type(exc).__name__,
+                    exc,
+                )
+                await self._load_balancer.remove_servers.remote([server_id])
+            raise
         finally:
-            self._release_server(server_id)
+            if release_server:
+                self._release_server(server_id)
 
 
 class LLMServerManager:
