@@ -50,6 +50,9 @@ star:
     # A failed PPO update or rollout weight sync leaves model/rollout state
     # inconsistent. Stop immediately instead of continuing with stale workers.
     fail_on_update_error: ${oc.decode:${oc.env:STAR_FAIL_ON_UPDATE_ERROR,true}}
+    # Multi-LLM STAR jobs can update disjoint model worker groups in parallel.
+    # Large colocated models may disable this through the launcher for memory headroom.
+    parallel_ppo_updates: ${oc.decode:${oc.env:STAR_PARALLEL_PPO_UPDATES,true}}
 
 actor_rollout_ref:
   rollout:

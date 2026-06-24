@@ -2954,32 +2954,56 @@ class StarRayTrainer:
         metrics["training/update/models_scheduled"] = float(len(update_jobs))
         metrics["training/update/ready_items_scheduled"] = float(sum(len(batch) for _, _, batch in update_jobs))
         if update_jobs:
-            # Different models use disjoint worker groups/resource pools, so they can
-            # update in parallel instead of serial model-by-model execution.
-            update_tasks = [
-                asyncio.create_task(
-                    asyncio.to_thread(
-                        self._run_model_ppo_update_safe,
-                        model_id,
-                        ctx,
-                        ready_batch,
-                        self._global_step,
-                    )
-                )
-                for model_id, ctx, ready_batch in update_jobs
-            ]
-            ppo_results = []
-            pending = set(update_tasks)
-            try:
+            parallel_ppo_updates = bool(self.config.star.train.get("parallel_ppo_updates", True))
+            metrics["training/update/parallel_ppo_updates"] = float(parallel_ppo_updates)
+
+            async def _wait_for_update_tasks(update_tasks):
+                ppo_results = []
+                pending = set(update_tasks)
                 heartbeat_s = max(5.0, min(float(self._stall_heartbeat_seconds), 30.0))
                 while pending:
                     done, pending = await asyncio.wait(pending, timeout=heartbeat_s)
                     self._mark_progress(stage="train_update_ppo", step=self._global_step)
                     for task in done:
                         ppo_results.append(task.result())
+                return ppo_results
+
+            try:
+                if parallel_ppo_updates and len(update_jobs) > 1:
+                    # Different models use disjoint worker groups/resource pools, so they can
+                    # update in parallel instead of serial model-by-model execution.
+                    update_tasks = [
+                        asyncio.create_task(
+                            asyncio.to_thread(
+                                self._run_model_ppo_update_safe,
+                                model_id,
+                                ctx,
+                                ready_batch,
+                                self._global_step,
+                            )
+                        )
+                        for model_id, ctx, ready_batch in update_jobs
+                    ]
+                    ppo_results = await _wait_for_update_tasks(update_tasks)
+                else:
+                    ppo_results = []
+                    for model_id, ctx, ready_batch in update_jobs:
+                        update_tasks = [
+                            asyncio.create_task(
+                                asyncio.to_thread(
+                                    self._run_model_ppo_update_safe,
+                                    model_id,
+                                    ctx,
+                                    ready_batch,
+                                    self._global_step,
+                                )
+                            )
+                        ]
+                        ppo_results.extend(await _wait_for_update_tasks(update_tasks))
             except Exception:
-                for task in pending:
-                    task.cancel()
+                for task in locals().get("update_tasks", []):
+                    if not task.done():
+                        task.cancel()
                 raise
             for ppo_metrics in ppo_results:
                 metrics.update(ppo_metrics)
