@@ -488,7 +488,7 @@ class StarRayTrainer:
                 self._init_weight_sync_group(spec.model_id, ctx)
                 self._sync_rollout_weights(spec.model_id, ctx)
             except BaseException:
-                self._restore_prepared_rollout_after_init_error(spec.model_id, ctx)
+                self._restore_prepared_rollout_after_error(spec.model_id, ctx)
                 raise
             return spec.model_id
 
@@ -521,33 +521,52 @@ class StarRayTrainer:
             for spec in self.engine_specs:
                 _post_init_model(spec)
 
-    def _restore_prepared_rollout_after_init_error(self, model_id: str, ctx: ModelWorkerContext) -> None:
+    def _call_rollout_weight_method(self, ctx: ModelWorkerContext, method_names: list[str]):
+        for method_name in method_names:
+            if hasattr(ctx.rollout_wg, method_name):
+                return getattr(ctx.rollout_wg, method_name)()
+        raise AttributeError(
+            f"{type(ctx.rollout_wg).__name__} has none of methods={method_names}; "
+            f"available STAR weight methods="
+            f"{[name for name in dir(ctx.rollout_wg) if 'weight' in name or 'rollout' in name]}"
+        )
+
+    def _prepare_rollout_memory_for_update(self, model_id: str, ctx: ModelWorkerContext) -> float:
+        if getattr(ctx, "rollout_prepared_for_initial_weight_sync", False):
+            return 0.0
+        stage_t0 = time.time()
+        prepare_refs = self._call_rollout_weight_method(
+            ctx,
+            ["prepare_rollout_weight_sync", "rollout_prepare_rollout_weight_sync"],
+        )
+        self._ray_get_with_timeout(
+            [prepare_refs],
+            timeout_s=self._weight_sync_timeout_seconds,
+            op_name=f"prepare_rollout_for_update(model={model_id})",
+        )
+        ctx.rollout_prepared_for_initial_weight_sync = True
+        elapsed = float(time.time() - stage_t0)
+        print(f"[star] prepared rollout memory for PPO update model={model_id} elapsed={elapsed:.3f}s")
+        return elapsed
+
+    def _restore_prepared_rollout_after_error(self, model_id: str, ctx: ModelWorkerContext) -> None:
         if not getattr(ctx, "rollout_prepared_for_initial_weight_sync", False):
             return
 
-        def _call_wg_method(wg: RayWorkerGroup, method_names: list[str]):
-            for method_name in method_names:
-                if hasattr(wg, method_name):
-                    return getattr(wg, method_name)()
-            raise AttributeError(
-                f"{type(wg).__name__} has none of methods={method_names}; "
-                f"available STAR weight methods={[name for name in dir(wg) if 'weight' in name or 'rollout' in name]}"
-            )
-
         try:
-            finish_refs = _call_wg_method(
-                ctx.rollout_wg,
+            finish_refs = self._call_rollout_weight_method(
+                ctx,
                 ["finish_rollout_weight_sync", "rollout_finish_rollout_weight_sync"],
             )
             self._ray_get_with_timeout(
                 [finish_refs],
                 timeout_s=self._weight_sync_timeout_seconds,
-                op_name=f"restore_prepared_rollout_after_init_error(model={model_id})",
+                op_name=f"restore_prepared_rollout_after_error(model={model_id})",
             )
-            print(f"[star] restored prepared rollout memory after init error model={model_id}")
+            print(f"[star] restored prepared rollout memory after error model={model_id}")
         except BaseException as exc:
             print(
-                f"[star] failed to restore prepared rollout memory after init error "
+                f"[star] failed to restore prepared rollout memory after error "
                 f"model={model_id}: {type(exc).__name__}: {exc}"
             )
         finally:
@@ -755,7 +774,7 @@ class StarRayTrainer:
 
         already_prepared = bool(getattr(ctx, "rollout_prepared_for_initial_weight_sync", False))
         if already_prepared:
-            print(f"[star] reuse prepared rollout memory for initial weight sync model={model_id}")
+            print(f"[star] reuse prepared rollout memory for weight sync model={model_id}")
             if metric_prefix:
                 metrics[f"{metric_prefix}/prepare_s"] = 0.0
         else:
@@ -1839,6 +1858,7 @@ class StarRayTrainer:
         try:
             return self._run_model_ppo_update(model_id, ctx, batch, global_step)
         except Exception as exc:
+            self._restore_prepared_rollout_after_error(model_id, ctx)
             timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
             tb = traceback.format_exc(limit=20)
             print(
@@ -2709,6 +2729,15 @@ class StarRayTrainer:
         metrics.update(self._collect_ppo_batch_debug_metrics(model_id, batch))
         record_elapsed("batch_debug_metrics", stage_t0)
 
+        # Rollout/vLLM is idle during PPO update. Keep its KV cache released
+        # until the post-actor weight sync restores it for the next rollout.
+        stage_t0 = time.time()
+        metrics[f"{timing_prefix}/prepare_rollout_for_update_s"] = self._prepare_rollout_memory_for_update(
+            model_id,
+            ctx,
+        )
+        record_elapsed("prepare_rollout_for_update_total", stage_t0)
+
         rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
         bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
         stage_t0 = time.time()
@@ -2825,6 +2854,9 @@ class StarRayTrainer:
             metrics[f"model/{model_id}/star/critic_warmup_remaining"] = float(
                 max(0, int(self.config.trainer.critic_warmup) - int(global_step))
             )
+            stage_t0 = time.time()
+            self._restore_prepared_rollout_after_error(model_id, ctx)
+            record_elapsed("restore_rollout_after_critic_warmup", stage_t0)
 
         metrics[f"model/{model_id}/star/consumed"] = float(len(batch))
         metrics[f"{timing_prefix}/total_s"] = float(time.time() - update_t0)
