@@ -21,6 +21,7 @@ CONDA_ROOT="${CONDA_ROOT:-$HOME/miniconda3}"
 CONDA_ENV_NAME="${CONDA_ENV_NAME:-verl}"
 CLEANUP_BEFORE_LAUNCH="${CLEANUP_BEFORE_LAUNCH:-true}"
 PYTHON_KILL_PATTERN="${PYTHON_KILL_PATTERN:-/miniconda3/envs/${CONDA_ENV_NAME}/bin/python3.10}"
+VLLM_WORKER_KILL_PATTERN="${VLLM_WORKER_KILL_PATTERN:-VLLM::Worker}"
 HEAD_START_DELAY_SECONDS="${HEAD_START_DELAY_SECONDS:-10}"
 DRY_RUN="${DRY_RUN:-false}"
 
@@ -262,6 +263,7 @@ build_pod_command() {
   if [[ "${CLEANUP_BEFORE_LAUNCH}" == "true" ]]; then
     cmd+="ray stop --force >/dev/null 2>&1 || true"$'\n'
     cmd+="pkill -9 -f $(quote "${PYTHON_KILL_PATTERN}") >/dev/null 2>&1 || true"$'\n'
+    cmd+="pkill -9 -f $(quote "${VLLM_WORKER_KILL_PATTERN}") >/dev/null 2>&1 || true"$'\n'
   fi
   cmd+="mkdir -p logs/star_ppo"$'\n'
   cmd+="bash examples/star_ppo/common/run_per_node_background.sh"

@@ -19,6 +19,7 @@ ACTIVATE_CONDA="${ACTIVATE_CONDA:-true}"
 LOCAL_IP="${LOCAL_IP:-}"
 CLEANUP_BEFORE_LAUNCH="${CLEANUP_BEFORE_LAUNCH:-true}"
 PYTHON_KILL_PATTERN="${PYTHON_KILL_PATTERN:-/miniconda3/envs/${CONDA_ENV_NAME}/bin/python3.10}"
+VLLM_WORKER_KILL_PATTERN="${VLLM_WORKER_KILL_PATTERN:-VLLM::Worker}"
 LOG_TO_FILE="${LOG_TO_FILE:-true}"
 
 usage() {
@@ -162,9 +163,10 @@ fi
 echo "[common/run_ip_list] local_ip=${LOCAL_IP_MATCH} rank=${RANK}/${WORLD_SIZE} head=${HEAD_IP}"
 
 if [[ "${CLEANUP_BEFORE_LAUNCH}" == "true" ]]; then
-  echo "[common/run_ip_list] cleanup stale Ray/Python processes on local rank ${RANK}"
+  echo "[common/run_ip_list] cleanup stale Ray/Python/vLLM processes on local rank ${RANK}"
   ray stop --force >/dev/null 2>&1 || true
   pkill -9 -f "${PYTHON_KILL_PATTERN}" >/dev/null 2>&1 || true
+  pkill -9 -f "${VLLM_WORKER_KILL_PATTERN}" >/dev/null 2>&1 || true
 fi
 
 if [[ "${LOG_TO_FILE}" == "true" ]]; then

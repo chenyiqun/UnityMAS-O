@@ -46,6 +46,7 @@ export ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-16}"
 export ROLLOUT_ENFORCE_EAGER="${ROLLOUT_ENFORCE_EAGER:-true}"
 export ROLLOUT_ENABLE_CHUNKED_PREFILL="${ROLLOUT_ENABLE_CHUNKED_PREFILL:-false}"
 export ROLLOUT_DISABLE_CUSTOM_ALL_REDUCE="${ROLLOUT_DISABLE_CUSTOM_ALL_REDUCE:-true}"
+export VLLM_WORKER_KILL_PATTERN="${VLLM_WORKER_KILL_PATTERN:-VLLM::Worker}"
 export STAR_MAX_INFLIGHT_QUERIES="${STAR_MAX_INFLIGHT_QUERIES:-64}"
 export STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL="${STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL:-16}"
 export STAR_QUERY_TIMEOUT_SECONDS="${STAR_QUERY_TIMEOUT_SECONDS:-600}"
@@ -167,7 +168,9 @@ if [[ "${PYTORCH_CUDA_ALLOC_CONF:-}" == *"expandable_segments:True"* ]]; then
   unset PYTORCH_CUDA_ALLOC_CONF
 fi
 
+echo "[common/run_per_node] cleanup stale Ray/vLLM workers on local rank ${RANK}"
 ray stop -f >/dev/null 2>&1 || true
+pkill -9 -f "${VLLM_WORKER_KILL_PATTERN}" >/dev/null 2>&1 || true
 
 echo "[common/run_per_node] RANK=${RANK} WORLD_SIZE=${WORLD_SIZE} HEAD_IP=${HEAD_IP} CONFIG_NAME=${CONFIG_NAME}"
 echo "[common/run_per_node] wandb entity=${WANDB_ENTITY_VALUE:-<unset>} project=${PROJECT_NAME:-<config>} experiment=${EXPERIMENT_NAME:-<config>}"

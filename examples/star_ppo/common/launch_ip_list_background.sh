@@ -19,6 +19,7 @@ SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o StrictHostKeyChecking=accept-new}"
 HEAD_START_DELAY_SECONDS="${HEAD_START_DELAY_SECONDS:-10}"
 CLEANUP_BEFORE_LAUNCH="${CLEANUP_BEFORE_LAUNCH:-true}"
 PYTHON_KILL_PATTERN="${PYTHON_KILL_PATTERN:-/miniconda3/envs/${CONDA_ENV_NAME}/bin/python3.10}"
+VLLM_WORKER_KILL_PATTERN="${VLLM_WORKER_KILL_PATTERN:-VLLM::Worker}"
 DRY_RUN="${DRY_RUN:-false}"
 
 usage() {
@@ -197,6 +198,7 @@ build_remote_command() {
   if [[ "${CLEANUP_BEFORE_LAUNCH}" == "true" ]]; then
     cmd+="ray stop --force >/dev/null 2>&1 || true"$'\n'
     cmd+="pkill -9 -f $(quote "${PYTHON_KILL_PATTERN}") >/dev/null 2>&1 || true"$'\n'
+    cmd+="pkill -9 -f $(quote "${VLLM_WORKER_KILL_PATTERN}") >/dev/null 2>&1 || true"$'\n'
   fi
   cmd+="mkdir -p logs/star_ppo"$'\n'
   cmd+="bash examples/star_ppo/common/run_per_node_background.sh"
