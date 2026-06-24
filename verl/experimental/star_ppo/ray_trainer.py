@@ -173,6 +173,13 @@ class StarRayTrainer:
         self._weight_sync_timeout_seconds = float(
             os.environ.get("STAR_WEIGHT_SYNC_TIMEOUT_SECONDS", self._ray_get_timeout_seconds)
         )
+        self._rollout_quiesce_timeout_seconds = float(
+            self.config.star.train.get("rollout_quiesce_timeout_seconds", 120)
+        )
+        self._rollout_quiesce_stable_checks = max(
+            1,
+            int(self.config.star.train.get("rollout_quiesce_stable_checks", 2)),
+        )
         self._workflow_batch_timeout_seconds = float(os.environ.get("STAR_WORKFLOW_BATCH_TIMEOUT_SECONDS", "0"))
         self._stall_detect_seconds = float(os.environ.get("STAR_STALL_DETECT_SECONDS", "0"))
         self._stall_heartbeat_seconds = float(os.environ.get("STAR_STALL_HEARTBEAT_SECONDS", "30"))
@@ -1487,6 +1494,198 @@ class StarRayTrainer:
                 req.timing_state.update(req_timing)
             if not req.future.cancelled():
                 req.future.set_result((model_id, req_thin, req.batch, req_timing))
+
+    async def _wait_rollout_microbatches_idle(self, model_id: str, timeout_s: float) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        if not self._llm_microbatch_enabled:
+            metrics["microbatch_enabled"] = 0.0
+            return metrics
+
+        start = time.perf_counter()
+        deadline = start + timeout_s if timeout_s > 0 else None
+        flush_count = 0
+        last_pending = 0
+
+        while True:
+            task: Optional[asyncio.Task] = None
+            task_kind = ""
+            lock = self._get_microbatch_lock(model_id)
+            async with lock:
+                queue = self._llm_microbatch_queues_by_model.get(model_id, [])
+                pending_size = self._microbatch_pending_size(queue)
+                last_pending = pending_size
+                task = self._llm_microbatch_flush_tasks_by_model.get(model_id, None)
+                task_kind = self._llm_microbatch_flush_task_kind_by_model.get(model_id, "")
+                if task is not None and task.done():
+                    exc = None if task.cancelled() else task.exception()
+                    if exc is not None:
+                        raise exc
+                if pending_size > 0 and (task is None or task.done() or task_kind == "timer"):
+                    if task is not None and not task.done() and task_kind == "timer":
+                        task.cancel()
+                    task = asyncio.create_task(self._flush_rollout_microbatch(model_id, reason="quiesce"))
+                    self._llm_microbatch_flush_tasks_by_model[model_id] = task
+                    self._llm_microbatch_flush_task_kind_by_model[model_id] = "flush"
+                    task_kind = "flush"
+                    flush_count += 1
+
+            if task is not None and not task.done():
+                remaining = None if deadline is None else max(0.0, deadline - time.perf_counter())
+                if remaining is not None and remaining <= 0:
+                    raise TimeoutError(
+                        f"Timed out waiting for STAR rollout microbatches to flush "
+                        f"model={model_id} pending={last_pending} task_kind={task_kind}"
+                    )
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"Timed out waiting for STAR rollout microbatch task "
+                        f"model={model_id} pending={last_pending} task_kind={task_kind}"
+                    ) from exc
+                continue
+
+            async with lock:
+                queue = self._llm_microbatch_queues_by_model.get(model_id, [])
+                pending_size = self._microbatch_pending_size(queue)
+                last_pending = pending_size
+                task = self._llm_microbatch_flush_tasks_by_model.get(model_id, None)
+                if task is not None and task.done():
+                    exc = None if task.cancelled() else task.exception()
+                    if exc is not None:
+                        raise exc
+                if pending_size == 0 and (task is None or task.done()):
+                    if task is not None and task.done():
+                        self._llm_microbatch_flush_tasks_by_model.pop(model_id, None)
+                        self._llm_microbatch_flush_task_kind_by_model.pop(model_id, None)
+                    break
+
+            await asyncio.sleep(0.01)
+
+        metrics["microbatch_enabled"] = 1.0
+        metrics["microbatch_quiesce_flush_count"] = float(flush_count)
+        metrics["microbatch_pending_after_quiesce"] = float(last_pending)
+        metrics["microbatch_quiesce_s"] = float(time.perf_counter() - start)
+        return metrics
+
+    async def _get_llm_server_status(self, ctx: ModelWorkerContext) -> Optional[dict[str, Any]]:
+        manager = getattr(ctx, "llm_server_manager", None)
+        load_balancer = getattr(manager, "global_load_balancer", None)
+        if load_balancer is None:
+            return None
+
+        timeout_s = min(max(1.0, self._rollout_quiesce_timeout_seconds), 30.0)
+        return await asyncio.to_thread(
+            self._ray_get_with_timeout,
+            [load_balancer.get_status.remote()],
+            timeout_s,
+            f"llm_server_status(model={ctx.model_id})",
+        )
+
+    async def _wait_llm_server_load_balancer_idle(
+        self,
+        model_id: str,
+        ctx: ModelWorkerContext,
+        timeout_s: float,
+    ) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        start = time.perf_counter()
+        deadline = start + timeout_s if timeout_s > 0 else None
+        stable_zero = 0
+        first_inflight: Optional[int] = None
+        last_inflight: Optional[int] = None
+        checks = 0
+
+        while True:
+            status_result = await self._get_llm_server_status(ctx)
+            if status_result is None:
+                metrics["llm_server_status_available"] = 0.0
+                return metrics
+            status = status_result[0] if isinstance(status_result, list) and status_result else status_result
+            total_inflight = int((status or {}).get("total_inflight", 0))
+            if first_inflight is None:
+                first_inflight = total_inflight
+            last_inflight = total_inflight
+            checks += 1
+            if total_inflight == 0:
+                stable_zero += 1
+                if stable_zero >= self._rollout_quiesce_stable_checks:
+                    break
+            else:
+                stable_zero = 0
+
+            remaining = None if deadline is None else deadline - time.perf_counter()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError(
+                    f"Timed out waiting for STAR LLM server load balancer to go idle "
+                    f"model={model_id} total_inflight={total_inflight} status={status}"
+                )
+            await asyncio.sleep(min(0.2, max(0.01, remaining if remaining is not None else 0.2)))
+
+        metrics["llm_server_status_available"] = 1.0
+        metrics["llm_server_inflight_before_quiesce"] = float(first_inflight or 0)
+        metrics["llm_server_inflight_after_quiesce"] = float(last_inflight or 0)
+        metrics["llm_server_idle_checks"] = float(checks)
+        metrics["llm_server_idle_wait_s"] = float(time.perf_counter() - start)
+        return metrics
+
+    async def _wait_rollout_replicas_drained(
+        self,
+        model_id: str,
+        ctx: ModelWorkerContext,
+        timeout_s: float,
+    ) -> dict[str, float]:
+        manager = getattr(ctx, "llm_server_manager", None)
+        get_replicas = getattr(manager, "get_replicas", None)
+        if not callable(get_replicas):
+            return {"replica_drain_available": 0.0}
+
+        refs = []
+        for replica in get_replicas():
+            servers = getattr(replica, "servers", None)
+            if not servers:
+                continue
+            drain = getattr(servers[0], "wait_for_requests_to_drain", None)
+            if callable(drain):
+                refs.append(drain.remote())
+
+        if not refs:
+            return {"replica_drain_available": 0.0}
+
+        start = time.perf_counter()
+        try:
+            await asyncio.wait_for(asyncio.gather(*refs), timeout=timeout_s if timeout_s > 0 else None)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for STAR rollout replicas to drain model={model_id} replicas={len(refs)}"
+            ) from exc
+        return {
+            "replica_drain_available": 1.0,
+            "replica_drain_count": float(len(refs)),
+            "replica_drain_s": float(time.perf_counter() - start),
+        }
+
+    async def _quiesce_rollout_for_update(self, model_id: str, ctx: ModelWorkerContext) -> dict[str, float]:
+        timeout_s = self._rollout_quiesce_timeout_seconds
+        metrics: dict[str, float] = {}
+        start = time.perf_counter()
+        prefix = f"model/{model_id}/timing/update/quiesce_rollout"
+
+        micro_metrics = await self._wait_rollout_microbatches_idle(model_id, timeout_s)
+        for key, value in micro_metrics.items():
+            metrics[f"{prefix}/{key}"] = float(value)
+
+        lb_metrics = await self._wait_llm_server_load_balancer_idle(model_id, ctx, timeout_s)
+        for key, value in lb_metrics.items():
+            metrics[f"{prefix}/{key}"] = float(value)
+
+        replica_metrics = await self._wait_rollout_replicas_drained(model_id, ctx, timeout_s)
+        for key, value in replica_metrics.items():
+            metrics[f"{prefix}/{key}"] = float(value)
+
+        metrics[f"{prefix}/total_s"] = float(time.perf_counter() - start)
+        metrics[f"model/{model_id}/star/quiesce_rollout_before_update"] = 1.0
+        return metrics
 
     @staticmethod
     def _extract_first_json_object(text: str) -> Optional[dict]:
@@ -2956,6 +3155,18 @@ class StarRayTrainer:
         if update_jobs:
             parallel_ppo_updates = bool(self.config.star.train.get("parallel_ppo_updates", True))
             metrics["training/update/parallel_ppo_updates"] = float(parallel_ppo_updates)
+            metrics["training/update/rollout_quiesce_before_update"] = 1.0
+
+            async def _wait_for_quiesce_tasks(quiesce_tasks):
+                quiesce_results = []
+                pending = set(quiesce_tasks)
+                heartbeat_s = max(5.0, min(float(self._stall_heartbeat_seconds), 30.0))
+                while pending:
+                    done, pending = await asyncio.wait(pending, timeout=heartbeat_s)
+                    self._mark_progress(stage="train_update_quiesce_rollout", step=self._global_step)
+                    for task in done:
+                        quiesce_results.append(task.result())
+                return quiesce_results
 
             async def _wait_for_update_tasks(update_tasks):
                 ppo_results = []
@@ -2969,9 +3180,16 @@ class StarRayTrainer:
                 return ppo_results
 
             try:
+                quiesce_tasks = [
+                    asyncio.create_task(self._quiesce_rollout_for_update(model_id, ctx))
+                    for model_id, ctx, _ in update_jobs
+                ]
+                for quiesce_metrics in await _wait_for_quiesce_tasks(quiesce_tasks):
+                    metrics.update(quiesce_metrics)
+
                 if parallel_ppo_updates and len(update_jobs) > 1:
                     # Different models use disjoint worker groups/resource pools, so they can
-                    # update in parallel instead of serial model-by-model execution.
+                    # quiesce and update in parallel instead of serial model-by-model execution.
                     update_tasks = [
                         asyncio.create_task(
                             asyncio.to_thread(
@@ -3001,6 +3219,9 @@ class StarRayTrainer:
                         ]
                         ppo_results.extend(await _wait_for_update_tasks(update_tasks))
             except Exception:
+                for task in locals().get("quiesce_tasks", []):
+                    if not task.done():
+                        task.cancel()
                 for task in locals().get("update_tasks", []):
                     if not task.done():
                         task.cancel()
