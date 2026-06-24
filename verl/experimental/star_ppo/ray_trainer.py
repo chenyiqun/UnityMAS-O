@@ -2908,6 +2908,80 @@ class StarRayTrainer:
             return {"buffer/total": 0, "buffer/ready": 0, "buffer/dropped_queries": 0}
         return local_buffer.stats()
 
+    def _clear_model_buffers_after_update(self, model_id: str, ctx: ModelWorkerContext) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        remote_sums: dict[str, float] = {}
+        if hasattr(ctx.rollout_wg, "clear_trajectory_buffer"):
+            remote_outputs = ctx.rollout_wg.clear_trajectory_buffer(clear_dropped_queries=False)
+            remote_outputs = self._materialize_worker_output(remote_outputs)
+            remote_items = remote_outputs if isinstance(remote_outputs, list | tuple) else [remote_outputs]
+            for item in remote_items:
+                if not isinstance(item, dict):
+                    continue
+                for key, value in item.items():
+                    if isinstance(value, int | float):
+                        remote_sums[key] = remote_sums.get(key, 0.0) + float(value)
+
+        if remote_sums:
+            metrics[f"model/{model_id}/star/clear_after_update_remote_total"] = float(
+                remote_sums.get("star/cleared_buffer_total", 0.0)
+            )
+            metrics[f"model/{model_id}/star/clear_after_update_remote_ready"] = float(
+                remote_sums.get("star/cleared_buffer_ready", 0.0)
+            )
+            metrics[f"model/{model_id}/star/remote_buffer_total_after_clear"] = float(
+                remote_sums.get("buffer/total", 0.0)
+            )
+            metrics[f"model/{model_id}/star/remote_buffer_ready_after_clear"] = float(
+                remote_sums.get("buffer/ready", 0.0)
+            )
+
+        local_buffer = self._local_traj_buffers_by_model.get(model_id, None)
+        if local_buffer is not None:
+            local_clear_stats = local_buffer.clear(clear_dropped_queries=False)
+            metrics[f"model/{model_id}/star/clear_after_update_local_total"] = float(
+                local_clear_stats.get("buffer/cleared_total", 0)
+            )
+            metrics[f"model/{model_id}/star/clear_after_update_local_ready"] = float(
+                local_clear_stats.get("buffer/cleared_ready", 0)
+            )
+            metrics[f"model/{model_id}/star/local_buffer_total_after_clear"] = float(
+                local_clear_stats.get("buffer/total", 0)
+            )
+            metrics[f"model/{model_id}/star/local_buffer_ready_after_clear"] = float(
+                local_clear_stats.get("buffer/ready", 0)
+            )
+
+        metrics[f"model/{model_id}/star/clear_buffers_after_update"] = 1.0
+        return metrics
+
+    def _clear_update_buffers(self, update_jobs: list[tuple[str, ModelWorkerContext, DataProto]]) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        if not bool(self.config.star.train.get("clear_buffers_after_update", True)):
+            metrics["training/update/clear_buffers_after_update"] = 0.0
+            return metrics
+
+        stage_t0 = time.time()
+        for model_id, ctx, _ in update_jobs:
+            model_t0 = time.time()
+            try:
+                metrics.update(self._clear_model_buffers_after_update(model_id, ctx))
+                metrics[f"model/{model_id}/timing/update/clear_buffers_after_update_s"] = float(
+                    time.time() - model_t0
+                )
+            except Exception as exc:
+                timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
+                print(
+                    f"[star] clear buffers after update failed: model={model_id} step={self._global_step} "
+                    f"timeout={bool(timeout_flag)} err={type(exc).__name__}: {exc}"
+                )
+                metrics[f"model/{model_id}/star/clear_buffers_after_update_failed"] = 1.0
+                metrics[f"model/{model_id}/star/clear_buffers_after_update_failed_timeout"] = timeout_flag
+
+        metrics["training/update/clear_buffers_after_update"] = 1.0
+        metrics["training/update/clear_buffers_after_update_s"] = float(time.time() - stage_t0)
+        return metrics
+
     def _run_model_ppo_update(self, model_id: str, ctx: ModelWorkerContext, batch: DataProto, global_step: int):
         metrics: dict[str, float] = {}
         if len(batch) == 0:
@@ -3228,6 +3302,7 @@ class StarRayTrainer:
                 raise
             for ppo_metrics in ppo_results:
                 metrics.update(ppo_metrics)
+            metrics.update(self._clear_update_buffers(update_jobs))
 
         fail_on_update_error = bool(self.config.star.train.get("fail_on_update_error", True))
         failed_keys = [
@@ -3239,6 +3314,7 @@ class StarRayTrainer:
                 key.endswith("/star/update_failed")
                 or key.endswith("/star/build_ready_failed")
                 or key.endswith("/star/remote_drop_failed")
+                or key.endswith("/star/clear_buffers_after_update_failed")
             )
         ]
         if fail_on_update_error and failed_keys:

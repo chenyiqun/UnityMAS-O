@@ -175,3 +175,16 @@ class TrajectoryBuffer:
                 "buffer/ready": len(self.ready_queue),
                 "buffer/dropped_queries": len(self.dropped_queries),
             }
+
+    def clear(self, *, clear_dropped_queries: bool = False) -> dict[str, int]:
+        with self._lock:
+            stats_before = {
+                "buffer/cleared_total": len(self.entries),
+                "buffer/cleared_ready": len(self.ready_queue),
+                "buffer/cleared_dropped_queries": len(self.dropped_queries) if clear_dropped_queries else 0,
+            }
+            self.entries.clear()
+            self.ready_queue.clear()
+            if clear_dropped_queries:
+                self.dropped_queries.clear()
+            return {**stats_before, **self.stats()}

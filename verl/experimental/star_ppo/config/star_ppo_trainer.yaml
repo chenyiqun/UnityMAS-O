@@ -53,6 +53,10 @@ star:
     # Multi-LLM STAR jobs can update disjoint model worker groups in parallel.
     # Large colocated models may disable this through the launcher for memory headroom.
     parallel_ppo_updates: ${oc.decode:${oc.env:STAR_PARALLEL_PPO_UPDATES,true}}
+    # STAR code workflows treat each dataloader batch as a closed training unit:
+    # after its PPO update, do not carry residual ready/incomplete trajectories
+    # into the next batch.
+    clear_buffers_after_update: ${oc.decode:${oc.env:STAR_CLEAR_BUFFERS_AFTER_UPDATE,true}}
     # Match verl's single-model resource handoff: after rollout/reward commit and
     # before PPO compute, wait for the model-local rollout queue/server to go idle.
     rollout_quiesce_timeout_seconds: ${oc.decode:${oc.env:STAR_ROLLOUT_QUIESCE_TIMEOUT_SECONDS,120}}

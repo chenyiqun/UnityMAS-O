@@ -900,6 +900,16 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
             **self._traj_buffer.stats(),
         }
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def clear_trajectory_buffer(self, clear_dropped_queries: bool = False) -> dict:
+        stats = self._traj_buffer.clear(clear_dropped_queries=bool(clear_dropped_queries))
+        return {
+            "star/cleared_buffer_total": stats.get("buffer/cleared_total", 0),
+            "star/cleared_buffer_ready": stats.get("buffer/cleared_ready", 0),
+            "star/cleared_dropped_queries": stats.get("buffer/cleared_dropped_queries", 0),
+            **self._traj_buffer.stats(),
+        }
+
     def _empty_batch(self) -> DataProto:
         return DataProto.from_dict(non_tensors={"traj_id": np.array([], dtype=object)})
 
