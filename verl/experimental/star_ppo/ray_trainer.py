@@ -460,7 +460,8 @@ class StarRayTrainer:
             if rm_wg is not None:
                 init_targets_by_role["rm"].append((spec.model_id, rm_wg))
 
-        def _init_role(role_name: str):
+        # Init order is role-serial (safe on colocated WorkerDict), model-parallel per role.
+        for role_name in ("actor", "rollout", "critic", "ref", "rm"):
             role_refs = []
             for model_id, wg in init_targets_by_role[role_name]:
                 role_refs.extend(_enqueue_role_init(model_id, role_name, wg))
@@ -472,7 +473,7 @@ class StarRayTrainer:
                 ray.get(role_refs)
                 print(f"[star] parallel init_model role={role_name} done")
 
-        def _init_async_rollout_server(spec: EngineSpec):
+        def _post_init_model(spec: EngineSpec):
             ctx = self.model_contexts[spec.model_id]
             local_buffer = self._local_traj_buffers_by_model.get(spec.model_id, None)
             if local_buffer is not None:
@@ -481,44 +482,20 @@ class StarRayTrainer:
                 local_buffer.max_items *= max(1, self._get_dp_size(ctx.rollout_wg, "rollout"))
             actor_rollout_cfg = actor_rollout_cfg_by_model_id[spec.model_id]
             rollout_mode = str(OmegaConf.select(actor_rollout_cfg, "rollout.mode") or "async")
-            if rollout_mode != "async":
-                return spec.model_id
+            if rollout_mode == "async":
+                from verl.experimental.agent_loop import AgentLoopManager
+                from verl.workers.rollout.llm_server import LLMServerManager
 
-            from verl.experimental.agent_loop import AgentLoopManager
-            from verl.workers.rollout.llm_server import LLMServerManager
-
-            manager_cfg = self._build_manager_cfg_for_model(actor_rollout_cfg)
-            ctx.llm_server_manager = LLMServerManager.create(config=manager_cfg, worker_group=ctx.rollout_wg)
-            agent_loop_manager = AgentLoopManager.create(
-                config=manager_cfg,
-                llm_client=ctx.llm_server_manager.get_client(),
-                reward_loop_worker_handles=None,
-            )
-            ctx.rollout_manager = _StarAsyncRolloutManagerAdapter(agent_loop_manager)
-            print(f"[star] async rollout manager ready model={spec.model_id}")
-
-            # vLLM startup validates available memory before sleep handles exist.
-            # Start it before training engines occupy GPU memory, then immediately
-            # sleep it until the initial actor->rollout weight sync.
-            try:
-                sleep_refs = self._call_rollout_weight_method(
-                    ctx,
-                    ["sleep_rollout_for_update", "rollout_sleep_rollout_for_update"],
+                manager_cfg = self._build_manager_cfg_for_model(actor_rollout_cfg)
+                ctx.llm_server_manager = LLMServerManager.create(config=manager_cfg, worker_group=ctx.rollout_wg)
+                agent_loop_manager = AgentLoopManager.create(
+                    config=manager_cfg,
+                    llm_client=ctx.llm_server_manager.get_client(),
+                    reward_loop_worker_handles=None,
                 )
-                self._ray_get_with_timeout(
-                    [sleep_refs],
-                    timeout_s=self._weight_sync_timeout_seconds,
-                    op_name=f"sleep_rollout_after_server_init(model={spec.model_id})",
-                )
-                ctx.rollout_sleeping_for_update = True
-                print(f"[star] slept rollout after async server init model={spec.model_id}")
-            except BaseException:
-                self._restore_prepared_rollout_after_error(spec.model_id, ctx)
-                raise
-            return spec.model_id
+                ctx.rollout_manager = _StarAsyncRolloutManagerAdapter(agent_loop_manager)
+                print(f"[star] async rollout manager ready model={spec.model_id}")
 
-        def _post_init_weight_sync(spec: EngineSpec):
-            ctx = self.model_contexts[spec.model_id]
             try:
                 self._init_weight_sync_group(spec.model_id, ctx)
                 self._sync_rollout_weights(spec.model_id, ctx)
@@ -527,57 +504,34 @@ class StarRayTrainer:
                 raise
             return spec.model_id
 
-        def _run_post_init(fn, label: str):
-            parallel_post_init = str(os.environ.get("STAR_PARALLEL_POST_INIT", "false")).strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-            post_init_parallelism = max(
-                1,
-                int(os.environ.get("STAR_POST_INIT_PARALLELISM", str(len(self.engine_specs)))),
-            )
-            if parallel_post_init and len(self.engine_specs) > 1:
-                print(
-                    f"[star] parallel {label} enabled models={len(self.engine_specs)} "
-                    f"parallelism={post_init_parallelism}"
-                )
-                with ThreadPoolExecutor(max_workers=post_init_parallelism) as executor:
-                    futures = {executor.submit(fn, spec): spec.model_id for spec in self.engine_specs}
-                    for future in as_completed(futures):
-                        model_id = futures[future]
-                        try:
-                            future.result()
-                            print(f"[star] {label} done model={model_id}")
-                        except Exception as exc:
-                            print(f"[star] {label} failed model={model_id} err={type(exc).__name__}: {exc}")
-                            raise
-            else:
-                for spec in self.engine_specs:
-                    fn(spec)
-
-        async_rollout_init_first = str(
-            os.environ.get("STAR_ASYNC_ROLLOUT_INIT_BEFORE_TRAINING", "true")
-        ).strip().lower() in {
+        parallel_post_init = str(os.environ.get("STAR_PARALLEL_POST_INIT", "false")).strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
-
-        if async_rollout_init_first:
-            _init_role("rollout")
-            _run_post_init(_init_async_rollout_server, "async-rollout-server-init")
-            for role_name in ("actor", "critic", "ref", "rm"):
-                _init_role(role_name)
+        post_init_parallelism = max(
+            1,
+            int(os.environ.get("STAR_POST_INIT_PARALLELISM", str(len(self.engine_specs)))),
+        )
+        if parallel_post_init and len(self.engine_specs) > 1:
+            print(
+                f"[star] parallel post-init enabled models={len(self.engine_specs)} "
+                f"parallelism={post_init_parallelism}"
+            )
+            with ThreadPoolExecutor(max_workers=post_init_parallelism) as executor:
+                futures = {executor.submit(_post_init_model, spec): spec.model_id for spec in self.engine_specs}
+                for future in as_completed(futures):
+                    model_id = futures[future]
+                    try:
+                        future.result()
+                        print(f"[star] post-init done model={model_id}")
+                    except Exception as exc:
+                        print(f"[star] post-init failed model={model_id} err={type(exc).__name__}: {exc}")
+                        raise
         else:
-            # Legacy order: role-serial (safe on colocated WorkerDict), model-parallel per role.
-            for role_name in ("actor", "rollout", "critic", "ref", "rm"):
-                _init_role(role_name)
-            _run_post_init(_init_async_rollout_server, "async-rollout-server-init")
-
-        _run_post_init(_post_init_weight_sync, "post-init-weight-sync")
+            for spec in self.engine_specs:
+                _post_init_model(spec)
 
     def _call_rollout_weight_method(self, ctx: ModelWorkerContext, method_names: list[str]):
         for method_name in method_names:
