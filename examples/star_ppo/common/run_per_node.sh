@@ -25,7 +25,6 @@ export USE_DYNAMIC_BSZ_EXPLICIT="${USE_DYNAMIC_BSZ+x}"
 export PPO_MAX_TOKEN_LEN_PER_GPU_EXPLICIT="${PPO_MAX_TOKEN_LEN_PER_GPU+x}"
 export NCCL_BUFFSIZE_EXPLICIT="${NCCL_BUFFSIZE+x}"
 export NCCL_MAX_NCHANNELS_EXPLICIT="${NCCL_MAX_NCHANNELS+x}"
-export STAR_PARALLEL_PPO_UPDATES_EXPLICIT="${STAR_PARALLEL_PPO_UPDATES+x}"
 
 if [[ -z "${HEAD_IP}" ]]; then
   echo "[common/run_per_node] ERROR: HEAD_IP is required"
@@ -117,10 +116,6 @@ if [[ "${CONFIG_NAME}" == star_code_* ]]; then
     if [[ -z "${NCCL_MAX_NCHANNELS_EXPLICIT}" ]]; then
       echo "[common/run_per_node] setting NCCL_MAX_NCHANNELS=4 for Qwen3.5-9B Ulysses/FSDP memory headroom"
       export NCCL_MAX_NCHANNELS=4
-    fi
-    if [[ -z "${STAR_PARALLEL_PPO_UPDATES_EXPLICIT}" ]]; then
-      echo "[common/run_per_node] setting STAR_PARALLEL_PPO_UPDATES=false for Qwen3.5-9B update memory stability"
-      export STAR_PARALLEL_PPO_UPDATES=false
     fi
   fi
   if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); nodes = [int(os.environ.get(k, "1")) for k in ("PLANNER_NNODES", "CODER_NNODES", "REFLECTION_NNODES")]; sys.exit(0 if "Qwen3.5-9B" in paths and min(nodes) <= 2 else 1)' >/dev/null 2>&1; then
