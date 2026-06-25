@@ -866,8 +866,9 @@ class TraceWorkflowRunner(WorkflowRunner):
             debug_sample_count = self.debug_sample_count
             debug_max_chars = self.debug_max_chars
 
+        debug_batch_counter = self._debug_batch_counter_by_stage[stage]
         debug_this_batch = debug_enabled and (
-            self._debug_batch_counter_by_stage[stage] % max(1, debug_every_n_batches) == 0
+            debug_batch_counter == 1 or debug_batch_counter % max(1, debug_every_n_batches) == 0
         )
         debug_query_indices: set[int] = set()
         if debug_this_batch and len(batch) > 0:

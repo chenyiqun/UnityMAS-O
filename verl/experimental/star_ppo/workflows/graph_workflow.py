@@ -1117,7 +1117,7 @@ class GraphWorkflowRunner(WorkflowRunner):
         batch_start = time.perf_counter()
         self._debug_batch_counter += 1
         debug_this_batch = self.debug_enabled and (
-            self._debug_batch_counter % max(1, self.debug_every_n_batches) == 0
+            self._debug_batch_counter == 1 or self._debug_batch_counter % max(1, self.debug_every_n_batches) == 0
         )
         debug_query_idx = None
         if debug_this_batch and len(batch) > 0:
