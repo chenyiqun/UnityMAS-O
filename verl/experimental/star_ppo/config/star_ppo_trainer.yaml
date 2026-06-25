@@ -40,10 +40,11 @@ star:
   train:
     drop_last: true
     enforce_divisible_batch: true
-    # Cap the number of ready trajectories each model consumes per sync update.
-    # Rollout samples still enter the buffer; extra ready samples remain queued
-    # for later updates instead of making one PPO step process every turn.
-    max_ready_items: ${oc.decode:${oc.env:STAR_MAX_READY_ITEMS,${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}}
+    # Consume all ready trajectories produced by the closed workflow batch by
+    # default. The trainer then drops only the small tail needed to satisfy the
+    # actor/critic DP divisibility constraint before clearing the batch buffers.
+    # Set STAR_MAX_READY_ITEMS > 0 only for explicit debugging throttles.
+    max_ready_items: ${oc.decode:${oc.env:STAR_MAX_READY_ITEMS,0}}
     # Empty reward batches normally mean the workflow timed out or every query
     # was dropped. Fail fast instead of spending more 900s timeout windows.
     max_empty_reward_streak: ${oc.decode:${oc.env:STAR_MAX_EMPTY_REWARD_STREAK,3}}
