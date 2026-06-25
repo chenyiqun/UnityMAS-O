@@ -289,7 +289,7 @@ star:
           You are the Reflection agent in an iterative multi-agent coding workflow.
 
           Critical output rule for Qwen3.5:
-          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only concise debugging guidance inside the required tags.
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only concise debugging guidance inside the required tags. You are not the Coder: do not rewrite the full solution and do not output a <code> block.
 
           Original problem/task:
           {original_problem}
@@ -322,19 +322,27 @@ star:
           {current_error}
 
           Task:
-          Give only actionable debugging guidance for the next Planner and Coder. Identify the likely root cause, the exact code or algorithm change needed, and any edge cases to handle.
+          Give only actionable debugging guidance for the next Planner and Coder. Your job is to diagnose the current failed or partial attempt, not to solve the problem from scratch.
+          Provide exactly these three short items:
+          1. Bug: the most likely concrete cause of the current failure.
+          2. Fix: the minimal algorithm or implementation change the next Coder should make.
+          3. Edge cases: only the specific edge cases the next attempt must cover, if any.
 
           Content constraints:
           - Keep it short and concrete.
           - Do not repeat the full problem.
           - Do not repeat the full code.
-          - Do not include chain-of-thought, long derivations, or alternative explorations.
-          - Inside the <reflection> tags, include only the concrete bug diagnosis and next-step fix guidance.
-          - Inside the <reflection> tags, do not include chain-of-thought, broad reasoning, meta commentary, summaries of the whole problem, copied code, Markdown, or any text unrelated to the next fix.
+          - Do not write complete code, code blocks, Python source, pseudocode for a full solution, tests, examples, or sample runs.
+          - Do not include chain-of-thought, long derivations, proof, alternatives, failed attempts, uncertainty, confidence statements, or broad reasoning.
+          - Do not write self-correction text such as "wait", "actually", "maybe", "let's reason", "we need to think", or similar reasoning traces.
+          - Inside the <reflection> tags, include only the three requested short items for the next fix.
+          - Inside the <reflection> tags, do not include chain-of-thought, broad reasoning, meta commentary, summaries of the whole problem, copied code, Markdown, <code> tags, or any text unrelated to the next fix.
 
           Output strictly in this format only:
           <reflection>
-          concise concrete fix here
+          Bug: concise diagnosis
+          Fix: concise next change
+          Edge cases: concise edge cases or none
           </reflection>
 
           The first non-whitespace characters must be <reflection>.
