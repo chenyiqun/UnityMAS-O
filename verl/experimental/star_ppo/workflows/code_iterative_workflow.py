@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ast
 import copy
+import io
 import json
 import re
 import time
+import tokenize
 from typing import Any
 
 from verl import DataProto
@@ -79,6 +82,39 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         if matches:
             return str(matches[0]).strip(), is_legal
         return raw.strip() or fallback, False
+
+    @staticmethod
+    def _python_body_starts_with_docstring(body: Any) -> bool:
+        if not isinstance(body, list) or not body:
+            return False
+        first = body[0]
+        return (
+            isinstance(first, ast.Expr)
+            and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str)
+        )
+
+    @classmethod
+    def _python_code_has_forbidden_comments(cls, code: str) -> bool:
+        text = str(code or "")
+        if not text.strip():
+            return False
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(text).readline):
+                if token.type == tokenize.COMMENT and token.string.strip():
+                    return True
+        except (tokenize.TokenError, IndentationError, SyntaxError):
+            pass
+
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return False
+        return any(
+            cls._python_body_starts_with_docstring(getattr(node, "body", None))
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        )
 
     @staticmethod
     def _safe_json(value: Any, max_chars: int = 12000) -> str:
@@ -495,8 +531,14 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             )
             coder_record.query_id = query_id
             code, coder_legal = self._parse_tagged_text(coder_record.raw_output, "code")
+            coder_has_forbidden_comments = bool(coder_legal and self._python_code_has_forbidden_comments(code))
+            if coder_has_forbidden_comments:
+                coder_legal = False
             self._set_record_format_reward(coder_record, coder_legal)
-            coder_record.parsed_output = {"code": code}
+            coder_record.parsed_output = {
+                "code": code,
+                "forbidden_comments": coder_has_forbidden_comments,
+            }
             coder_record.state_after = copy.deepcopy(state)
             records.append(coder_record)
             step_id += 1

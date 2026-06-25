@@ -222,7 +222,7 @@ star:
           You are the Coder agent in an iterative multi-agent coding workflow.
 
           Critical output rule for Qwen3.5:
-          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain the code. Output only the final Python source code inside the required tags.
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain the code. Output only the final Python source code inside the required tags. Do not put reasoning into Python comments or docstrings.
 
           Original problem/task:
           {original_problem}
@@ -252,10 +252,12 @@ star:
           Coding constraints:
           - Return complete runnable Python source code.
           - Keep the implementation compact.
-          - Do not include comments unless they are necessary for correctness.
+          - Do not include comments or docstrings.
+          - Do not include explanatory comments, reasoning comments, planning comments, proof comments, TODO notes, sample-run comments, copied pseudocode comments, or alternative-solution comments.
+          - Do not write self-correction text such as "wait", "actually", "maybe", "refined algorithm", or similar reasoning, even inside Python comments.
           - Do not include prose, reasoning, tests, examples, or Markdown fences.
           - Inside the <code> tags, include only Python source code required to solve the original problem.
-          - Inside the <code> tags, do not include chain-of-thought, explanations, pseudocode, natural-language discussion, sample runs, Markdown, or any text that is not valid Python source code.
+          - Inside the <code> tags, do not include chain-of-thought, explanations, pseudocode, natural-language discussion, sample runs, Markdown, comments, docstrings, or any text that is not required Python source code.
 
           Output strictly in this format only:
           <code>
