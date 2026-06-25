@@ -2453,22 +2453,36 @@ class StarRayTrainer:
             return fallback
 
     @staticmethod
-    def _effective_global_mini_batch_size(configured_size: int, batch_size: int, dp_size: int) -> int:
+    def _positive_int(value, default: int = 1) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return max(1, int(default))
+
+    @classmethod
+    def _effective_global_mini_batch_size(
+        cls,
+        configured_size: int,
+        batch_size: int,
+        dp_size: int,
+        micro_batch_size_per_gpu: int = 1,
+    ) -> int:
         configured_size = max(1, int(configured_size))
         batch_size = max(0, int(batch_size))
         dp_size = max(1, int(dp_size))
+        local_group_size = dp_size * cls._positive_int(micro_batch_size_per_gpu, default=1)
         if batch_size <= 0:
             return 0
-        if batch_size % dp_size != 0:
-            batch_size = (batch_size // dp_size) * dp_size
+        if batch_size % local_group_size != 0:
+            batch_size = (batch_size // local_group_size) * local_group_size
         if batch_size <= 0:
             return 0
 
         upper = min(configured_size, batch_size)
         for candidate in range(upper, 0, -1):
-            if candidate % dp_size == 0 and batch_size % candidate == 0:
+            if candidate % local_group_size == 0 and batch_size % candidate == 0:
                 return candidate
-        return dp_size if batch_size % dp_size == 0 else 0
+        return local_group_size if batch_size % local_group_size == 0 else 0
 
     @staticmethod
     def _empty_batch() -> DataProto:
@@ -2843,10 +2857,15 @@ class StarRayTrainer:
         batch_td = self._to_ppo_worker_batch(batch)
         configured_mini_batch_size = self.config.critic.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         critic_dp_size = self._get_dp_size(ctx.critic_wg, "train")
+        critic_micro_batch_size = self._positive_int(
+            self.config.critic.get("ppo_micro_batch_size_per_gpu", 1),
+            default=1,
+        )
         ppo_mini_batch_size = self._effective_global_mini_batch_size(
             configured_mini_batch_size,
             len(batch),
             critic_dp_size,
+            critic_micro_batch_size,
         )
         if ppo_mini_batch_size <= 0:
             return DataProto.from_single_dict(
@@ -2876,7 +2895,7 @@ class StarRayTrainer:
                 "critic/star/ppo_epochs": float(self.config.critic.ppo_epochs),
                 "critic/star/update_batch_size": float(len(batch)),
                 "critic/star/micro_batch_size_per_gpu": float(
-                    self.config.critic.get("ppo_micro_batch_size_per_gpu", 0) or 0
+                    critic_micro_batch_size
                 ),
             }
         )
@@ -2889,10 +2908,12 @@ class StarRayTrainer:
         calculate_entropy = actor_cfg.calculate_entropy or (actor_cfg.entropy_coeff != 0.0)
         configured_mini_batch_size = actor_cfg.ppo_mini_batch_size * self.config.actor_rollout_ref.rollout.n
         actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
+        actor_micro_batch_size = self._positive_int(actor_cfg.get("ppo_micro_batch_size_per_gpu", 1), default=1)
         ppo_mini_batch_size = self._effective_global_mini_batch_size(
             configured_mini_batch_size,
             len(batch),
             actor_dp_size,
+            actor_micro_batch_size,
         )
         if ppo_mini_batch_size <= 0:
             return DataProto.from_single_dict(
@@ -2925,7 +2946,7 @@ class StarRayTrainer:
                 "actor/star/dp_size": float(actor_dp_size),
                 "actor/star/ppo_epochs": float(actor_cfg.ppo_epochs),
                 "actor/star/update_batch_size": float(len(batch)),
-                "actor/star/micro_batch_size_per_gpu": float(actor_cfg.get("ppo_micro_batch_size_per_gpu", 0) or 0),
+                "actor/star/micro_batch_size_per_gpu": float(actor_micro_batch_size),
                 "actor/star/calculate_entropy": float(bool(calculate_entropy)),
             }
         )
@@ -3331,10 +3352,25 @@ class StarRayTrainer:
                 ready_batch = self._shuffle_ready_batch(ready_batch)
                 actor_dp_size = self._get_dp_size(ctx.actor_wg, "actor")
                 critic_dp_size = self._get_dp_size(ctx.critic_wg, "train") if ctx.critic_wg is not None else 1
-                drop_divisor = math.lcm(max(1, actor_dp_size), max(1, critic_dp_size))
+                actor_micro_batch_size = self._positive_int(
+                    self.config.actor_rollout_ref.actor.get("ppo_micro_batch_size_per_gpu", 1),
+                    default=1,
+                )
+                critic_micro_batch_size = (
+                    self._positive_int(self.config.critic.get("ppo_micro_batch_size_per_gpu", 1), default=1)
+                    if ctx.critic_wg is not None
+                    else 1
+                )
+                actor_update_divisor = max(1, actor_dp_size) * actor_micro_batch_size
+                critic_update_divisor = max(1, critic_dp_size) * critic_micro_batch_size
+                drop_divisor = math.lcm(actor_update_divisor, critic_update_divisor)
                 metrics[f"model/{model_id}/star/drop_divisor"] = float(drop_divisor)
                 metrics[f"model/{model_id}/star/actor_dp_size"] = float(actor_dp_size)
                 metrics[f"model/{model_id}/star/critic_dp_size"] = float(critic_dp_size)
+                metrics[f"model/{model_id}/star/actor_micro_batch_size_per_gpu"] = float(actor_micro_batch_size)
+                metrics[f"model/{model_id}/star/critic_micro_batch_size_per_gpu"] = float(critic_micro_batch_size)
+                metrics[f"model/{model_id}/star/actor_update_divisor"] = float(actor_update_divisor)
+                metrics[f"model/{model_id}/star/critic_update_divisor"] = float(critic_update_divisor)
                 metrics[f"model/{model_id}/star/buffer_shuffle_ready"] = float(self._shuffle_ready_buffer)
                 ready_batch, dropped = self._maybe_drop_last(ready_batch, drop_divisor)
                 metrics[f"model/{model_id}/star/dropped"] = float(dropped)
