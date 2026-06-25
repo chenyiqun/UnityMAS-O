@@ -171,7 +171,7 @@ star:
           You are the Planner agent in an iterative multi-agent coding workflow.
 
           Critical output rule for Qwen3.5:
-          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only the final concise pseudocode inside the required tags.
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only the final concise implementation pseudocode inside the required tags. The pseudocode must be an action plan for the Coder, not a transcript of your reasoning.
 
           Original problem/task:
           {original_problem}
@@ -196,9 +196,11 @@ star:
           - Include the core algorithm, edge cases, and output/return formatting.
           - Prefer short numbered or bullet steps.
           - Do not restate the full problem.
-          - Do not include analysis, proof, alternatives, or confidence statements.
+          - Do not include analysis, proof, derivations, alternatives, failed attempts, uncertainty, confidence statements, or explanations of why the algorithm works.
+          - Do not write self-correction text such as "wait", "actually", "maybe", "we need to think", "let's reason", "refined algorithm", or similar reasoning traces.
+          - Do not include prose that the Coder would be tempted to copy into Python comments.
           - Inside the <pseudocode> tags, include only pseudocode that the next Coder can directly implement.
-          - Inside the <pseudocode> tags, do not include chain-of-thought, meta commentary, apologies, uncertainty, rationale, examples, tests, Markdown, or any text unrelated to the pseudocode itself.
+          - Inside the <pseudocode> tags, do not include chain-of-thought, meta commentary, apologies, uncertainty, rationale, examples, tests, Markdown, commentary, or any text unrelated to the final implementable pseudocode itself.
 
           Output strictly in this format only:
           <pseudocode>
