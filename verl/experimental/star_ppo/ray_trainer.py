@@ -2329,6 +2329,30 @@ class StarRayTrainer:
             workflow_metrics.update(drop_cleanup_metrics)
         return rewards, workflow_metrics
 
+    async def _run_step0_debug_case(self, epoch: int) -> None:
+        if not bool(getattr(self.workflow_runner, "debug_enabled", False)):
+            return
+        try:
+            first_batch_dict = next(iter(self.train_dataloader))
+        except StopIteration:
+            return
+        except Exception as exc:
+            print(f"[star] step=0 debug case skipped: failed to fetch train batch err={type(exc).__name__}: {exc}")
+            return
+
+        try:
+            batch = DataProto.from_single_dict(first_batch_dict)
+            self._ensure_routing_fields(batch)
+            if len(batch) == 0:
+                return
+            sample_idx = int(getattr(self.workflow_runner, "debug_sample_index", 0)) % len(batch)
+            debug_batch = batch.select_idxs([sample_idx])
+            print(f"[star] step=0 debug case start epoch={epoch} sample_index={sample_idx}", flush=True)
+            await self._run_workflow_batch(debug_batch, epoch, stage="train")
+            print("[star] step=0 debug case done", flush=True)
+        except Exception as exc:
+            print(f"[star] step=0 debug case failed: err={type(exc).__name__}: {exc}", flush=True)
+
     @staticmethod
     def _reduce_worker_metrics(worker_outputs) -> dict[str, float]:
         if isinstance(worker_outputs, dict):
@@ -3878,6 +3902,9 @@ class StarRayTrainer:
 
             if bool(self.config.trainer.get("val_only", False)):
                 return
+
+            if global_step == 0:
+                await self._run_step0_debug_case(epoch=start_epoch)
 
             max_empty_reward_streak = int(self.config.star.train.get("max_empty_reward_streak", 3))
             fail_on_update_error = bool(self.config.star.train.get("fail_on_update_error", True))
