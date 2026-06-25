@@ -1,0 +1,338 @@
+hydra:
+  searchpath:
+    - file://verl/trainer/config
+
+defaults:
+  - star_ppo_trainer
+  - _self_
+
+trainer:
+  project_name: ${oc.env:PROJECT_NAME,verl_examples}
+  experiment_name: ${oc.env:EXPERIMENT_NAME,star_code_iterative_plan_code_reflect_qwen35_shared_llm}
+  val_before_train: ${oc.decode:${oc.env:VAL_BEFORE_TRAIN,true}}
+  test_freq: ${oc.decode:${oc.env:TEST_FREQ,50}}
+  val_max_batches: ${oc.decode:${oc.env:VAL_MAX_BATCHES,5}}
+  save_freq: ${oc.decode:${oc.env:SAVE_FREQ,300}}
+  llm_engines:
+    - model_id: shared_agent_llm
+      nnodes: ${oc.decode:${oc.env:SHARED_AGENT_NNODES,${oc.env:AGENT_NNODES,1}}}
+      n_gpus_per_node: ${oc.decode:${oc.env:SHARED_AGENT_GPUS_PER_NODE,${oc.env:AGENT_GPUS_PER_NODE,8}}}
+      accelerator_type: null
+      strategy: fsdp2
+      model_path: ${oc.env:SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}
+  routing:
+    policy: epoch_dynamic
+    refresh_every_epoch: true
+
+actor_rollout_ref:
+  hybrid_engine: false
+  nccl_timeout: ${oc.decode:${oc.env:NCCL_TIMEOUT_SECONDS,1800}}
+  model:
+    path: ${oc.env:ACTOR_MODEL_PATH,${oc.env:SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}
+    tokenizer_path: ${oc.env:ACTOR_TOKENIZER_PATH,${oc.env:ACTOR_MODEL_PATH,${oc.env:SHARED_MODEL_PATH,${oc.env:AGENT_MODEL_PATH,null}}}}
+    enable_activation_offload: ${oc.decode:${oc.env:ACTOR_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
+  actor:
+    ppo_mini_batch_size: ${oc.decode:${oc.env:ACTOR_PPO_MINI_BATCH_SIZE,64}}
+    ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+    use_dynamic_bsz: ${oc.decode:${oc.env:ACTOR_USE_DYNAMIC_BSZ,${oc.env:USE_DYNAMIC_BSZ,false}}}
+    ppo_max_token_len_per_gpu: ${oc.decode:${oc.env:ACTOR_PPO_MAX_TOKEN_LEN_PER_GPU,${oc.env:PPO_MAX_TOKEN_LEN_PER_GPU,16384}}}
+  ref:
+    log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:REF_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,1}}
+  rollout:
+    name: ${oc.env:ROLLOUT_NAME,vllm}
+    dtype: ${oc.env:ROLLOUT_DTYPE,bfloat16}
+    enforce_eager: ${oc.decode:${oc.env:ROLLOUT_ENFORCE_EAGER,true}}
+    max_model_len: ${oc.decode:${oc.env:ROLLOUT_MAX_MODEL_LEN,15360}}
+    tensor_model_parallel_size: ${oc.decode:${oc.env:ROLLOUT_TENSOR_MODEL_PARALLEL_SIZE,2}}
+    free_cache_engine: ${oc.decode:${oc.env:ROLLOUT_FREE_CACHE_ENGINE,true}}
+    prompt_length: ${oc.decode:${oc.env:ROLLOUT_PROMPT_LENGTH,12288}}
+    response_length: ${oc.decode:${oc.env:ROLLOUT_RESPONSE_LENGTH,3072}}
+    gpu_memory_utilization: ${oc.decode:${oc.env:ROLLOUT_GPU_MEMORY_UTILIZATION,0.15}}
+    max_num_batched_tokens: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_BATCHED_TOKENS,15360}}
+    max_num_seqs: ${oc.decode:${oc.env:ROLLOUT_MAX_NUM_SEQS,128}}
+    enable_chunked_prefill: ${oc.decode:${oc.env:ROLLOUT_ENABLE_CHUNKED_PREFILL,false}}
+    enable_prefix_caching: ${oc.decode:${oc.env:ROLLOUT_ENABLE_PREFIX_CACHING,false}}
+    engine_kwargs:
+      vllm:
+        disable_custom_all_reduce: ${oc.decode:${oc.env:ROLLOUT_DISABLE_CUSTOM_ALL_REDUCE,true}}
+    checkpoint_engine:
+      update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,3072}}
+    log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,2}}
+
+critic:
+  model:
+    path: ${oc.select:actor_rollout_ref.model.path,null}
+    tokenizer_path: ${oc.select:actor_rollout_ref.model.tokenizer_path,null}
+    enable_activation_offload: ${oc.decode:${oc.env:CRITIC_ENABLE_ACTIVATION_OFFLOAD,${oc.env:ENABLE_ACTIVATION_OFFLOAD,false}}}
+  ppo_micro_batch_size_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MICRO_BATCH_SIZE_PER_GPU,2}}
+  use_dynamic_bsz: ${oc.decode:${oc.env:CRITIC_USE_DYNAMIC_BSZ,${oc.env:USE_DYNAMIC_BSZ,false}}}
+  ppo_max_token_len_per_gpu: ${oc.decode:${oc.env:CRITIC_PPO_MAX_TOKEN_LEN_PER_GPU,${oc.env:PPO_MAX_TOKEN_LEN_PER_GPU,32768}}}
+
+data:
+  dataset_root: ${oc.env:DATASET_ROOT,${oc.env:UNITYMAS_ROOT}/datasets/data/code_jsonl}
+  dataset_name: ${oc.env:DATASET_NAME,codeforces}
+  train_files: ${oc.env:TRAIN_JSONL,${data.dataset_root}/${data.dataset_name}/train.jsonl}
+  val_files: ${oc.env:VAL_JSONL,${data.dataset_root}/${data.dataset_name}/test.jsonl}
+  prompt_key: prompt
+  train_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
+  gen_batch_size: ${oc.decode:${oc.env:GEN_BATCH_SIZE,128}}
+  val_batch_size: ${oc.decode:${oc.env:VAL_BATCH_SIZE,128}}
+  max_prompt_length: ${oc.decode:${oc.env:DATA_MAX_PROMPT_LENGTH,12288}}
+  filter_overlong_prompts: ${oc.decode:${oc.env:FILTER_OVERLONG_PROMPTS,false}}
+  apply_chat_template_kwargs:
+    enable_thinking: ${oc.decode:${oc.env:QWEN_ENABLE_THINKING,false}}
+  custom_cls:
+    path: pkg://verl.experimental.star_ppo.datasets.code_jsonl_dataset
+    name: CodeJsonlDataset
+
+ray_kwargs:
+  ray_init:
+    address: auto
+
+star:
+  workflow:
+    name: code_iterative_plan_code_reflect
+    llm_timeout_seconds: ${oc.decode:${oc.env:STAR_LLM_TIMEOUT_SECONDS,0}}
+    query_timeout_seconds: ${oc.decode:${oc.env:STAR_QUERY_TIMEOUT_SECONDS,0}}
+    query_timeout_drop: ${oc.decode:${oc.env:STAR_QUERY_TIMEOUT_DROP,false}}
+    tool_timeout_seconds: ${oc.decode:${oc.env:STAR_TOOL_TIMEOUT_SECONDS,0}}
+    max_inflight_queries: ${oc.decode:${oc.env:STAR_MAX_INFLIGHT_QUERIES,128}}
+    max_parallel_rollouts_per_model: ${oc.decode:${oc.env:STAR_MAX_PARALLEL_ROLLOUTS_PER_MODEL,32}}
+    per_infer_prompt_max_tokens: ${oc.decode:${oc.env:STAR_PER_INFER_PROMPT_MAX_TOKENS,11264}}
+    prompt_truncation_margin: ${oc.decode:${oc.env:STAR_PROMPT_TRUNCATION_MARGIN,512}}
+    debug:
+      enabled: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG,false}}
+      sample_index: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_SAMPLE_INDEX,0}}
+      max_chars: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_MAX_CHARS,500}}
+      sample_count: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_SAMPLE_COUNT,1}}
+      every_n_batches: ${oc.decode:${oc.env:STAR_WORKFLOW_DEBUG_EVERY_N_BATCHES,20}}
+      validation_enabled: ${oc.decode:${oc.env:STAR_VAL_DEBUG,true}}
+      validation_sample_count: ${oc.decode:${oc.env:STAR_VAL_DEBUG_SAMPLE_COUNT,1}}
+      validation_every_n_batches: ${oc.decode:${oc.env:STAR_VAL_DEBUG_EVERY_N_BATCHES,1}}
+      validation_max_chars: ${oc.decode:${oc.env:STAR_VAL_DEBUG_MAX_CHARS,0}}
+    runner:
+      path: pkg://verl.experimental.star_ppo.workflows.code_iterative_workflow
+      name: CodeIterativeWorkflowRunner
+    reward_allocator:
+      path: pkg://verl.experimental.star_ppo.reward_allocators.code_turn_level
+      name: CodeTurnLevelRewardAllocator
+    question_candidates: ["problem", "question", "query", "extra_info.question"]
+    tests_candidates: ["tests", "test_cases", "answer", "label", "reward_model.ground_truth", "reward_model", "extra.tests", "extra_info.tests", "extra_info.public_test_cases", "extra_info.private_test_cases"]
+    starter_code_candidates: ["starter_code", "extra.starter_code", "extra_info.starter_code"]
+    tools:
+      code_verifier:
+        type: local_code_verifier
+        path: pkg://verl.experimental.star_ppo.tools.code_verifier
+        name: CodeVerifierTool
+        kwargs:
+          timeout_seconds: ${oc.decode:${oc.env:CODE_VERIFY_TIMEOUT_SECONDS,1.0}}
+          max_error_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_ERROR_CHARS,2000}}
+          allow_custom_checker: ${oc.decode:${oc.env:CODE_VERIFY_ALLOW_CUSTOM_CHECKER,false}}
+          default_checker_type: ${oc.env:CODE_VERIFY_DEFAULT_CHECKER_TYPE,auto}
+          respect_problem_time_limit: ${oc.decode:${oc.env:CODE_VERIFY_RESPECT_PROBLEM_TIME_LIMIT,true}}
+          problem_time_limit_multiplier: ${oc.decode:${oc.env:CODE_VERIFY_TIME_LIMIT_MULTIPLIER,1.0}}
+          min_timeout_seconds: ${oc.decode:${oc.env:CODE_VERIFY_MIN_TIMEOUT_SECONDS,0.0}}
+          max_tests_per_example: ${oc.decode:${oc.env:CODE_VERIFY_MAX_TESTS_PER_EXAMPLE,8}}
+          max_case_input_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_CASE_INPUT_CHARS,20000}}
+          max_case_output_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_CASE_OUTPUT_CHARS,20000}}
+          max_total_test_chars: ${oc.decode:${oc.env:CODE_VERIFY_MAX_TOTAL_TEST_CHARS,80000}}
+    code:
+      max_turns: ${oc.decode:${oc.env:CODE_MAX_TURNS,3}}
+      stop_on_all_passed: ${oc.decode:${oc.env:CODE_STOP_ON_ALL_PASSED,true}}
+      max_state_chars: ${oc.decode:${oc.env:CODE_MAX_STATE_CHARS,10000}}
+      visible_tests_max_examples: ${oc.decode:${oc.env:CODE_VISIBLE_TESTS_MAX_EXAMPLES,3}}
+      visible_tests_max_chars: ${oc.decode:${oc.env:CODE_VISIBLE_TESTS_MAX_CHARS,2500}}
+      verifier:
+        tool: code_verifier
+        fail_open: ${oc.decode:${oc.env:CODE_VERIFIER_FAIL_OPEN,false}}
+      planner:
+        model_id: shared_agent_llm
+        agent_id: planner_agent
+        output_key: pseudocode
+        max_response_tokens: ${oc.decode:${oc.env:CODE_PLANNER_MAX_RESPONSE_TOKENS,3072}}
+        parser:
+          type: raw
+        reward:
+          format_weight: ${oc.decode:${oc.env:CODE_PLANNER_FORMAT_WEIGHT,1.0}}
+        prompt_template: |
+          /no_think
+          You are the Planner agent in an iterative multi-agent coding workflow.
+
+          Critical output rule for Qwen3.5:
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only the final concise implementation pseudocode inside the required tags. The pseudocode must be an action plan for the Coder, not a transcript of your reasoning.
+
+          Original problem/task:
+          {original_problem}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
+          Global state so far:
+          {global_state_text}
+
+          Task:
+          Produce only the useful pseudocode for turn {turn_number} of {max_turns}. Use the problem, execution mode, visible tests, previous code, verification errors, and reflections in the global state to improve the plan.
+
+          Content constraints:
+          - Include input parsing or function arguments only when needed.
+          - Include the core algorithm, edge cases, and output/return formatting.
+          - Prefer short numbered or bullet steps.
+          - Do not restate the full problem.
+          - Do not include analysis, proof, derivations, alternatives, failed attempts, uncertainty, confidence statements, or explanations of why the algorithm works.
+          - Do not write self-correction text such as "wait", "actually", "maybe", "we need to think", "let's reason", "refined algorithm", or similar reasoning traces.
+          - Do not include prose that the Coder would be tempted to copy into Python comments.
+          - Inside the <pseudocode> tags, include only pseudocode that the next Coder can directly implement.
+          - Inside the <pseudocode> tags, do not include chain-of-thought, meta commentary, apologies, uncertainty, rationale, examples, tests, Markdown, commentary, or any text unrelated to the final implementable pseudocode itself.
+
+          Output strictly in this format only:
+          <pseudocode>
+          concise pseudocode here
+          </pseudocode>
+
+          The first non-whitespace characters must be <pseudocode>.
+          The last non-whitespace characters must be </pseudocode>.
+          Do not output anything outside the pseudocode tags.
+      coder:
+        model_id: shared_agent_llm
+        agent_id: coder_agent
+        output_key: code
+        max_response_tokens: ${oc.decode:${oc.env:CODE_CODER_MAX_RESPONSE_TOKENS,3072}}
+        parser:
+          type: raw
+        reward:
+          format_weight: ${oc.decode:${oc.env:CODE_CODER_FORMAT_WEIGHT,1.0}}
+        prompt_template: |
+          /no_think
+          You are the Coder agent in an iterative multi-agent coding workflow.
+
+          Critical output rule for Qwen3.5:
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain the code. Output only the final Python source code inside the required tags. Do not put reasoning into Python comments or docstrings.
+
+          Original problem/task:
+          {original_problem}
+
+          Starter code, if any:
+          {starter_code}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
+          Global state so far:
+          {global_state_text}
+
+          Current turn pseudocode:
+          {current_pseudocode}
+
+          Task:
+          {coder_task_instruction}
+          Use the original problem, current pseudocode, visible tests, and any previous reflections/errors from the global state.
+
+          Coding constraints:
+          - Return complete runnable Python source code.
+          - Keep the implementation compact.
+          - Do not include comments or docstrings.
+          - Do not include explanatory comments, reasoning comments, planning comments, proof comments, TODO notes, sample-run comments, copied pseudocode comments, or alternative-solution comments.
+          - Do not write self-correction text such as "wait", "actually", "maybe", "refined algorithm", or similar reasoning, even inside Python comments.
+          - Do not include prose, reasoning, tests, examples, or Markdown fences.
+          - Inside the <code> tags, include only Python source code required to solve the original problem.
+          - Inside the <code> tags, do not include chain-of-thought, explanations, pseudocode, natural-language discussion, sample runs, Markdown, comments, docstrings, or any text that is not required Python source code.
+
+          Output strictly in this format only:
+          <code>
+          complete Python source code here
+          </code>
+
+          Correct format example:
+          <code>
+          {code_format_example}
+          </code>
+
+          Do not copy the example logic. Solve the original problem.
+          The first non-whitespace characters must be <code>.
+          The last non-whitespace characters must be </code>.
+          Your entire response must be exactly one <code>...</code> block.
+      reflection:
+        model_id: shared_agent_llm
+        agent_id: reflection_agent
+        output_key: reflection
+        max_response_tokens: ${oc.decode:${oc.env:CODE_REFLECTION_MAX_RESPONSE_TOKENS,3072}}
+        parser:
+          type: raw
+        reward:
+          format_weight: ${oc.decode:${oc.env:CODE_REFLECTION_FORMAT_WEIGHT,1.0}}
+        prompt_template: |
+          /no_think
+          You are the Reflection agent in an iterative multi-agent coding workflow.
+
+          Critical output rule for Qwen3.5:
+          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only concise debugging guidance inside the required tags. You are not the Coder: do not rewrite the full solution and do not output a <code> block.
+
+          Original problem/task:
+          {original_problem}
+
+          Function name, if call-based:
+          {fn_name}
+
+          Execution mode:
+          {execution_instruction}
+
+          Visible tests:
+          {visible_tests}
+
+          Global state, including the current failed or partial attempt:
+          {global_state_text}
+
+          Current turn pseudocode:
+          {current_pseudocode}
+
+          Current turn code:
+          {current_code}
+
+          Current verifier pass rate:
+          {current_pass_rate}
+
+          Current verifier all-passed flag:
+          {current_all_passed}
+
+          Current verifier error:
+          {current_error}
+
+          Task:
+          Give only actionable debugging guidance for the next Planner and Coder. Your job is to diagnose the current failed or partial attempt, not to solve the problem from scratch.
+          Provide exactly these three short items:
+          1. Bug: the most likely concrete cause of the current failure.
+          2. Fix: the minimal algorithm or implementation change the next Coder should make.
+          3. Edge cases: only the specific edge cases the next attempt must cover, if any.
+
+          Content constraints:
+          - Keep it short and concrete.
+          - Do not repeat the full problem.
+          - Do not repeat the full code.
+          - Do not write complete code, code blocks, Python source, pseudocode for a full solution, tests, examples, or sample runs.
+          - Do not include chain-of-thought, long derivations, proof, alternatives, failed attempts, uncertainty, confidence statements, or broad reasoning.
+          - Do not write self-correction text such as "wait", "actually", "maybe", "let's reason", "we need to think", or similar reasoning traces.
+          - Inside the <reflection> tags, include only the three requested short items for the next fix.
+          - Inside the <reflection> tags, do not include chain-of-thought, broad reasoning, meta commentary, summaries of the whole problem, copied code, Markdown, <code> tags, or any text unrelated to the next fix.
+
+          Output strictly in this format only:
+          <reflection>
+          Bug: concise diagnosis
+          Fix: concise next change
+          Edge cases: concise edge cases or none
+          </reflection>
+
+          The first non-whitespace characters must be <reflection>.
+          The last non-whitespace characters must be </reflection>.
+          Do not output anything outside the reflection tags.
