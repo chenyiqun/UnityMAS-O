@@ -14,7 +14,7 @@
 import functools
 import logging
 import os
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import partial
 from itertools import chain
@@ -56,6 +56,50 @@ from verl.workers.utils.losses import ppo_loss
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+@contextmanager
+def _temporary_optimizer_lr_scale(engine, scale: float):
+    """Apply a per-update LR multiplier without changing scheduler state."""
+    scale = float(scale)
+    if not 0.0 < scale <= 1.0:
+        raise ValueError(f"optimizer_lr_scale must be in (0, 1], got {scale}")
+    if scale == 1.0:
+        yield
+        return
+
+    optimizer = getattr(engine, "optimizer", None)
+    param_groups = getattr(optimizer, "param_groups", None)
+    if not param_groups:
+        raise RuntimeError(
+            "optimizer_lr_scale requires an engine optimizer exposing param_groups; "
+            f"engine={type(engine).__name__}"
+        )
+
+    original_lrs = [float(group["lr"]) for group in param_groups]
+    for group, lr in zip(param_groups, original_lrs, strict=True):
+        group["lr"] = lr * scale
+
+    completed = False
+    try:
+        yield
+        completed = True
+    finally:
+        # train_mini_batch advances the scheduler after its final optimizer
+        # step. Preserve that scheduled LR on success; otherwise restore the
+        # pre-update value so a failed call cannot leak a scaled LR.
+        scheduler = getattr(engine, "lr_scheduler", None)
+        scheduled_lrs = None
+        if completed and scheduler is not None:
+            get_last_lr = getattr(scheduler, "get_last_lr", None)
+            if callable(get_last_lr):
+                scheduled_lrs = list(get_last_lr())
+        if scheduled_lrs is not None and len(scheduled_lrs) == len(param_groups):
+            for group, lr in zip(param_groups, scheduled_lrs, strict=True):
+                group["lr"] = float(lr)
+        elif not completed or scheduler is None:
+            for group, lr in zip(param_groups, original_lrs, strict=True):
+                group["lr"] = lr
 
 
 def _with_routing_replay_flag(enabled: bool):
@@ -258,6 +302,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         epochs = tu.pop(data, key="epochs", default=1)
         seed = tu.pop(data, key="seed", default=42)
         dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
+        optimizer_lr_scale = float(tu.pop(data, key="optimizer_lr_scale", default=1.0))
 
         assert mini_batch_size is not None or num_mini_batch is not None
 
@@ -280,6 +325,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         )
 
         with (
+            _temporary_optimizer_lr_scale(self.engine, optimizer_lr_scale),
             self.engine.train_mode(disable_auto_offload=disable_auto_offload),
             Timer(name="train_batch", logger=None),
         ):

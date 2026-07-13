@@ -40,9 +40,18 @@ star:
   train:
     drop_last: true
     enforce_divisible_batch: true
+    # Keep the configured PPO mini-batch semantics stable. Ready trajectories
+    # that cannot form a complete actor/critic mini-batch are sampled out of the
+    # closed workflow batch instead of changing the mini-batch size implicitly.
+    align_batch_to_configured_mini_batch: ${oc.decode:${oc.env:STAR_ALIGN_BATCH_TO_CONFIGURED_MINI_BATCH,true}}
+    # Defensive fallback for configurations where a smaller effective
+    # mini-batch is still selected. Scale the optimizer LR linearly with
+    # effective/configured mini-batch size so that a full pass has approximately
+    # the same update and sampling-noise scale.
+    scale_lr_by_effective_mini_batch: ${oc.decode:${oc.env:STAR_SCALE_LR_BY_EFFECTIVE_MINI_BATCH,true}}
     # Consume all ready trajectories produced by the closed workflow batch by
-    # default. The trainer then drops only the small tail needed to satisfy the
-    # actor/critic DP divisibility constraint before clearing the batch buffers.
+    # default. The trainer then drops the small tail needed to satisfy the
+    # configured actor/critic PPO mini-batches before clearing the batch buffers.
     # Set STAR_MAX_READY_ITEMS > 0 only for explicit debugging throttles.
     max_ready_items: ${oc.decode:${oc.env:STAR_MAX_READY_ITEMS,0}}
     # Empty reward batches normally mean the workflow timed out or every query

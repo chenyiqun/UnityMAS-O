@@ -272,7 +272,7 @@ star:
           Visible tests:
           {visible_tests}
 
-          Global state, including the current failed or partial attempt:
+          Global state from previous completed turns:
           {global_state_text}
 
           Current turn pseudocode:

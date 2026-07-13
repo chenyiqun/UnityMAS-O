@@ -1138,9 +1138,21 @@ class StarRayTrainer:
         traj_ids = np.empty((bsz,), dtype=object)
         model_ids = np.empty((bsz,), dtype=object)
         action_text = np.empty((bsz,), dtype=object)
+        action_token_count = np.full((bsz,), -1, dtype=np.int64)
         created_ts = np.empty((bsz,), dtype=np.float64)
 
         responses = full_batch.batch.get("responses", None)
+        response_mask = full_batch.batch.get("response_mask", None)
+        if response_mask is None and responses is not None:
+            attention_mask = full_batch.batch.get("attention_mask", None)
+            if attention_mask is not None and attention_mask.shape[-1] >= responses.shape[-1]:
+                response_mask = attention_mask[..., -responses.shape[-1] :]
+        elif response_mask is not None and responses is not None and response_mask.shape[-1] > responses.shape[-1]:
+            response_mask = response_mask[..., -responses.shape[-1] :]
+        if response_mask is not None:
+            counts = response_mask.detach().to(dtype=torch.long).sum(dim=-1).cpu().numpy().reshape(-1)
+            if counts.shape[0] == bsz:
+                action_token_count[:] = counts.astype(np.int64, copy=False)
         now = time.time()
         decode_action_text_s = 0.0
         buffer_put_s = 0.0
@@ -1177,6 +1189,7 @@ class StarRayTrainer:
                 "agent_id": agent_ids.astype(object),
                 "model_id": model_ids,
                 "action_text": action_text,
+                "action_token_count": action_token_count,
                 "created_ts": created_ts,
             },
             meta_info={"thin_only": True},
@@ -2485,6 +2498,48 @@ class StarRayTrainer:
         return local_group_size if batch_size % local_group_size == 0 else 0
 
     @staticmethod
+    def _configured_mini_batch_drop_divisor(
+        actor_mini_batch_size: int,
+        actor_update_divisor: int,
+        critic_mini_batch_size: int = 1,
+        critic_update_divisor: int = 1,
+        use_critic: bool = False,
+    ) -> int:
+        actor_mini_batch_size = max(1, int(actor_mini_batch_size))
+        actor_update_divisor = max(1, int(actor_update_divisor))
+        if actor_mini_batch_size % actor_update_divisor != 0:
+            raise ValueError(
+                "Configured actor PPO mini-batch must be divisible by "
+                "actor_dp_size * actor_micro_batch_size_per_gpu: "
+                f"mini_batch={actor_mini_batch_size}, divisor={actor_update_divisor}"
+            )
+
+        if not use_critic:
+            return actor_mini_batch_size
+
+        critic_mini_batch_size = max(1, int(critic_mini_batch_size))
+        critic_update_divisor = max(1, int(critic_update_divisor))
+        if critic_mini_batch_size % critic_update_divisor != 0:
+            raise ValueError(
+                "Configured critic PPO mini-batch must be divisible by "
+                "critic_dp_size * critic_micro_batch_size_per_gpu: "
+                f"mini_batch={critic_mini_batch_size}, divisor={critic_update_divisor}"
+            )
+        return math.lcm(actor_mini_batch_size, critic_mini_batch_size)
+
+    @staticmethod
+    def _mini_batch_lr_scale(configured_size: int, effective_size: int, enabled: bool = True) -> float:
+        configured_size = max(1, int(configured_size))
+        effective_size = max(0, int(effective_size))
+        if not enabled or effective_size == 0:
+            return 1.0
+        if effective_size > configured_size:
+            raise ValueError(
+                f"Effective PPO mini-batch cannot exceed configured size: {effective_size} > {configured_size}"
+            )
+        return float(effective_size) / float(configured_size)
+
+    @staticmethod
     def _empty_batch() -> DataProto:
         return DataProto.from_dict(non_tensors={"traj_id": np.array([], dtype=object)})
 
@@ -2872,10 +2927,17 @@ class StarRayTrainer:
                 data={},
                 meta_info={"metrics": {"critic/star/skipped_too_small_batch": 1.0}},
             )
+        scale_lr = bool(self.config.star.train.get("scale_lr_by_effective_mini_batch", True))
+        optimizer_lr_scale = self._mini_batch_lr_scale(
+            configured_mini_batch_size,
+            ppo_mini_batch_size,
+            enabled=scale_lr,
+        )
         tu.assign_non_tensor(
             batch_td,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
+            optimizer_lr_scale=optimizer_lr_scale,
             epochs=self.config.critic.ppo_epochs,
             seed=self.config.critic.data_loader_seed,
             dataloader_kwargs={"shuffle": self.config.critic.shuffle},
@@ -2891,6 +2953,7 @@ class StarRayTrainer:
             {
                 "critic/star/configured_mini_batch_size": float(configured_mini_batch_size),
                 "critic/star/effective_mini_batch_size": float(ppo_mini_batch_size),
+                "critic/star/optimizer_lr_scale": float(optimizer_lr_scale),
                 "critic/star/dp_size": float(critic_dp_size),
                 "critic/star/ppo_epochs": float(self.config.critic.ppo_epochs),
                 "critic/star/update_batch_size": float(len(batch)),
@@ -2920,6 +2983,12 @@ class StarRayTrainer:
                 data={},
                 meta_info={"metrics": {"actor/star/skipped_too_small_batch": 1.0}},
             )
+        scale_lr = bool(self.config.star.train.get("scale_lr_by_effective_mini_batch", True))
+        optimizer_lr_scale = self._mini_batch_lr_scale(
+            configured_mini_batch_size,
+            ppo_mini_batch_size,
+            enabled=scale_lr,
+        )
         tu.assign_non_tensor(
             batch_td,
             multi_turn=rollout_cfg.multi_turn.enable,
@@ -2927,6 +2996,7 @@ class StarRayTrainer:
             distillation_use_topk=False,
             global_batch_size=ppo_mini_batch_size,
             mini_batch_size=ppo_mini_batch_size,
+            optimizer_lr_scale=optimizer_lr_scale,
             epochs=actor_cfg.ppo_epochs,
             seed=actor_cfg.data_loader_seed,
             dataloader_kwargs={"shuffle": actor_cfg.shuffle},
@@ -2943,6 +3013,7 @@ class StarRayTrainer:
             {
                 "actor/star/configured_mini_batch_size": float(configured_mini_batch_size),
                 "actor/star/effective_mini_batch_size": float(ppo_mini_batch_size),
+                "actor/star/optimizer_lr_scale": float(optimizer_lr_scale),
                 "actor/star/dp_size": float(actor_dp_size),
                 "actor/star/ppo_epochs": float(actor_cfg.ppo_epochs),
                 "actor/star/update_batch_size": float(len(batch)),
@@ -3363,8 +3434,38 @@ class StarRayTrainer:
                 )
                 actor_update_divisor = max(1, actor_dp_size) * actor_micro_batch_size
                 critic_update_divisor = max(1, critic_dp_size) * critic_micro_batch_size
-                drop_divisor = math.lcm(actor_update_divisor, critic_update_divisor)
+                actor_configured_mini_batch_size = (
+                    int(self.config.actor_rollout_ref.actor.ppo_mini_batch_size)
+                    * int(self.config.actor_rollout_ref.rollout.n)
+                )
+                critic_configured_mini_batch_size = (
+                    int(self.config.critic.ppo_mini_batch_size) * int(self.config.actor_rollout_ref.rollout.n)
+                    if ctx.critic_wg is not None
+                    else 1
+                )
+                align_to_configured_mini_batch = bool(
+                    self.config.star.train.get("align_batch_to_configured_mini_batch", True)
+                )
+                if align_to_configured_mini_batch:
+                    drop_divisor = self._configured_mini_batch_drop_divisor(
+                        actor_mini_batch_size=actor_configured_mini_batch_size,
+                        actor_update_divisor=actor_update_divisor,
+                        critic_mini_batch_size=critic_configured_mini_batch_size,
+                        critic_update_divisor=critic_update_divisor,
+                        use_critic=ctx.critic_wg is not None,
+                    )
+                else:
+                    drop_divisor = math.lcm(actor_update_divisor, critic_update_divisor)
                 metrics[f"model/{model_id}/star/drop_divisor"] = float(drop_divisor)
+                metrics[f"model/{model_id}/star/align_batch_to_configured_mini_batch"] = float(
+                    align_to_configured_mini_batch
+                )
+                metrics[f"model/{model_id}/star/actor_configured_mini_batch_size"] = float(
+                    actor_configured_mini_batch_size
+                )
+                metrics[f"model/{model_id}/star/critic_configured_mini_batch_size"] = float(
+                    critic_configured_mini_batch_size
+                )
                 metrics[f"model/{model_id}/star/actor_dp_size"] = float(actor_dp_size)
                 metrics[f"model/{model_id}/star/critic_dp_size"] = float(critic_dp_size)
                 metrics[f"model/{model_id}/star/actor_micro_batch_size_per_gpu"] = float(actor_micro_batch_size)
@@ -3374,7 +3475,17 @@ class StarRayTrainer:
                 metrics[f"model/{model_id}/star/buffer_shuffle_ready"] = float(self._shuffle_ready_buffer)
                 ready_batch, dropped = self._maybe_drop_last(ready_batch, drop_divisor)
                 metrics[f"model/{model_id}/star/dropped"] = float(dropped)
+                metrics[f"model/{model_id}/star/dropped_by_mini_batch_alignment"] = float(
+                    dropped if align_to_configured_mini_batch else 0
+                )
                 metrics[f"model/{model_id}/timing/update/build_ready_total_s"] = float(time.time() - build_ready_t0)
+                if len(ready_batch) == 0:
+                    # The closed batch was smaller than one valid configured
+                    # mini-batch. Its ready trajectories have already been
+                    # discarded; do not quiesce rollout for an empty PPO job.
+                    metrics[f"model/{model_id}/star/consumed"] = 0.0
+                    metrics[f"model/{model_id}/star/skipped_too_small_aligned_batch"] = 1.0
+                    continue
             except Exception as exc:
                 timeout_flag = 1.0 if self._is_timeout_error(exc) else 0.0
                 print(

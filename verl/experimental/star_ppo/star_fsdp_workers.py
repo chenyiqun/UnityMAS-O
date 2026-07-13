@@ -807,9 +807,21 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
         traj_ids = np.empty((bsz,), dtype=object)
         model_ids = np.empty((bsz,), dtype=object)
         action_text = np.empty((bsz,), dtype=object)
+        action_token_count = np.full((bsz,), -1, dtype=np.int64)
         created_ts = np.empty((bsz,), dtype=np.float64)
 
         responses = full_batch.batch.get("responses", None)
+        response_mask = full_batch.batch.get("response_mask", None)
+        if response_mask is None and responses is not None:
+            attention_mask = full_batch.batch.get("attention_mask", None)
+            if attention_mask is not None and attention_mask.shape[-1] >= responses.shape[-1]:
+                response_mask = attention_mask[..., -responses.shape[-1] :]
+        elif response_mask is not None and responses is not None and response_mask.shape[-1] > responses.shape[-1]:
+            response_mask = response_mask[..., -responses.shape[-1] :]
+        if response_mask is not None:
+            counts = response_mask.detach().to(dtype=torch.long).sum(dim=-1).cpu().numpy().reshape(-1)
+            if counts.shape[0] == bsz:
+                action_token_count[:] = counts.astype(np.int64, copy=False)
         now = time.time()
         decode_action_text_s = 0.0
         buffer_put_s = 0.0
@@ -845,6 +857,7 @@ class StarDetachAsyncRolloutWorker(DetachAsyncRolloutWorker):
                 "agent_id": agent_ids.astype(object),
                 "model_id": model_ids,
                 "action_text": action_text,
+                "action_token_count": action_token_count,
                 "created_ts": created_ts,
             },
             meta_info={"thin_only": True},

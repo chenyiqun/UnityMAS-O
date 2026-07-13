@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import ast
 import copy
-import io
 import json
 import re
 import time
-import tokenize
 from typing import Any
 
 from verl import DataProto
@@ -65,10 +62,25 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             self.workflow_cfg.get("starter_code_candidates", ["starter_code", "extra.starter_code"])
         )
 
-    @staticmethod
-    def _set_record_format_reward(record: WorkflowExecutionRecord, is_legal: bool) -> None:
-        record.meta["format_reward"] = 0.0 if is_legal else -1.0
+    @classmethod
+    def _set_record_format_reward(
+        cls,
+        record: WorkflowExecutionRecord,
+        is_legal: bool,
+        expected_tag: str,
+    ) -> None:
+        hit_token_limit = cls._hit_response_token_limit(record)
+        penalty_exempt = bool(
+            not is_legal
+            and hit_token_limit
+            and cls._has_single_unclosed_tag(record.raw_output, expected_tag)
+        )
+        record.meta["format_reward"] = 0.0 if is_legal or penalty_exempt else -1.0
         record.meta["is_legal_format"] = bool(is_legal)
+        record.meta["hit_response_token_limit"] = bool(hit_token_limit)
+        record.meta["format_penalty_exempt"] = bool(penalty_exempt)
+        if penalty_exempt:
+            record.meta["format_penalty_exempt_reason"] = "unclosed_tag_at_response_token_limit"
 
     @staticmethod
     def _parse_tagged_text(response_text: str, tag: str, fallback: str = "") -> tuple[str, bool]:
@@ -83,38 +95,48 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             return str(matches[0]).strip(), is_legal
         return raw.strip() or fallback, False
 
-    @staticmethod
-    def _python_body_starts_with_docstring(body: Any) -> bool:
-        if not isinstance(body, list) or not body:
-            return False
-        first = body[0]
-        return (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        )
-
     @classmethod
-    def _python_code_has_forbidden_comments(cls, code: str) -> bool:
-        text = str(code or "")
-        if not text.strip():
-            return False
-        try:
-            for token in tokenize.generate_tokens(io.StringIO(text).readline):
-                if token.type == tokenize.COMMENT and token.string.strip():
-                    return True
-        except (tokenize.TokenError, IndentationError, SyntaxError):
-            pass
+    def _parse_record_tagged_text(
+        cls,
+        record: WorkflowExecutionRecord,
+        tag: str,
+        fallback: str = "",
+    ) -> tuple[str, bool]:
+        parsed, is_legal = cls._parse_tagged_text(record.raw_output, tag, fallback=fallback)
+        if is_legal or not cls._hit_response_token_limit(record):
+            return parsed, is_legal
+        if not cls._has_single_unclosed_tag(record.raw_output, tag):
+            return parsed, is_legal
+        raw = str(record.raw_output or "").strip()
+        opening = re.match(rf"<{re.escape(tag)}>", raw, flags=re.IGNORECASE)
+        if opening is None:
+            return parsed, is_legal
+        return raw[opening.end() :].strip() or fallback, False
 
+    @staticmethod
+    def _hit_response_token_limit(record: WorkflowExecutionRecord) -> bool:
+        meta = record.meta if isinstance(record.meta, dict) else {}
         try:
-            tree = ast.parse(text)
-        except SyntaxError:
+            output_tokens = int(meta.get("output_tokens", 0) or 0)
+            max_response_tokens = int(meta.get("max_response_tokens", 0) or 0)
+        except (TypeError, ValueError):
             return False
-        return any(
-            cls._python_body_starts_with_docstring(getattr(node, "body", None))
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        )
+        return max_response_tokens > 0 and output_tokens >= max_response_tokens
+
+    @staticmethod
+    def _has_single_unclosed_tag(response_text: str, tag: str) -> bool:
+        raw = str(response_text or "").strip()
+        if not raw:
+            return False
+        opening = re.compile(rf"<{re.escape(tag)}>", re.IGNORECASE)
+        closing = re.compile(rf"</{re.escape(tag)}>", re.IGNORECASE)
+        opening_matches = list(opening.finditer(raw))
+        if len(opening_matches) != 1 or opening_matches[0].start() != 0 or closing.search(raw):
+            return False
+        tag_like_matches = list(re.finditer(r"</?[A-Za-z][A-Za-z0-9_-]*>", raw))
+        if len(tag_like_matches) != 1 or tag_like_matches[0].span() != opening_matches[0].span():
+            return False
+        return bool(raw[opening_matches[0].end() :].strip())
 
     @staticmethod
     def _safe_json(value: Any, max_chars: int = 12000) -> str:
@@ -293,16 +315,86 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             "iterations": [],
         }
 
-    def _format_global_state(self, state: dict[str, Any]) -> str:
-        visible_state = {
-            "problem": state.get("problem", ""),
-            "starter_code": state.get("starter_code", ""),
-            "fn_name": state.get("fn_name", ""),
-            "execution_instruction": state.get("execution_instruction", ""),
-            "visible_tests": state.get("visible_tests", ""),
-            "iterations": state.get("iterations", []),
-        }
+    def _format_global_state(self, state: dict[str, Any], include_starter_code: bool = True) -> str:
+        visible_state = {"iterations": state.get("iterations", [])}
+        if include_starter_code:
+            visible_state = {
+                "starter_code": state.get("starter_code", ""),
+                **visible_state,
+            }
         return self._safe_json(visible_state, max_chars=int(self.code_cfg.get("max_state_chars", 12000)))
+
+    def _preserve_prompt_suffix_on_truncation(self) -> bool:
+        return True
+
+    def _prepare_prompt_context(
+        self,
+        node_id: str,
+        node_cfg,
+        prompt_context: dict[str, Any],
+    ) -> tuple[dict[str, Any], int]:
+        del node_id
+        context = dict(prompt_context)
+        template = str(node_cfg.get("prompt_template", "{question}"))
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        prompt_limit = min(
+            int(self.per_infer_prompt_max_tokens),
+            int(rollout_cfg.get("prompt_length", self.per_infer_prompt_max_tokens)),
+        )
+        if prompt_limit <= 0:
+            return context, 0
+
+        configured_fields = [
+            ("global_state_text", 384),
+            ("visible_tests", 256),
+            ("starter_code", 128),
+            ("original_problem", max(768, prompt_limit // 3)),
+            ("current_code", max(384, prompt_limit // 8)),
+            ("current_pseudocode", 256),
+            ("current_error", 192),
+        ]
+        template_fields = set(re.findall(r"\{([a-zA-Z0-9_.]+)\}", template))
+        fields = [(key, minimum) for key, minimum in configured_fields if key in template_fields]
+
+        def rendered_tokens() -> int:
+            prompt = self._render_template(template, context)
+            return self._count_chat_tokens([{"role": "user", "content": prompt}])
+
+        current_tokens = rendered_tokens()
+        if current_tokens <= prompt_limit:
+            return context, 0
+        initial_sizes = {
+            key: self._count_tokens(str(context.get(key, "") or ""))
+            for key, _ in fields
+        }
+        for minimum_keep in (dict(fields), {key: 64 for key, _ in fields}):
+            for key, _ in fields:
+                while current_tokens > prompt_limit:
+                    value = str(context.get(key, "") or "")
+                    value_tokens = self._count_tokens(value)
+                    minimum = int(minimum_keep[key])
+                    if not value or value_tokens <= minimum:
+                        break
+                    overflow = current_tokens - prompt_limit
+                    target_tokens = max(minimum, value_tokens - overflow - 32)
+                    truncated, removed = self._truncate_text_head_tail(
+                        value,
+                        target_tokens,
+                        marker=f"\n...[{key} truncated]...\n",
+                    )
+                    if removed <= 0 or truncated == value:
+                        break
+                    context[key] = truncated
+                    current_tokens = rendered_tokens()
+            if current_tokens <= prompt_limit:
+                break
+
+        final_sizes = {
+            key: self._count_tokens(str(context.get(key, "") or ""))
+            for key, _ in fields
+        }
+        trimmed_tokens = sum(max(0, initial_sizes[key] - final_sizes[key]) for key, _ in fields)
+        return context, int(trimmed_tokens)
 
     def _build_prompt_context(
         self,
@@ -315,14 +407,23 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         current_error: str = "",
         current_pass_rate: float = 0.0,
         current_all_passed: int = 0,
+        exclude_current_iteration_from_state: bool = False,
+        include_starter_code_in_state: bool = True,
     ) -> dict[str, Any]:
+        prompt_state = state
+        if exclude_current_iteration_from_state and state.get("iterations"):
+            prompt_state = dict(state)
+            prompt_state["iterations"] = list(state.get("iterations", []))[:-1]
         return {
             "problem": problem,
             "original_problem": problem,
             "turn_id": int(turn_id),
             "turn_number": int(turn_id) + 1,
             "max_turns": int(self.max_turns),
-            "global_state_text": self._format_global_state(state),
+            "global_state_text": self._format_global_state(
+                prompt_state,
+                include_starter_code=include_starter_code_in_state,
+            ),
             "current_pseudocode": current_pseudocode,
             "current_code": current_code,
             "current_error": current_error,
@@ -447,7 +548,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 f"agent={record.agent_id} model={record.model_id} type={record.node_type}\n"
                 f"format_legal={meta.get('is_legal_format', 'n/a')} "
                 f"format_reward={meta.get('format_reward', 'n/a')} "
+                f"format_penalty_exempt={meta.get('format_penalty_exempt', 'n/a')} "
                 f"prompt_tokens={meta.get('prompt_tokens', 'n/a')} "
+                f"prompt_trimmed_tokens={meta.get('prompt_trimmed_tokens', 'n/a')} "
                 f"output_tokens={meta.get('output_tokens', 'n/a')}\n"
                 f"parsed_output:\n{compact(record.parsed_output)}\n"
                 f"raw_output:\n{maybe_truncate(str(record.raw_output or ''))}"
@@ -507,8 +610,8 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 state_before=copy.deepcopy(state),
             )
             planner_record.query_id = query_id
-            pseudocode, planner_legal = self._parse_tagged_text(planner_record.raw_output, "pseudocode")
-            self._set_record_format_reward(planner_record, planner_legal)
+            pseudocode, planner_legal = self._parse_record_tagged_text(planner_record, "pseudocode")
+            self._set_record_format_reward(planner_record, planner_legal, "pseudocode")
             planner_record.parsed_output = {"pseudocode": pseudocode}
             planner_record.state_after = copy.deepcopy(state)
             records.append(planner_record)
@@ -519,6 +622,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 state=state,
                 turn_id=turn_id,
                 current_pseudocode=pseudocode,
+                include_starter_code_in_state=False,
             )
             coder_record = await self._execute_llm_step(
                 query_batch=query_batch,
@@ -530,15 +634,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                 state_before=copy.deepcopy(state),
             )
             coder_record.query_id = query_id
-            code, coder_legal = self._parse_tagged_text(coder_record.raw_output, "code")
-            coder_has_forbidden_comments = bool(coder_legal and self._python_code_has_forbidden_comments(code))
-            if coder_has_forbidden_comments:
-                coder_legal = False
-            self._set_record_format_reward(coder_record, coder_legal)
-            coder_record.parsed_output = {
-                "code": code,
-                "forbidden_comments": coder_has_forbidden_comments,
-            }
+            code, coder_legal = self._parse_record_tagged_text(coder_record, "code")
+            self._set_record_format_reward(coder_record, coder_legal, "code")
+            coder_record.parsed_output = {"code": code}
             coder_record.state_after = copy.deepcopy(state)
             records.append(coder_record)
             step_id += 1
@@ -584,6 +682,7 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                     current_error=current_error,
                     current_pass_rate=pass_rate,
                     current_all_passed=all_passed,
+                    exclude_current_iteration_from_state=True,
                 )
                 reflection_record = await self._execute_llm_step(
                     query_batch=query_batch,
@@ -595,8 +694,8 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
                     state_before=copy.deepcopy(state_with_current),
                 )
                 reflection_record.query_id = query_id
-                reflection, reflection_legal = self._parse_tagged_text(reflection_record.raw_output, "reflection")
-                self._set_record_format_reward(reflection_record, reflection_legal)
+                reflection, reflection_legal = self._parse_record_tagged_text(reflection_record, "reflection")
+                self._set_record_format_reward(reflection_record, reflection_legal, "reflection")
                 reflection_record.parsed_output = {"reflection": reflection}
                 iteration["reflection"] = reflection
                 reflection_record.state_after = copy.deepcopy(state_with_current)
@@ -613,7 +712,9 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
 
         agent_call_counts: dict[str, int] = {}
         agent_legal_counts: dict[str, int] = {}
+        agent_penalty_exempt_counts: dict[str, int] = {}
         agent_prompt_tokens: dict[str, list[float]] = {}
+        agent_prompt_trimmed_tokens: dict[str, list[float]] = {}
         agent_output_tokens: dict[str, list[float]] = {}
         agent_max_response_tokens: dict[str, list[float]] = {}
         verifier_pass_rates: list[float] = []
@@ -644,7 +745,13 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             agent_legal_counts[agent_id] = agent_legal_counts.get(agent_id, 0) + int(
                 bool(record.meta.get("is_legal_format", False))
             )
+            agent_penalty_exempt_counts[agent_id] = agent_penalty_exempt_counts.get(agent_id, 0) + int(
+                bool(record.meta.get("format_penalty_exempt", False))
+            )
             agent_prompt_tokens.setdefault(agent_id, []).append(float(record.meta.get("prompt_tokens", 0.0) or 0.0))
+            agent_prompt_trimmed_tokens.setdefault(agent_id, []).append(
+                float(record.meta.get("prompt_trimmed_tokens", 0.0) or 0.0)
+            )
             agent_output_tokens.setdefault(agent_id, []).append(float(record.meta.get("output_tokens", 0.0) or 0.0))
             agent_max_response_tokens.setdefault(agent_id, []).append(
                 float(record.meta.get("max_response_tokens", 0.0) or 0.0)
@@ -699,11 +806,16 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
         }
         for agent_id, count in agent_call_counts.items():
             legal_count = agent_legal_counts.get(agent_id, 0)
+            penalty_exempt_count = agent_penalty_exempt_counts.get(agent_id, 0)
             prompt_values = agent_prompt_tokens.get(agent_id, [])
+            prompt_trimmed_values = agent_prompt_trimmed_tokens.get(agent_id, [])
             output_values = agent_output_tokens.get(agent_id, [])
             max_response_values = agent_max_response_tokens.get(agent_id, [])
             metrics[f"workflow/code/agent/{agent_id}/call_count"] = float(count)
             metrics[f"workflow/code/agent/{agent_id}/format_legal_rate"] = float(legal_count / max(1, count))
+            metrics[f"workflow/code/agent/{agent_id}/format_penalty_exempt_rate"] = float(
+                penalty_exempt_count / max(1, count)
+            )
             metrics[f"workflow/code/agent/{agent_id}/max_response_tokens_mean"] = (
                 float(sum(max_response_values) / max(1, len(max_response_values))) if max_response_values else 0.0
             )
@@ -715,6 +827,19 @@ class CodeIterativeWorkflowRunner(TraceWorkflowRunner):
             )
             metrics[f"workflow/code/agent/{agent_id}/prompt_tokens_max"] = (
                 float(max(prompt_values)) if prompt_values else 0.0
+            )
+            metrics[f"workflow/code/agent/{agent_id}/prompt_trimmed_tokens_mean"] = (
+                float(sum(prompt_trimmed_values) / max(1, len(prompt_trimmed_values)))
+                if prompt_trimmed_values
+                else 0.0
+            )
+            metrics[f"workflow/code/agent/{agent_id}/prompt_trimmed_tokens_max"] = (
+                float(max(prompt_trimmed_values)) if prompt_trimmed_values else 0.0
+            )
+            metrics[f"workflow/code/agent/{agent_id}/prompt_trimmed_rate"] = (
+                float(sum(1 for value in prompt_trimmed_values if value > 0) / max(1, len(prompt_trimmed_values)))
+                if prompt_trimmed_values
+                else 0.0
             )
             metrics[f"workflow/code/agent/{agent_id}/output_tokens_mean"] = (
                 float(sum(output_values) / max(1, len(output_values))) if output_values else 0.0

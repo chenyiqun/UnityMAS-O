@@ -181,6 +181,18 @@ class TraceWorkflowRunner(WorkflowRunner):
         s = re.sub(r"\{([a-zA-Z0-9_.]+)\}", repl, s)
         return s.replace("\0L", "{").replace("\0R", "}")
 
+    def _prepare_prompt_context(
+        self,
+        node_id: str,
+        node_cfg,
+        prompt_context: dict[str, Any],
+    ) -> tuple[dict[str, Any], int]:
+        del node_id, node_cfg
+        return dict(prompt_context), 0
+
+    def _preserve_prompt_suffix_on_truncation(self) -> bool:
+        return False
+
     @staticmethod
     def _dict_lookup(value: Any, dotted: str) -> Any:
         cur = value
@@ -330,10 +342,18 @@ class TraceWorkflowRunner(WorkflowRunner):
             return self._count_tokens(self._as_template_value(messages))
 
     def _truncate_prompt_for_inference(self, prompt_text: str) -> tuple[str, int]:
-        tokenizer = getattr(self.trainer, "tokenizer", None)
         max_tokens = int(self.per_infer_prompt_max_tokens)
-        if tokenizer is None or max_tokens <= 0:
+        if max_tokens <= 0:
             return prompt_text, 0
+        if self._preserve_prompt_suffix_on_truncation():
+            return self._truncate_text_head_tail(
+                prompt_text,
+                max_tokens,
+                marker="\n...[prompt middle truncated]...\n",
+            )
+        tokenizer = getattr(self.trainer, "tokenizer", None)
+        if tokenizer is None:
+            return prompt_text[:max_tokens], max(0, len(prompt_text) - max_tokens)
         try:
             token_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         except TypeError:
@@ -342,13 +362,64 @@ class TraceWorkflowRunner(WorkflowRunner):
             return prompt_text, 0
         if not isinstance(token_ids, list) or len(token_ids) <= max_tokens:
             return prompt_text, 0
-        kept_ids = token_ids[:max_tokens]
         try:
-            return tokenizer.decode(kept_ids, skip_special_tokens=True), int(len(token_ids) - len(kept_ids))
+            return tokenizer.decode(token_ids[:max_tokens], skip_special_tokens=True), len(token_ids) - max_tokens
         except TypeError:
-            return tokenizer.decode(kept_ids), int(len(token_ids) - len(kept_ids))
+            return tokenizer.decode(token_ids[:max_tokens]), len(token_ids) - max_tokens
         except Exception:
             return prompt_text, 0
+
+    def _truncate_text_head_tail(self, text: str, max_tokens: int, marker: str) -> tuple[str, int]:
+        text = str(text or "")
+        max_tokens = max(0, int(max_tokens))
+        tokenizer = getattr(self.trainer, "tokenizer", None)
+        if tokenizer is None:
+            if len(text) <= max_tokens:
+                return text, 0
+            if max_tokens <= 0:
+                return "", len(text)
+            content_budget = max(0, max_tokens - len(marker))
+            head_keep = (content_budget + 1) // 2
+            tail_keep = content_budget - head_keep
+            tail = text[-tail_keep:] if tail_keep > 0 else ""
+            return text[:head_keep] + marker[: max_tokens - content_budget] + tail, len(text) - content_budget
+        try:
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+        except TypeError:
+            token_ids = tokenizer.encode(text)
+        except Exception:
+            return text, 0
+        if not isinstance(token_ids, list) or len(token_ids) <= max_tokens:
+            return text, 0
+        if max_tokens <= 0:
+            return "", len(token_ids)
+        try:
+            marker_ids = tokenizer.encode(marker, add_special_tokens=False)
+        except TypeError:
+            marker_ids = tokenizer.encode(marker)
+        except Exception:
+            marker_ids = []
+        marker_tokens = len(marker_ids) if isinstance(marker_ids, list) else 0
+        if marker_tokens >= max_tokens and isinstance(marker_ids, list):
+            try:
+                truncated_marker = tokenizer.decode(marker_ids[:max_tokens], skip_special_tokens=True)
+            except TypeError:
+                truncated_marker = tokenizer.decode(marker_ids[:max_tokens])
+            except Exception:
+                truncated_marker = marker[:max_tokens]
+            return truncated_marker, len(token_ids)
+        content_budget = max(0, max_tokens - marker_tokens)
+        head_keep = (content_budget + 1) // 2
+        tail_keep = content_budget - head_keep
+        try:
+            head = tokenizer.decode(token_ids[:head_keep], skip_special_tokens=True) if head_keep > 0 else ""
+            tail = tokenizer.decode(token_ids[-tail_keep:], skip_special_tokens=True) if tail_keep > 0 else ""
+        except TypeError:
+            head = tokenizer.decode(token_ids[:head_keep]) if head_keep > 0 else ""
+            tail = tokenizer.decode(token_ids[-tail_keep:]) if tail_keep > 0 else ""
+        except Exception:
+            return text, 0
+        return head + marker + tail, int(len(token_ids) - content_budget)
 
     def _build_truncated_chat_prompt(self, prompt_text: str) -> tuple[list[dict], int, int]:
         """Build a one-message chat prompt whose templated token length fits rollout.prompt_length."""
@@ -377,14 +448,32 @@ class TraceWorkflowRunner(WorkflowRunner):
         best_text = ""
         best_keep = 0
         best_len = 0
+        truncation_marker = "\n...[prompt middle truncated]...\n"
+        preserve_suffix = self._preserve_prompt_suffix_on_truncation()
         while lo <= hi:
             mid = (lo + hi) // 2
             try:
-                candidate = tokenizer.decode(content_ids[:mid], skip_special_tokens=True)
+                if preserve_suffix:
+                    head_keep = (2 * mid + 2) // 3
+                    tail_keep = mid - head_keep
+                    head = tokenizer.decode(content_ids[:head_keep], skip_special_tokens=True) if head_keep > 0 else ""
+                    tail = tokenizer.decode(content_ids[-tail_keep:], skip_special_tokens=True) if tail_keep > 0 else ""
+                    candidate = head + truncation_marker + tail
+                else:
+                    candidate = tokenizer.decode(content_ids[:mid], skip_special_tokens=True)
             except TypeError:
-                candidate = tokenizer.decode(content_ids[:mid])
+                if preserve_suffix:
+                    head_keep = (2 * mid + 2) // 3
+                    tail_keep = mid - head_keep
+                    head = tokenizer.decode(content_ids[:head_keep]) if head_keep > 0 else ""
+                    tail = tokenizer.decode(content_ids[-tail_keep:]) if tail_keep > 0 else ""
+                    candidate = head + truncation_marker + tail
+                else:
+                    candidate = tokenizer.decode(content_ids[:mid])
             except Exception:
-                candidate = str(prompt_text or "")
+                truncated, trimmed = self._truncate_prompt_for_inference(prompt_text)
+                messages = [{"role": "user", "content": truncated}]
+                return messages, trimmed, self._count_chat_tokens(messages)
             candidate_messages = [{"role": "user", "content": candidate}]
             candidate_len = self._count_chat_tokens(candidate_messages)
             if candidate_len <= max_tokens:
@@ -523,8 +612,13 @@ class TraceWorkflowRunner(WorkflowRunner):
         state_after: Any = None,
         extra_meta: Optional[dict[str, Any]] = None,
     ) -> WorkflowExecutionRecord:
-        prompt_text = self._render_template(str(node_cfg.get("prompt_template", "{question}")), prompt_context)
-        raw_messages, trimmed_tokens, prompt_tokens = self._build_truncated_chat_prompt(prompt_text)
+        prepared_context, context_trimmed_tokens = self._prepare_prompt_context(
+            node_id,
+            node_cfg,
+            prompt_context,
+        )
+        prompt_text = self._render_template(str(node_cfg.get("prompt_template", "{question}")), prepared_context)
+        raw_messages, fallback_trimmed_tokens, prompt_tokens = self._build_truncated_chat_prompt(prompt_text)
         model_id = str(node_cfg["model_id"])
         agent_id = str(node_cfg.get("agent_id", node_id))
         prompt_batch = self.trainer._build_workflow_prompt_batch(
@@ -549,14 +643,21 @@ class TraceWorkflowRunner(WorkflowRunner):
             _, thin, _, timing_info = await rollout_coro
         action_text_vec = thin.non_tensor_batch.get("action_text", np.array([], dtype=object))
         raw_text = str(action_text_vec[0]) if len(action_text_vec) > 0 else ""
+        action_token_count_vec = thin.non_tensor_batch.get("action_token_count", np.array([], dtype=np.int64))
+        if len(action_token_count_vec) > 0 and int(action_token_count_vec[0]) >= 0:
+            output_tokens = int(action_token_count_vec[0])
+        else:
+            output_tokens = int(self._count_tokens(raw_text))
         parsed_value, format_reward = self._parse_llm_output(raw_text, node_cfg)
         meta = dict(extra_meta or {})
         meta["format_reward"] = float(format_reward)
         meta["format_weight"] = float(dict(node_cfg.get("reward", {})).get("format_weight", 0.0))
         meta["prompt_tokens"] = int(prompt_tokens)
-        meta["output_tokens"] = int(self._count_tokens(raw_text))
+        meta["output_tokens"] = output_tokens
         meta["max_response_tokens"] = int(max_response_tokens)
-        meta["prompt_trimmed_tokens"] = int(trimmed_tokens)
+        meta["prompt_context_trimmed_tokens"] = int(context_trimmed_tokens)
+        meta["prompt_fallback_trimmed_tokens"] = int(fallback_trimmed_tokens)
+        meta["prompt_trimmed_tokens"] = int(context_trimmed_tokens + fallback_trimmed_tokens)
         meta["timing"] = {
             str(k): float(v)
             for k, v in dict(timing_info or {}).items()

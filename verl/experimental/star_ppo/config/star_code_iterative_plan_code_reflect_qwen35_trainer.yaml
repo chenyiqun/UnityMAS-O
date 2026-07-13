@@ -170,9 +170,6 @@ star:
           /no_think
           You are the Planner agent in an iterative multi-agent coding workflow.
 
-          Critical output rule for Qwen3.5:
-          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only the final concise implementation pseudocode inside the required tags. The pseudocode must be an action plan for the Coder, not a transcript of your reasoning.
-
           Original problem/task:
           {original_problem}
 
@@ -189,26 +186,14 @@ star:
           {global_state_text}
 
           Task:
-          Produce only the useful pseudocode for turn {turn_number} of {max_turns}. Use the problem, execution mode, visible tests, previous code, verification errors, and reflections in the global state to improve the plan.
-
-          Content constraints:
-          - Include input parsing or function arguments only when needed.
-          - Include the core algorithm, edge cases, and output/return formatting.
-          - Prefer short numbered or bullet steps.
-          - Do not restate the full problem.
-          - Do not include analysis, proof, derivations, alternatives, failed attempts, uncertainty, confidence statements, or explanations of why the algorithm works.
-          - Do not write self-correction text such as "wait", "actually", "maybe", "we need to think", "let's reason", "refined algorithm", or similar reasoning traces.
-          - Do not include prose that the Coder would be tempted to copy into Python comments.
-          - Inside the <pseudocode> tags, include only pseudocode that the next Coder can directly implement.
-          - Inside the <pseudocode> tags, do not include chain-of-thought, meta commentary, apologies, uncertainty, rationale, examples, tests, Markdown, commentary, or any text unrelated to the final implementable pseudocode itself.
+          Produce the pseudocode for turn {turn_number} of {max_turns}. Use the problem, execution mode, visible tests, previous code, verification errors, and reflections in the global state to improve the plan. Be concrete about input parsing or function arguments, algorithm, edge cases, and output/return formatting.
+          Keep the pseudocode concise; avoid restating the full problem or previous code.
 
           Output strictly in this format only:
           <pseudocode>
-          concise pseudocode here
+          your pseudocode here
           </pseudocode>
 
-          The first non-whitespace characters must be <pseudocode>.
-          The last non-whitespace characters must be </pseudocode>.
           Do not output anything outside the pseudocode tags.
       coder:
         model_id: coder_llm
@@ -222,9 +207,6 @@ star:
         prompt_template: |
           /no_think
           You are the Coder agent in an iterative multi-agent coding workflow.
-
-          Critical output rule for Qwen3.5:
-          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain the code. Output only the final Python source code inside the required tags. Do not put reasoning into Python comments or docstrings.
 
           Original problem/task:
           {original_problem}
@@ -251,16 +233,6 @@ star:
           {coder_task_instruction}
           Use the original problem, current pseudocode, visible tests, and any previous reflections/errors from the global state.
 
-          Coding constraints:
-          - Return complete runnable Python source code.
-          - Keep the implementation compact.
-          - Do not include comments or docstrings.
-          - Do not include explanatory comments, reasoning comments, planning comments, proof comments, TODO notes, sample-run comments, copied pseudocode comments, or alternative-solution comments.
-          - Do not write self-correction text such as "wait", "actually", "maybe", "refined algorithm", or similar reasoning, even inside Python comments.
-          - Do not include prose, reasoning, tests, examples, or Markdown fences.
-          - Inside the <code> tags, include only Python source code required to solve the original problem.
-          - Inside the <code> tags, do not include chain-of-thought, explanations, pseudocode, natural-language discussion, sample runs, Markdown, comments, docstrings, or any text that is not required Python source code.
-
           Output strictly in this format only:
           <code>
           complete Python source code here
@@ -272,9 +244,9 @@ star:
           </code>
 
           Do not copy the example logic. Solve the original problem.
-          The first non-whitespace characters must be <code>.
-          The last non-whitespace characters must be </code>.
+          Do not use Markdown fences such as ```python. Do not output explanations before or after the code tags.
           Your entire response must be exactly one <code>...</code> block.
+          Keep the implementation compact and avoid comments unless they are necessary for correctness.
       reflection:
         model_id: reflection_llm
         agent_id: reflection_agent
@@ -288,9 +260,6 @@ star:
           /no_think
           You are the Reflection agent in an iterative multi-agent coding workflow.
 
-          Critical output rule for Qwen3.5:
-          Do not reveal chain-of-thought, hidden reasoning, analysis, self-talk, deliberation, or step-by-step exploration. Do not write Markdown. Do not explain your process. Output only concise debugging guidance inside the required tags. You are not the Coder: do not rewrite the full solution and do not output a <code> block.
-
           Original problem/task:
           {original_problem}
 
@@ -303,7 +272,7 @@ star:
           Visible tests:
           {visible_tests}
 
-          Global state, including the current failed or partial attempt:
+          Global state from previous completed turns:
           {global_state_text}
 
           Current turn pseudocode:
@@ -322,29 +291,12 @@ star:
           {current_error}
 
           Task:
-          Give only actionable debugging guidance for the next Planner and Coder. Your job is to diagnose the current failed or partial attempt, not to solve the problem from scratch.
-          Provide exactly these three short items:
-          1. Bug: the most likely concrete cause of the current failure.
-          2. Fix: the minimal algorithm or implementation change the next Coder should make.
-          3. Edge cases: only the specific edge cases the next attempt must cover, if any.
-
-          Content constraints:
-          - Keep it short and concrete.
-          - Do not repeat the full problem.
-          - Do not repeat the full code.
-          - Do not write complete code, code blocks, Python source, pseudocode for a full solution, tests, examples, or sample runs.
-          - Do not include chain-of-thought, long derivations, proof, alternatives, failed attempts, uncertainty, confidence statements, or broad reasoning.
-          - Do not write self-correction text such as "wait", "actually", "maybe", "let's reason", "we need to think", or similar reasoning traces.
-          - Inside the <reflection> tags, include only the three requested short items for the next fix.
-          - Inside the <reflection> tags, do not include chain-of-thought, broad reasoning, meta commentary, summaries of the whole problem, copied code, Markdown, <code> tags, or any text unrelated to the next fix.
+          Give actionable debugging guidance for the next Planner and Coder. Identify the likely root cause, the exact code or algorithm change needed, and any edge cases to handle. Stay specific and concise.
+          Limit the reflection to the minimum concrete fix; do not repeat the full code or problem.
 
           Output strictly in this format only:
           <reflection>
-          Bug: concise diagnosis
-          Fix: concise next change
-          Edge cases: concise edge cases or none
+          your reflection here
           </reflection>
 
-          The first non-whitespace characters must be <reflection>.
-          The last non-whitespace characters must be </reflection>.
           Do not output anything outside the reflection tags.
