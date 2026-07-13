@@ -26,11 +26,23 @@ class HttpRetrieverTool(RetrieverToolInterface):
     def __init__(self, api_urls: list[str], timeout_seconds: float = 5.0):
         if not api_urls:
             raise ValueError("api_urls list cannot be empty")
-        expanded_urls: list[str] = []
+        primary_urls: list[str] = []
+        fallback_urls: list[str] = []
         for raw_url in api_urls:
-            expanded_urls.extend(self._expand_candidate_urls(str(raw_url)))
-        # keep order, remove duplicates
-        self.api_urls = list(dict.fromkeys(expanded_urls))
+            expanded = self._expand_candidate_urls(str(raw_url))
+            if not expanded:
+                continue
+            # Keep explicitly configured endpoints (or the conventional
+            # /retrieve expansion for a base URL) ahead of compatibility paths.
+            # This is especially important when endpoint randomization is enabled:
+            # load-balance over real retriever replicas before probing /query or
+            # /search fallbacks that commonly return 404.
+            primary_urls.append(expanded[0])
+            fallback_urls.extend(expanded[1:])
+        self.primary_api_urls = list(dict.fromkeys(primary_urls))
+        primary_url_set = set(self.primary_api_urls)
+        self.fallback_api_urls = [url for url in dict.fromkeys(fallback_urls) if url not in primary_url_set]
+        self.api_urls = self.primary_api_urls + self.fallback_api_urls
         if len(self.api_urls) == 0:
             raise ValueError("api_urls must contain at least one valid URL")
         self.timeout_seconds = float(timeout_seconds)
@@ -164,24 +176,32 @@ class HttpRetrieverTool(RetrieverToolInterface):
         if len(normalized_questions) == 0:
             return []
 
+        max_attempts = int(max_attempts)
+        if max_attempts <= 0:
+            raise ValueError(f"max_attempts must be positive, got {max_attempts}")
+
         payload_candidates = [
             {"questions": normalized_questions, "N": int(N)},
             {"queries": normalized_questions, "topk": int(N), "return_scores": False},
         ]
         last_error = ""
-        attempts = 0
+        endpoint_attempts = 0
 
-        while attempts < max_attempts:
+        while endpoint_attempts < max_attempts:
             with self._state_lock:
                 preferred = self._preferred_url
                 bad_404 = set(self._bad_urls_404)
 
             if self.randomize_api_urls:
-                candidate_urls = [url for url in self.api_urls if url not in bad_404]
+                primary_urls = [url for url in self.primary_api_urls if url not in bad_404]
+                fallback_urls = [url for url in self.fallback_api_urls if url not in bad_404]
                 # If all urls were marked bad (e.g. service updated), allow re-probing.
-                if len(candidate_urls) == 0:
-                    candidate_urls = list(self.api_urls)
-                random.shuffle(candidate_urls)
+                if len(primary_urls) + len(fallback_urls) == 0:
+                    primary_urls = list(self.primary_api_urls)
+                    fallback_urls = list(self.fallback_api_urls)
+                random.shuffle(primary_urls)
+                random.shuffle(fallback_urls)
+                candidate_urls = primary_urls + fallback_urls
             else:
                 candidate_urls = []
                 if preferred and preferred not in bad_404:
@@ -196,7 +216,13 @@ class HttpRetrieverTool(RetrieverToolInterface):
                 if len(candidate_urls) == 0:
                     candidate_urls = list(self.api_urls)
 
+            if len(candidate_urls) == 0:
+                break
+
             for api_url in candidate_urls:
+                if endpoint_attempts >= max_attempts:
+                    break
+                endpoint_attempts += 1
                 for payload in payload_candidates:
                     try:
                         data = self._post_json(api_url, payload, timeout_seconds=self.timeout_seconds)
@@ -213,17 +239,27 @@ class HttpRetrieverTool(RetrieverToolInterface):
                             f"url={api_url}, payload_keys={list(payload.keys())}, "
                             f"err={type(e).__name__}: {e}"
                         )
+                        if int(getattr(e, "code", 0)) == 404:
+                            break
                         continue
-                    except (error.URLError, TimeoutError, ValueError, json.JSONDecodeError) as e:
+                    except (error.URLError, TimeoutError) as e:
                         last_error = (
                             f"url={api_url}, payload_keys={list(payload.keys())}, "
                             f"err={type(e).__name__}: {e}"
                         )
+                        # Connectivity errors are independent of request schema;
+                        # avoid sending the second payload to the same dead endpoint.
+                        break
+                    except ValueError as e:
+                        last_error = (
+                            f"url={api_url}, payload_keys={list(payload.keys())}, "
+                            f"err={type(e).__name__}: {e}"
+                        )
+                        # A server may accept only one of the two supported schemas.
                         continue
-            attempts += 1
 
         suffix = f", last_error: {last_error}" if last_error else ""
-        raise RuntimeError(f"Request failed after {max_attempts} attempts{suffix}")
+        raise RuntimeError(f"Request failed after {endpoint_attempts} endpoint attempts{suffix}")
 
     def retrieve(self, query: str, top_k: int) -> list[str]:
         docs = self.query(question=query, N=top_k)

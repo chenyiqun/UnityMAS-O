@@ -196,7 +196,7 @@ class MAskIterativeContextBuilder:
             query = cls._clean_text(decision.get("query"))
             if action != "search" or not query:
                 continue
-            summary_node = nodes.get(f"summarize_{turn}")
+            summary_node = nodes.get(f"summary_{turn}")
             summary_text = cls._extract_summary_text(summary_node)
             history_rows.append((turn, action, query, summary_text))
 

@@ -72,7 +72,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
 
         q_matches = re.findall(r"<q(\d+)>(.*?)</q\1>", raw, re.DOTALL | re.IGNORECASE)
         a_matches = re.findall(r"<a(\d+)>(.*?)</a\1>", raw, re.DOTALL | re.IGNORECASE)
-        final_match = re.search(r"<final_answer>(.*?)</final_answer>", raw, re.DOTALL | re.IGNORECASE)
+        final_matches = re.findall(r"<final_answer>(.*?)</final_answer>", raw, re.DOTALL | re.IGNORECASE)
 
         q_dict = {int(idx): str(text).strip() for idx, text in q_matches}
         a_dict = {int(idx): str(text).strip() for idx, text in a_matches}
@@ -90,7 +90,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
         if not thinking_trajectory:
             thinking_trajectory = [{"step_id": "tau1", "sub_question": question, "sub_answer": "unkown"}]
 
-        final_answer = str(final_match.group(1)).strip() if final_match else ""
+        final_answer = str(final_matches[0]).strip() if final_matches else ""
         if not final_answer:
             final_answer = str(thinking_trajectory[-1]["sub_answer"] or "unkown").strip() or "unkown"
 
@@ -100,19 +100,35 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             re.DOTALL | re.IGNORECASE,
         )
         reconstructed = "".join(allowed_segments)
-        is_legal = bool(q_matches or a_matches) and bool(final_match)
+        pair_count = len(indices)
+        expected_indices = set(range(1, pair_count + 1))
+        is_legal = (
+            1 <= pair_count <= 5
+            and len(final_matches) == 1
+            and bool(final_answer)
+            and set(q_dict) == expected_indices
+            and set(a_dict) == expected_indices
+            and len(q_matches) == pair_count
+            and len(a_matches) == pair_count
+            and all(q_dict[idx] for idx in expected_indices)
+            and all(a_dict[idx] for idx in expected_indices)
+        )
         if re.sub(r"\s+", "", raw) != re.sub(r"\s+", "", reconstructed):
-            is_legal = False
-        if len(thinking_trajectory) > 5:
             is_legal = False
         questions = [str(item.get("sub_question", "")).strip() for item in thinking_trajectory]
         if len(set(questions)) < len(questions):
             is_legal = False
-        expected_tags = []
-        for idx in indices:
+        expected_tags: list[tuple[str, str]] = []
+        for idx in range(1, pair_count + 1):
             expected_tags.extend([("q", str(idx)), ("a", str(idx))])
-        actual_tags = re.findall(r"<\s*(q|a)(\d+)\s*>", raw, re.IGNORECASE)
-        if actual_tags and expected_tags and actual_tags[: len(expected_tags)] != expected_tags:
+        expected_tags.append(("final_answer", ""))
+        actual_tags: list[tuple[str, str]] = []
+        for match in re.finditer(r"<(q|a)(\d+)>|<(final_answer)>", raw, re.IGNORECASE):
+            if match.group(3):
+                actual_tags.append(("final_answer", ""))
+            else:
+                actual_tags.append((str(match.group(1)).lower(), str(match.group(2))))
+        if actual_tags != expected_tags:
             is_legal = False
 
         state = {
@@ -131,6 +147,11 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
         if re.fullmatch(r"<end\s*/?>", raw, re.IGNORECASE):
             return {"action": "end", "query": ""}, True
 
+        # A malformed stop action must not be converted into a retriever query such
+        # as "end extra". Stop safely, but retain the invalid format signal.
+        if re.search(r"<end\s*/?>", raw, re.IGNORECASE):
+            return {"action": "end", "query": ""}, False
+
         search_tags = re.findall(r"<search>(.*?)</search>", raw, re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r"<search>.*?</search>", "", raw, flags=re.DOTALL | re.IGNORECASE)
         cleaned = re.sub(r"<end\s*/?>", "", cleaned, flags=re.IGNORECASE)
@@ -139,8 +160,11 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             query = str(search_tags[0]).strip()
             if query:
                 return {"action": "search", "query": query}, is_legal
+            # Do not call the retriever with an empty or tag-only query.
+            return {"action": "end", "query": ""}, False
 
         snippet = raw.split("\n")[0][:200]
+        snippet = re.sub(r"</?(?:search|end)[^>]*>", " ", snippet, flags=re.IGNORECASE)
         snippet = re.sub(r"[^a-zA-Z0-9\u4e00-\u9fa5\s]", " ", snippet)
         snippet = re.sub(r"\s+", " ", snippet).strip()
         if snippet:
@@ -236,9 +260,10 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
             target = str(update_tags[0]).strip()
             valid_targets = {f"t{i + 1}" for i in range(len(trajectory))}
             if target not in valid_targets:
-                is_legal = False
-            updated_state = self._apply_update_action(prev_state, query, evidence, "update", target if target else next_target)
-            return {"operation": "update", "target_step": target or next_target, "knowledge_state": updated_state}, is_legal
+                updated_state = self._apply_update_action(prev_state, query, evidence, "add", next_target)
+                return {"operation": "add", "target_step": next_target, "knowledge_state": updated_state}, False
+            updated_state = self._apply_update_action(prev_state, query, evidence, "update", target)
+            return {"operation": "update", "target_step": target, "knowledge_state": updated_state}, is_legal
 
         if add_tags:
             target = str(add_tags[0]).strip()
@@ -488,7 +513,7 @@ class MAskIterativeWorkflowRunner(TraceWorkflowRunner):
                 current_state=current_state,
                 turn_id=turn_id,
                 search_query=search_record.parsed_output.get("query", ""),
-                evidence_summary=summary_record.parsed_output,
+                evidence_summary=summary_record.parsed_output.get("summary", "No useful information"),
                 next_step_target=f"t{len(prev_state.get('thinking_trajectory', [])) + 1}",
             )
             update_record = await self._execute_llm_step(
