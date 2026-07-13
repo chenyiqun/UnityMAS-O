@@ -55,6 +55,8 @@ actor_rollout_ref:
     engine_kwargs:
       vllm:
         disable_custom_all_reduce: ${oc.decode:${oc.env:ROLLOUT_DISABLE_CUSTOM_ALL_REDUCE,true}}
+        attention_config:
+          flash_attn_version: ${oc.decode:${oc.env:ROLLOUT_VLLM_FLASH_ATTN_VERSION,null}}
     checkpoint_engine:
       update_weights_bucket_megabytes: ${oc.decode:${oc.env:ROLLOUT_UPDATE_WEIGHTS_BUCKET_MB,3072}}
     log_prob_micro_batch_size_per_gpu: ${oc.decode:${oc.env:ROLLOUT_LOGPROB_MICRO_BATCH_SIZE_PER_GPU,2}}

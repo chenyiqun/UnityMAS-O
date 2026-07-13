@@ -62,6 +62,14 @@ export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
 if [[ "${CONFIG_NAME}" == star_code_* ]]; then
   export ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-16384}"
+  if python3 -c 'import os, sys; paths = " ".join(os.environ.get(k, "") for k in ("AGENT_MODEL_PATH", "ACTOR_MODEL_PATH", "PLANNER_MODEL_PATH", "CODER_MODEL_PATH", "REFLECTION_MODEL_PATH", "SHARED_MODEL_PATH")); sys.exit(0 if "Qwen3-32B" in paths and not os.environ.get("ROLLOUT_VLLM_FLASH_ATTN_VERSION") else 1)' >/dev/null 2>&1; then
+    # vLLM FlashAttention 3 on Hopper can fail inside the TMA descriptor
+    # setup under long, concurrent Qwen3 rollouts, which kills the whole
+    # EngineCore. FA2 avoids that kernel path. An explicit user value (for
+    # example 3 after upgrading to a fixed vLLM build) always wins.
+    echo "[common/run_per_node] setting ROLLOUT_VLLM_FLASH_ATTN_VERSION=2 for Qwen3-32B rollout stability; set ROLLOUT_VLLM_FLASH_ATTN_VERSION explicitly to override"
+    export ROLLOUT_VLLM_FLASH_ATTN_VERSION=2
+  fi
   if python3 -c 'import os, sys; sys.exit(0 if float(os.environ["ROLLOUT_GPU_MEMORY_UTILIZATION"]) > float(os.environ["STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP"]) else 1)' >/dev/null 2>&1; then
     echo "[common/run_per_node] lowering ROLLOUT_GPU_MEMORY_UTILIZATION=${ROLLOUT_GPU_MEMORY_UTILIZATION} to STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP=${STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP} for code workflow"
     export ROLLOUT_GPU_MEMORY_UTILIZATION="${STAR_CODE_ROLLOUT_GPU_MEMORY_UTILIZATION_CAP}"

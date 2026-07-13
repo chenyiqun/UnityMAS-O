@@ -52,6 +52,24 @@ class TestBuildCliArgsFromConfig:
         result = build_cli_args_from_config(config)
         assert result == []
 
+    def test_bool_false_with_explicit_negative_option(self):
+        """Bool False uses the supplied negative flag when omission is ambiguous."""
+        config = {"enable_prefix_caching": False}
+        result = build_cli_args_from_config(
+            config,
+            explicit_false_options={"enable_prefix_caching": "no-enable-prefix-caching"},
+        )
+        assert result == ["--no-enable-prefix-caching"]
+
+    def test_bool_true_ignores_explicit_negative_option(self):
+        """Bool True keeps the positive flag even when a negative flag is known."""
+        config = {"enable_prefix_caching": True}
+        result = build_cli_args_from_config(
+            config,
+            explicit_false_options={"enable_prefix_caching": "no-enable-prefix-caching"},
+        )
+        assert result == ["--enable_prefix_caching"]
+
     def test_none_value(self):
         """None values are skipped."""
         config = {"lora-path": None}

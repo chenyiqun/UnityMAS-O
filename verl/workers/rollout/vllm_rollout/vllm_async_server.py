@@ -241,6 +241,21 @@ class vLLMHttpServer:
             compilation_config = json.loads(compilation_config)
         compilation_config.setdefault("cudagraph_mode", "FULL_AND_PIECEWISE")
 
+        attention_config = engine_kwargs.pop("attention_config", None)
+        if isinstance(attention_config, str):
+            attention_config = json.loads(attention_config)
+        if attention_config is not None:
+            # OmegaConf may leave nested engine kwargs as DictConfig even
+            # though RolloutConfig.engine_kwargs itself is a plain dict.
+            attention_config = dict(attention_config)
+            # Do not emit an otherwise empty --attention-config when all
+            # optional Hydra values resolve to null. This keeps the default
+            # path identical for models that do not request a specific
+            # attention implementation.
+            attention_config = {key: val for key, val in attention_config.items() if val is not None}
+            if not attention_config:
+                attention_config = None
+
         # FULL cuda graph is not yet supported with DCP, downgrade to PIECEWISE
         dcp_size = engine_kwargs.get("decode_context_parallel_size", 1) or 1
         if dcp_size > 1 and compilation_config["cudagraph_mode"] == "FULL_AND_PIECEWISE":
@@ -276,6 +291,7 @@ class vLLMHttpServer:
             "hf_overrides": hf_overrides,
             "scheduling_policy": self.config.scheduling_policy,
             "compilation_config": compilation_config,
+            "attention_config": attention_config,
             **engine_kwargs,
         }
 
@@ -359,7 +375,14 @@ class vLLMHttpServer:
         if self.config.enable_rollout_routing_replay:
             args.update({"enable_return_routed_experts": True})
 
-        server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(args)
+        # vLLM 0.18 enables prefix caching by default. Omitting a False boolean
+        # therefore turns the feature back on even when the verl config says it
+        # is disabled. Pass the parser's negative flag explicitly so the
+        # resolved vLLM engine config matches the rollout config.
+        server_args = ["serve", self.model_config.local_path] + build_cli_args_from_config(
+            args,
+            explicit_false_options={"enable_prefix_caching": "no-enable-prefix-caching"},
+        )
 
         if self.replica_rank == 0:
             pprint(server_args)

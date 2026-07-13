@@ -318,14 +318,18 @@ class SuppressSignalInThread:
         signal.signal = self.original_signal
 
 
-def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
+def build_cli_args_from_config(
+    config: dict[str, Any],
+    *,
+    explicit_false_options: Optional[dict[str, str]] = None,
+) -> list[str]:
     """
     Convert a config dictionary to CLI arguments for vLLM server.
 
     Handles different value types appropriately:
     - None: skipped
     - bool True: adds '--key'
-    - bool False: skipped
+    - bool False: skipped unless the option has an explicit negative CLI flag
     - list: expands to '--key item1 item2 ...'
     - empty list: skipped (vLLM uses nargs="+" which requires at least one value)
     - dict: JSON serialized
@@ -333,17 +337,25 @@ def build_cli_args_from_config(config: dict[str, Any]) -> list[str]:
 
     Args:
         config: Dictionary of configuration key-value pairs
+        explicit_false_options: Optional mapping from a config key to the
+            corresponding negative CLI flag. This is needed for vLLM boolean
+            options whose default can change across releases, for example
+            ``enable_prefix_caching=False`` must be serialized as
+            ``--no-enable-prefix-caching`` instead of being omitted.
 
     Returns:
         List of CLI argument strings
     """
     cli_args = []
+    explicit_false_options = explicit_false_options or {}
     for k, v in config.items():
         if v is None:
             continue
         if isinstance(v, bool):
             if v:
                 cli_args.append(f"--{k}")
+            elif negative_flag := explicit_false_options.get(k):
+                cli_args.append(f"--{negative_flag}")
         elif isinstance(v, list):
             if not v:
                 # Skip empty lists - vLLM uses nargs="+" which requires at least one value
