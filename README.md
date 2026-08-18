@@ -1,3 +1,5 @@
+
+
 # UnityMAS-O
 
 Chinese version: [README.zh.md](README.zh.md)
@@ -339,7 +341,7 @@ Important switches:
 - `CODE_MAX_TURNS`: maximum number of plan-code-verify-reflect turns.
 - `CODE_STOP_ON_ALL_PASSED`: stop early once all verifier tests pass.
 - `CODE_VERIFY_TIMEOUT_SECONDS`: timeout for one code execution.
-- `CODE_VERIFIER_FAIL_OPEN=false`: whether verifier failures should be treated as pass-through. For code training, `false` is usually preferred.
+- `CODE_VERIFIER_FAIL_OPEN=false`: whether verifier failures should be treated as pass-through; `false` disables pass-through, so verifier failures are not counted as passing. For code training, `false` is usually preferred.
 - `STAR_PER_INFER_PROMPT_MAX_TOKENS`: truncation limit for each agent prompt.
 
 ## Example 2: M-ASK Iterative Search, Four Model Groups
